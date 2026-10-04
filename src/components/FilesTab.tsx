@@ -8,6 +8,8 @@ import { readExplorerSectionState, toggleExplorerSection, writeExplorerSectionSt
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import type { ExplorerSection } from '../lib/explorer-section-state.mjs';
 import { findTextMatchRanges } from '../lib/text-match-ranges.mjs';
+import { formatStr } from '../lib/i18n.mjs';
+import { useStrings } from '../lib/lang';
 import { readFileSearchPreferences, writeFileSearchPreferences } from '../lib/file-search-preferences.mjs';
 import type { FileSearchPreferences } from '../lib/file-search-preferences.mjs';
 import { readFileSearchHistory, recordFileSearchQuery, writeFileSearchHistory } from '../lib/file-search-history.mjs';
@@ -68,6 +70,8 @@ const normalizePinnedPath = normalizePinnedFilePath;
 // Files tab: folder picker + changed files + file tree.
 export default function FilesTab(props: Props) {
   const { folder, treeVersion, changedFiles, changedKinds, changedStaged, openFiles, recentFiles, activeFilePath, onOpenFile, onOpenFileAtLine, onOpenChanged, onRefreshChanged, onPickFolder } = props;
+  const strings = useStrings();
+  const ft = strings.files;
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
   const [commitBusy, setCommitBusy] = useState(false);
@@ -86,7 +90,7 @@ export default function FilesTab(props: Props) {
     const abs = `${folder}${folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\'}${file.replace(/\//g, '\\')}`;
     try {
       const result = await api().gitStage(folder, [abs], staged);
-      if (!result.ok) props.onNotice(result.error === 'OUTSIDE_WORKSPACE' ? '프로젝트 폴더 밖의 파일은 스테이징할 수 없어.' : result.error === 'GIT_NOT_FOUND' ? 'git 실행 파일을 찾지 못했어.' : result.error || '스테이징하지 못했어.');
+      if (!result.ok) props.onNotice(result.error === 'OUTSIDE_WORKSPACE' ? ft.stageOutside : result.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : result.error || ft.stageFailed);
       onRefreshChanged();
     } catch (error) {
       props.onNotice(error instanceof Error ? error.message : String(error));
@@ -96,7 +100,7 @@ export default function FilesTab(props: Props) {
   const submitCommit = async () => {
     const checked = normalizeCommitMessage(commitMessage);
     if (!checked.ok) {
-      setCommitError(checked.error === 'MESSAGE_TOO_LONG' ? '커밋 메시지가 너무 길어.' : '커밋 메시지를 입력해줘.');
+      setCommitError(checked.error === 'MESSAGE_TOO_LONG' ? ft.commitTooLong : ft.commitNeedMsg);
       return;
     }
     setCommitBusy(true);
@@ -107,7 +111,7 @@ export default function FilesTab(props: Props) {
         setCommitOpen(false);
         setCommitMessage('');
       } else {
-        setCommitError('커밋하지 못했어. 알림을 확인해줘.');
+        setCommitError(ft.commitFailed);
       }
     } finally {
       setCommitBusy(false);
@@ -129,14 +133,14 @@ export default function FilesTab(props: Props) {
 
   const doGitSync = async (op: 'pull' | 'push') => {
     if (!folder || !hasBridge() || gitSyncBusy) return;
-    const label = op === 'pull' ? '풀' : '푸시';
+    const label = op === 'pull' ? ft.syncPull : ft.syncPush;
     setGitSyncBusy(op);
     try {
       const r = op === 'pull' ? await api().gitPull(folder) : await api().gitPush(folder);
       if (!r.ok) {
-        props.onNotice(r.error === 'GIT_NOT_FOUND' ? 'git 실행 파일을 찾지 못했어.' : r.error === 'TIMEOUT' ? `${label} 시간이 초과됐어.` : (r.error || `${label}하지 못했어.`));
+        props.onNotice(r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error === 'TIMEOUT' ? formatStr(ft.syncTimeout, { label }) : (r.error || formatStr(ft.syncFailed, { label: label.toLowerCase() })));
       } else {
-        props.onNotice(op === 'pull' ? '가져왔어.' : '올렸어.');
+        props.onNotice(op === 'pull' ? ft.pulledOk : ft.pushedOk);
         onRefreshChanged();
       }
     } catch (error) {
@@ -151,7 +155,7 @@ export default function FilesTab(props: Props) {
     const url = cloneUrl.trim();
     const target = cloneTarget.trim();
     if (!url || !target) {
-      setCloneError('저장소 URL과 클론 폴더를 입력해줘.');
+      setCloneError(ft.cloneNeedBoth);
       return;
     }
     setCloneBusy(true);
@@ -159,13 +163,13 @@ export default function FilesTab(props: Props) {
     try {
       const r = await api().gitClone(url, target);
       if (!r.ok) {
-        setCloneError(r.error === 'TARGET_EXISTS' ? '이미 있는 폴더야. 다른 폴더를 지정해줘.' : r.error === 'NOT_A_DIRECTORY' ? '부모 폴더를 찾지 못했어.' : r.error === 'GIT_NOT_FOUND' ? 'git 실행 파일을 찾지 못했어.' : r.error === 'TIMEOUT' ? '클론 시간이 초과됐어.' : (r.error || '클론하지 못했어.'));
+        setCloneError(r.error === 'TARGET_EXISTS' ? ft.cloneTargetExists : r.error === 'NOT_A_DIRECTORY' ? ft.cloneNoParent : r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error === 'TIMEOUT' ? ft.cloneTimeout : (r.error || ft.cloneFailed));
         return;
       }
       setCloneOpen(false);
       setCloneUrl('');
       setCloneTarget('');
-      props.onNotice(`클론했어. (${r.path || target})`);
+      props.onNotice(formatStr(ft.clonedOk, { path: r.path || target }));
     } catch (error) {
       setCloneError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -198,7 +202,7 @@ export default function FilesTab(props: Props) {
       : [filePath, ...current].slice(0, 100);
     try { localStorage.setItem(pinnedFileStorageKey(folder), JSON.stringify(next)); } catch { /* preferences are optional */ }
     setPinnedState({ folder, paths: next });
-    props.onNotice(isPinned ? '즐겨찾기에서 뺐어.' : '파일을 즐겨찾기에 고정했어.');
+    props.onNotice(isPinned ? ft.unpinned : ft.pinned);
   };
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -322,13 +326,13 @@ export default function FilesTab(props: Props) {
             if (cancelled || result.error === 'CANCELLED') return;
             setSearchResults(result.ok ? result.matches || [] : []);
             setSearchTruncated(!!result.truncated);
-            setSearchError(result.ok ? '' : result.error || '내용 검색 실패');
+            setSearchError(result.ok ? '' : result.error || ft.contentSearchFailed);
           } else {
             const result = await api().searchFiles(folder, query, { include: searchPreferences.include, exclude: searchPreferences.exclude, scope: 'files-tab' });
             if (cancelled || result.error === 'CANCELLED') return;
             setSearchResults(result.ok ? result.files || [] : []);
             setSearchTruncated(!!result.truncated);
-            setSearchError(result.ok ? '' : result.error || '파일 검색 실패');
+            setSearchError(result.ok ? '' : result.error || ft.fileSearchFailed);
           }
         } catch (error) {
           if (cancelled) return;
@@ -415,7 +419,7 @@ export default function FilesTab(props: Props) {
     if (!entryDialog || entryDialogBusy) return;
     const name = entryDialog.name.trim();
     if (!name) {
-      setEntryDialogError('이름을 입력해줘.');
+      setEntryDialogError(ft.entryNeedName);
       entryNameRef.current?.focus();
       return;
     }
@@ -429,7 +433,7 @@ export default function FilesTab(props: Props) {
       if (entryDialog.mode === 'rename') {
         const renamed = await props.onRenameEntry(entryDialog.path, name);
         if (!renamed) {
-          setEntryDialogError('이름을 변경하지 못했어. 열린 파일이 수정 중인지 확인해줘.');
+          setEntryDialogError(ft.renameFailed);
           return;
         }
         const oldPath = entryDialog.path;
@@ -448,7 +452,7 @@ export default function FilesTab(props: Props) {
       if (entryDialog.mode === 'delete') {
         const deleted = await props.onDeleteEntry(entryDialog.path, !!entryDialog.isDir);
         if (!deleted) {
-          setEntryDialogError('항목을 휴지통으로 옮기지 못했어. 실행 중인 작업이나 수정 중인 파일이 있는지 확인해줘.');
+          setEntryDialogError(ft.trashFailed);
           return;
         }
         const nextPinned = removePinnedFilePaths(pinnedFiles, entryDialog.path, !!entryDialog.isDir);
@@ -466,10 +470,10 @@ export default function FilesTab(props: Props) {
       const result = await api().createEntry(entryDialog.path, name, kind);
       if (!result.ok || !result.path) {
         const message = result.error === 'ALREADY_EXISTS'
-          ? '같은 이름의 파일 또는 폴더가 이미 있어.'
+          ? ft.alreadyExists
           : result.error === 'BAD_NAME'
-            ? '파일 이름에 경로나 사용할 수 없는 문자가 포함되어 있어.'
-            : result.error || '만들지 못했어.';
+            ? ft.badName
+            : result.error || ft.createFailed;
         setEntryDialogError(message);
         return;
       }
@@ -514,9 +518,9 @@ export default function FilesTab(props: Props) {
     const location = `${result.relativePath}${result.lineNumber ? `:${result.lineNumber}` : ''}`;
     try {
       await navigator.clipboard.writeText(location);
-      props.onNotice(`검색 결과 위치를 복사했어: ${location}`);
+      props.onNotice(formatStr(ft.copiedLocation, { location }));
     } catch {
-      props.onNotice('검색 결과 위치를 복사하지 못했어.');
+      props.onNotice(ft.copyLocationFailed);
     }
   };
 
@@ -545,16 +549,16 @@ export default function FilesTab(props: Props) {
     <div ref={filesTabRef} className="files-tab">
       <div className="files-head">
         <div className="files-title">
-          <ExplorerIcon size={16} /> <span>탐색기</span>
+          <ExplorerIcon size={16} /> <span>{ft.title}</span>
           <span className="files-title-tools">
-            <button className="icon-btn" type="button" title="새 파일" aria-label="새 파일" onClick={() => void createEntry(folder, 'file')} disabled={!folder}><NewFileIcon size={14} /></button>
-            <button className="icon-btn" type="button" title="새 폴더" aria-label="새 폴더" onClick={() => void createEntry(folder, 'folder')} disabled={!folder}><NewFolderIcon size={14} /></button>
-            <button className="icon-btn" type="button" title="파일 목록 새로고침" aria-label="파일 목록 새로고침" onClick={props.onRefreshTree}><RefreshIcon size={14} /></button>
-            <button className="icon-btn" type="button" title="폴더 모두 접기" aria-label="폴더 모두 접기" onClick={() => setCollapseVersion((v) => v + 1)}><CollapseIcon size={14} /></button>
+            <button className="icon-btn" type="button" title={ft.newFile} aria-label={ft.newFile} onClick={() => void createEntry(folder, 'file')} disabled={!folder}><NewFileIcon size={14} /></button>
+            <button className="icon-btn" type="button" title={ft.newFolder} aria-label={ft.newFolder} onClick={() => void createEntry(folder, 'folder')} disabled={!folder}><NewFolderIcon size={14} /></button>
+            <button className="icon-btn" type="button" title={ft.refreshTree} aria-label={ft.refreshTree} onClick={props.onRefreshTree}><RefreshIcon size={14} /></button>
+            <button className="icon-btn" type="button" title={ft.collapseAll} aria-label={ft.collapseAll} onClick={() => setCollapseVersion((v) => v + 1)}><CollapseIcon size={14} /></button>
           </span>
         </div>
-      <button className="btn btn-block" onClick={onPickFolder} title={folder || '작업 폴더 열기'}>
-        <FolderIcon size={14} /> <span>{folder || '폴더 열기'}</span>
+      <button className="btn btn-block" onClick={onPickFolder} title={folder || ft.openFolderTitle}>
+        <FolderIcon size={14} /> <span>{folder || ft.openFolder}</span>
       </button>
       {folder && (
         <>
@@ -563,7 +567,7 @@ export default function FilesTab(props: Props) {
               <button className="explorer-section-toggle changed-head" type="button" aria-expanded={sections.pinned} onClick={() => toggleSection('pinned')}>
                 {sections.pinned ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
                 <StarIcon size={12} filled />
-                <span>즐겨찾기 <span className="section-count">{pinnedFiles.length}</span></span>
+                <span>{ft.favorites} <span className="section-count">{pinnedFiles.length}</span></span>
               </button>
               {sections.pinned && <div className="favorite-list">
                 {pinnedFiles.map((path) => {
@@ -576,7 +580,7 @@ export default function FilesTab(props: Props) {
                         <FileTypeIcon size={15} name={name} />
                         <span className="favorite-file-label"><span className="favorite-file-name">{name}</span><span className="favorite-file-path">{relativePath}</span></span>
                       </button>
-                      <button className="icon-btn favorite-remove" type="button" title="즐겨찾기에서 제거" aria-label={`${name} 즐겨찾기에서 제거`} onClick={() => togglePinnedFile(path)}><StarIcon size={13} filled /></button>
+                      <button className="icon-btn favorite-remove" type="button" title={ft.unfavorite} aria-label={formatStr(ft.unfavoriteLabel, { name })} onClick={() => togglePinnedFile(path)}><StarIcon size={13} filled /></button>
                     </div>
                   );
                 })}
@@ -588,13 +592,13 @@ export default function FilesTab(props: Props) {
               <div className="changed-head">
                 <button className="explorer-section-toggle" type="button" aria-expanded={sections.open} onClick={() => toggleSection('open')}>
                   {sections.open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
-                  <span>열린 파일 <span className="section-count">{openFiles.length}</span></span>
+                  <span>{ft.openFiles} <span className="section-count">{openFiles.length}</span></span>
                 </button>
                 {openFiles.some((file) => !file.dirty) && <button
                   type="button"
                   className="icon-btn open-files-cleanup"
-                  title={`저장된 파일 탭 닫기 (${openFiles.filter((file) => !file.dirty).length})`}
-                  aria-label={`저장된 파일 탭 ${openFiles.filter((file) => !file.dirty).length}개 닫기`}
+                  title={formatStr(ft.closeSavedTitle, { count: openFiles.filter((file) => !file.dirty).length })}
+                  aria-label={formatStr(ft.closeSavedLabel, { count: openFiles.filter((file) => !file.dirty).length })}
                   onClick={() => props.onCloseFiles(openFiles.filter((file) => !file.dirty).map((file) => file.path))}
                 ><XIcon size={13} /></button>}
               </div>
@@ -608,7 +612,7 @@ export default function FilesTab(props: Props) {
                         type="button"
                         className={`changed-item${isActive ? ' active-file' : ''}`}
                         aria-current={isActive ? 'page' : undefined}
-                        title={`${file.path}${file.dirty ? ' · 저장되지 않은 변경 사항' : ''}`}
+                        title={`${file.path}${file.dirty ? ft.unsavedSuffix : ''}`}
                         onClick={() => onOpenFile(file.path)}
                       >
                         <FileTypeIcon size={15} name={file.name} />
@@ -616,13 +620,13 @@ export default function FilesTab(props: Props) {
                           <span className="changed-name">{file.name}</span>
                           {duplicateName && <span className="favorite-file-path">{relativeDirectory(file.path)}</span>}
                         </span>
-                        {file.dirty && <span className="open-file-dirty" title="저장되지 않은 변경 사항" aria-label="저장되지 않은 변경 사항" />}
+                        {file.dirty && <span className="open-file-dirty" title={ft.unsavedTitle} aria-label={ft.unsavedTitle} />}
                       </button>
                       <button
                         type="button"
                         className="icon-btn open-file-close"
-                        title={`${file.name} 닫기${file.dirty ? ' · 변경 사항이 있어 확인을 요청할 수 있음' : ''}`}
-                        aria-label={`${file.name} 파일 닫기${file.dirty ? ', 저장되지 않은 변경 사항 있음' : ''}`}
+                        title={formatStr(ft.closeFileTitle, { name: file.name, dirty: file.dirty ? ft.closeFileDirty : '' })}
+                        aria-label={formatStr(ft.closeFileLabel, { name: file.name, dirty: file.dirty ? ft.closeFileDirtyLabel : '' })}
                         onClick={() => props.onCloseFile(file.path)}
                       ><XIcon size={12} /></button>
                     </div>
@@ -635,7 +639,7 @@ export default function FilesTab(props: Props) {
             <div className="changed-section recent-files-section">
               <button className="explorer-section-toggle changed-head" type="button" aria-expanded={sections.recent} onClick={() => toggleSection('recent')}>
                 {sections.recent ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
-                <span>최근 파일 <span className="section-count">{recentInFolder.length}</span></span>
+                <span>{ft.recentFiles} <span className="section-count">{recentInFolder.length}</span></span>
               </button>
               {sections.recent && <div className="changed-list">
                 {recentInFolder.map((path) => {
@@ -643,13 +647,13 @@ export default function FilesTab(props: Props) {
                   const opened = openFiles.find((file) => normalizePinnedPath(file.path) === normalizePinnedPath(path));
                   const isActive = normalizePinnedPath(path) === normalizePinnedPath(activeFilePath);
                   return (
-                    <button key={path} className={`changed-item${isActive ? ' active-file' : ''}`} aria-current={isActive ? 'page' : undefined} title={`${path}${opened?.dirty ? ' · 저장되지 않은 변경 사항' : ''}`} onClick={() => onOpenFile(path)}>
+                    <button key={path} className={`changed-item${isActive ? ' active-file' : ''}`} aria-current={isActive ? 'page' : undefined} title={`${path}${opened?.dirty ? ft.unsavedSuffix : ''}`} onClick={() => onOpenFile(path)}>
                       <FileTypeIcon size={15} name={name} />
                       <span className={visibleFileNameCounts.get(name.toLocaleLowerCase())! > 1 ? 'changed-file-label' : 'changed-name'}>
                         <span className="changed-name">{name}</span>
                         {visibleFileNameCounts.get(name.toLocaleLowerCase())! > 1 && <span className="favorite-file-path">{relativeDirectory(path)}</span>}
                       </span>
-                      {opened && <span className={`quick-open-state${opened.dirty ? ' dirty' : isActive ? ' current' : ''}`}>{opened.dirty ? '수정됨' : isActive ? '현재' : '열림'}</span>}
+                      {opened && <span className={`quick-open-state${opened.dirty ? ' dirty' : isActive ? ' current' : ''}`}>{opened.dirty ? ft.stateModified : isActive ? ft.stateCurrent : ft.stateOpen}</span>}
                     </button>
                   );
                 })}
@@ -696,43 +700,43 @@ export default function FilesTab(props: Props) {
                     setFileQuery('');
                   }
                 }}
-                placeholder={searchMode === 'content' ? '프로젝트 파일 내용 검색…' : '프로젝트 파일 이름 검색…'}
-                aria-label={searchMode === 'content' ? '프로젝트 파일 내용 검색' : '프로젝트 파일 이름 검색'}
+                placeholder={searchMode === 'content' ? ft.searchContentPh : ft.searchNamePh}
+                aria-label={searchMode === 'content' ? ft.searchContentLabel : ft.searchNameLabel}
                 aria-controls="explorer-search-results"
                 aria-activedescendant={searchResults.length ? `explorer-search-result-${selectedSearchResult}` : undefined}
                 autoComplete="off"
                 spellCheck={false}
               />
-              {fileQuery && <button className="icon-btn" type="button" onClick={() => setFileQuery('')} title="검색 지우기" aria-label="검색 지우기"><XIcon size={13} /></button>}
-              <button type="button" className="icon-btn explorer-search-history-toggle" aria-label="최근 검색어" title="이 프로젝트의 최근 검색어" aria-expanded={searchHistoryOpen} aria-controls="explorer-search-history" disabled={!searchHistory.length} onClick={() => setSearchHistoryOpen((open) => !open)}><ClockIcon size={13} /></button>
+              {fileQuery && <button className="icon-btn" type="button" onClick={() => setFileQuery('')} title={ft.searchClear} aria-label={ft.searchClear}><XIcon size={13} /></button>}
+              <button type="button" className="icon-btn explorer-search-history-toggle" aria-label={ft.historyLabel} title={ft.historyTitle} aria-expanded={searchHistoryOpen} aria-controls="explorer-search-history" disabled={!searchHistory.length} onClick={() => setSearchHistoryOpen((open) => !open)}><ClockIcon size={13} /></button>
             </div>
-            {searchHistoryOpen && <div className="explorer-search-history" id="explorer-search-history" role="listbox" aria-label="최근 파일 검색">
+            {searchHistoryOpen && <div className="explorer-search-history" id="explorer-search-history" role="listbox" aria-label={ft.historyListLabel}>
               {searchHistory.map((entry, index) => <button key={`${entry.mode}:${entry.query}:${index}`} type="button" role="option" aria-selected="false" onClick={() => restoreSearchQuery(entry)} title={entry.query}>
-                <span>{entry.query}</span><small>{entry.mode === 'content' ? '내용' : '이름'}</small>
+                <span>{entry.query}</span><small>{entry.mode === 'content' ? ft.historyContent : ft.historyName}</small>
               </button>)}
             </div>}
           </div>
-          <div className="explorer-search-mode" role="group" aria-label="검색 범위">
-            <button type="button" className={searchMode === 'name' ? 'active' : ''} aria-pressed={searchMode === 'name'} onClick={() => props.onSearchModeChange('name')}>파일 이름</button>
-            <button type="button" className={searchMode === 'content' ? 'active' : ''} aria-pressed={searchMode === 'content'} onClick={() => props.onSearchModeChange('content')}>파일 내용</button>
+          <div className="explorer-search-mode" role="group" aria-label={ft.searchScope}>
+            <button type="button" className={searchMode === 'name' ? 'active' : ''} aria-pressed={searchMode === 'name'} onClick={() => props.onSearchModeChange('name')}>{ft.modeName}</button>
+            <button type="button" className={searchMode === 'content' ? 'active' : ''} aria-pressed={searchMode === 'content'} onClick={() => props.onSearchModeChange('content')}>{ft.modeContent}</button>
           </div>
-          {searchMode === 'content' && <div className="explorer-search-options" role="group" aria-label="내용 검색 옵션">
-            <button type="button" className={searchPreferences.caseSensitive ? 'active' : ''} aria-pressed={searchPreferences.caseSensitive} title="대소문자 구분" onClick={() => updateSearchPreferences({ caseSensitive: !searchPreferences.caseSensitive })}>Aa</button>
-            <button type="button" className={searchPreferences.wholeWord ? 'active' : ''} aria-pressed={searchPreferences.wholeWord} title="단어 단위로 일치" onClick={() => updateSearchPreferences({ wholeWord: !searchPreferences.wholeWord })}>단어</button>
+          {searchMode === 'content' && <div className="explorer-search-options" role="group" aria-label={ft.contentOpts}>
+            <button type="button" className={searchPreferences.caseSensitive ? 'active' : ''} aria-pressed={searchPreferences.caseSensitive} title={ft.caseOpt} onClick={() => updateSearchPreferences({ caseSensitive: !searchPreferences.caseSensitive })}>Aa</button>
+            <button type="button" className={searchPreferences.wholeWord ? 'active' : ''} aria-pressed={searchPreferences.wholeWord} title={ft.wordOpt} onClick={() => updateSearchPreferences({ wholeWord: !searchPreferences.wholeWord })}>{ft.wordBtn}</button>
           </div>}
           <button type="button" className={searchPreferences.filtersOpen ? 'explorer-filter-toggle active' : 'explorer-filter-toggle'} aria-expanded={searchPreferences.filtersOpen} aria-controls="explorer-path-filters" onClick={() => updateSearchPreferences({ filtersOpen: !searchPreferences.filtersOpen })}>
-            경로 필터{searchPreferences.include.trim() || searchPreferences.exclude.trim() ? ' · 적용 중' : ''}
+            {ft.pathFilter}{searchPreferences.include.trim() || searchPreferences.exclude.trim() ? ft.pathFilterOn : ''}
           </button>
           {searchPreferences.filtersOpen && <div className="explorer-path-filters" id="explorer-path-filters">
             <label>
-              <span>포함</span>
-              <input value={searchPreferences.include} onChange={(event) => updateSearchPreferences({ include: event.target.value })} placeholder="예: src/**/*.ts, *.md" aria-label="포함할 파일 경로 패턴" spellCheck={false} />
+              <span>{ft.includeLabel}</span>
+              <input value={searchPreferences.include} onChange={(event) => updateSearchPreferences({ include: event.target.value })} placeholder={ft.includePh} aria-label={ft.includeAria} spellCheck={false} />
             </label>
             <label>
-              <span>제외</span>
-              <input value={searchPreferences.exclude} onChange={(event) => updateSearchPreferences({ exclude: event.target.value })} placeholder="예: **/*.test.ts, **/generated/**" aria-label="제외할 파일 경로 패턴" spellCheck={false} />
+              <span>{ft.excludeLabel}</span>
+              <input value={searchPreferences.exclude} onChange={(event) => updateSearchPreferences({ exclude: event.target.value })} placeholder={ft.excludePh} aria-label={ft.excludeAria} spellCheck={false} />
             </label>
-            <p>* 한 경로 조각 · ** 여러 폴더 · 쉼표로 여러 패턴</p>
+            <p>{ft.globHelp}</p>
           </div>}
         </>
       )}
@@ -742,39 +746,39 @@ export default function FilesTab(props: Props) {
           <div className="changed-head">
             <button className="explorer-section-toggle" type="button" aria-expanded={sections.changed} onClick={() => toggleSection('changed')}>
               {sections.changed ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
-              <span>변경 사항 <span className="section-count">{changedFiles.length}</span></span>
+              <span>{ft.changedTitle} <span className="section-count">{changedFiles.length}</span></span>
             </button>
-            <button className="icon-btn" type="button" title="변경 목록 새로고침" aria-label="변경 목록 새로고침" onClick={() => { void refreshGitBranch(); onRefreshChanged(); }}>
+            <button className="icon-btn" type="button" title={ft.refreshChanged} aria-label={ft.refreshChanged} onClick={() => { void refreshGitBranch(); onRefreshChanged(); }}>
               <RefreshIcon size={13} />
             </button>
             {changedFiles.length > 0 && (
-              <button className="btn git-commit-open" type="button" title={stagedCount > 0 ? `스테이징된 ${stagedCount}개 파일 커밋` : '커밋하기 (스테이징된 변경 없음)'} onClick={() => { setCommitError(''); setCommitOpen(true); }}>
-                커밋{stagedCount > 0 ? ` ${stagedCount}` : ''}
+              <button className="btn git-commit-open" type="button" title={stagedCount > 0 ? formatStr(ft.commitStagedTitle, { count: stagedCount }) : ft.commitNoneTitle} onClick={() => { setCommitError(''); setCommitOpen(true); }}>
+                {ft.commitBtn}{stagedCount > 0 ? ` ${stagedCount}` : ''}
               </button>
             )}
           </div>
           <div className="git-remote-row">
             {gitBranch && (
-              <span className="git-branch" title={gitBranch.remote || '원격 없음'} aria-label={`현재 브랜치 ${gitBranch.branch}`}>
+              <span className="git-branch" title={gitBranch.remote || ft.noRemote} aria-label={formatStr(ft.branchLabel, { branch: gitBranch.branch })}>
                 {gitBranch.branch}{gitBranch.ahead > 0 ? ` ↑${gitBranch.ahead}` : ''}{gitBranch.behind > 0 ? ` ↓${gitBranch.behind}` : ''}
               </span>
             )}
             {gitBranch && (
-              <button className="mini-btn" type="button" title="풀 (가져오기)" aria-label="풀" disabled={!!gitSyncBusy} onClick={() => void doGitSync('pull')}>
-                {gitSyncBusy === 'pull' ? '가져오는 중…' : '풀'}
+              <button className="mini-btn" type="button" title={ft.pullTitle} aria-label={ft.syncPull} disabled={!!gitSyncBusy} onClick={() => void doGitSync('pull')}>
+                {gitSyncBusy === 'pull' ? ft.pulling : ft.syncPull}
               </button>
             )}
             {gitBranch && (
-              <button className="mini-btn" type="button" title="푸시 (올리기)" aria-label="푸시" disabled={!!gitSyncBusy} onClick={() => void doGitSync('push')}>
-                {gitSyncBusy === 'push' ? '올리는 중…' : '푸시'}
+              <button className="mini-btn" type="button" title={ft.pushTitle} aria-label={ft.syncPush} disabled={!!gitSyncBusy} onClick={() => void doGitSync('push')}>
+                {gitSyncBusy === 'push' ? ft.pushing : ft.syncPush}
               </button>
             )}
-            <button className="mini-btn" type="button" title="저장소 클론" aria-label="클론" onClick={() => { setCloneError(''); setCloneOpen(true); }}>
-              클론
+            <button className="mini-btn" type="button" title={ft.cloneTitle} aria-label={ft.cloneBtn} onClick={() => { setCloneError(''); setCloneOpen(true); }}>
+              {ft.cloneBtn}
             </button>
           </div>
           {sections.changed && changedFiles.length === 0 ? (
-            <div className="empty-note">변경된 파일 없음</div>
+            <div className="empty-note">{ft.noChanges}</div>
           ) : sections.changed ? (
             <div className="changed-list">
               {changedFiles.map((f) => {
@@ -788,8 +792,8 @@ export default function FilesTab(props: Props) {
                         type="button"
                         className={staged ? 'icon-btn stage-toggle on' : 'icon-btn stage-toggle'}
                         aria-pressed={staged}
-                        title={staged ? '스테이징 해제' : '스테이징'}
-                        aria-label={`${f} ${staged ? '스테이징 해제' : '스테이징'}`}
+                        title={staged ? ft.unstage : ft.stage}
+                        aria-label={formatStr(ft.stageLabel, { file: f, action: staged ? ft.unstage : ft.stage })}
                         onClick={() => void toggleStaged(f, staged)}
                       >
                         {staged ? <CheckIcon size={13} /> : <PlusIcon size={13} />}
@@ -797,12 +801,12 @@ export default function FilesTab(props: Props) {
                     )}
                     <button
                       className="changed-item"
-                      title={`${f} diff 보기`}
+                      title={formatStr(ft.diffTitle, { file: f })}
                       onClick={() => onOpenChanged(f)}
                     >
                       <FileTypeIcon size={15} name={f} />
                       <span className="changed-name">{f}</span>
-                      <span className={`git-status-badge status-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`} title={staged ? 'Git 상태 (스테이징됨)' : 'Git 상태'}>{kind}</span>
+                      <span className={`git-status-badge status-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`} title={staged ? ft.gitStaged : ft.gitState}>{kind}</span>
                     </button>
                   </div>
                 );
@@ -815,17 +819,17 @@ export default function FilesTab(props: Props) {
         <section className="modal git-commit-dialog" role="dialog" aria-modal="true" aria-labelledby="git-commit-title" tabIndex={-1} onKeyDown={(event) => {
           if (event.key === 'Escape' && !commitBusy) { event.preventDefault(); setCommitOpen(false); }
         }}>
-          <div className="modal-header"><h3 id="git-commit-title">커밋</h3></div>
+          <div className="modal-header"><h3 id="git-commit-title">{ft.commitDlgTitle}</h3></div>
           <div className="modal-body">
-            <p className="modal-note">스테이징된 파일 {stagedCount}개가 커밋됩니다.</p>
-            <label className="field">메시지
-              <textarea value={commitMessage} disabled={commitBusy} onChange={(event) => { setCommitMessage(event.target.value); setCommitError(''); }} placeholder="커밋 메시지" aria-label="커밋 메시지" rows={3} aria-invalid={!!commitError} />
+            <p className="modal-note">{formatStr(ft.commitNote, { count: stagedCount })}</p>
+            <label className="field">{ft.msgLabel}
+              <textarea value={commitMessage} disabled={commitBusy} onChange={(event) => { setCommitMessage(event.target.value); setCommitError(''); }} placeholder={ft.msgPh} aria-label={ft.msgPh} rows={3} aria-invalid={!!commitError} />
             </label>
             {commitError && <div className="tree-error explorer-entry-error" role="alert">{commitError}</div>}
           </div>
           <div className="modal-footer">
-            <button className="btn" type="button" disabled={commitBusy} onClick={() => setCommitOpen(false)}>취소</button>
-            <button className="btn-primary" type="button" disabled={commitBusy || !normalizeCommitMessage(commitMessage).ok} onClick={() => void submitCommit()}>{commitBusy ? '커밋 중…' : '커밋'}</button>
+            <button className="btn" type="button" disabled={commitBusy} onClick={() => setCommitOpen(false)}>{strings.common.cancel}</button>
+            <button className="btn-primary" type="button" disabled={commitBusy || !normalizeCommitMessage(commitMessage).ok} onClick={() => void submitCommit()}>{commitBusy ? ft.committing : ft.commitBtn}</button>
           </div>
         </section>
       </div>}
@@ -833,19 +837,19 @@ export default function FilesTab(props: Props) {
         <section className="modal git-clone-dialog" role="dialog" aria-modal="true" aria-labelledby="git-clone-title" tabIndex={-1} onKeyDown={(event) => {
           if (event.key === 'Escape' && !cloneBusy) { event.preventDefault(); setCloneOpen(false); }
         }}>
-          <div className="modal-header"><h3 id="git-clone-title">저장소 클론</h3></div>
+          <div className="modal-header"><h3 id="git-clone-title">{ft.cloneDlgTitle}</h3></div>
           <div className="modal-body">
-            <label className="field">저장소 URL
-              <input value={cloneUrl} disabled={cloneBusy} onChange={(event) => { setCloneUrl(event.target.value); setCloneError(''); }} placeholder="https:// 또는 로컬 경로" aria-label="저장소 URL" spellCheck={false} />
+            <label className="field">{ft.cloneUrlLabel}
+              <input value={cloneUrl} disabled={cloneBusy} onChange={(event) => { setCloneUrl(event.target.value); setCloneError(''); }} placeholder={ft.cloneUrlPh} aria-label={ft.cloneUrlLabel} spellCheck={false} />
             </label>
-            <label className="field">클론 폴더
-              <input value={cloneTarget} disabled={cloneBusy} onChange={(event) => { setCloneTarget(event.target.value); setCloneError(''); }} placeholder="새 폴더 경로 (없어야 함)" aria-label="클론 폴더" spellCheck={false} />
+            <label className="field">{ft.cloneDirLabel}
+              <input value={cloneTarget} disabled={cloneBusy} onChange={(event) => { setCloneTarget(event.target.value); setCloneError(''); }} placeholder={ft.cloneDirPh} aria-label={ft.cloneDirLabel} spellCheck={false} />
             </label>
             {cloneError && <div className="tree-error explorer-entry-error" role="alert">{cloneError}</div>}
           </div>
           <div className="modal-footer">
-            <button className="btn" type="button" disabled={cloneBusy} onClick={() => setCloneOpen(false)}>취소</button>
-            <button className="btn-primary" type="button" disabled={cloneBusy || !cloneUrl.trim() || !cloneTarget.trim()} onClick={() => void submitClone()}>{cloneBusy ? '클론 중…' : '클론'}</button>
+            <button className="btn" type="button" disabled={cloneBusy} onClick={() => setCloneOpen(false)}>{strings.common.cancel}</button>
+            <button className="btn-primary" type="button" disabled={cloneBusy || !cloneUrl.trim() || !cloneTarget.trim()} onClick={() => void submitClone()}>{cloneBusy ? ft.cloning : ft.cloneBtn}</button>
           </div>
         </section>
       </div>}
@@ -859,16 +863,16 @@ export default function FilesTab(props: Props) {
                 return (
                   <div className="explorer-search-summary">
                     <span className="explorer-search-count" role="status" aria-live="polite">
-                      {searchResults.length}{searchMode === 'content' ? '개 일치 항목' : '개 파일'}{searchTruncated ? ' 이상' : ''}
+                      {searchResults.length}{searchMode === 'content' ? ft.summaryMatches : ft.summaryFiles}{searchTruncated ? ft.summaryMore : ''}
                       {` · ${selectedSearchResult + 1}/${searchResults.length}`}
                       {searchMode === 'content' && result.lineNumber ? ` · ${result.relativePath}:${result.lineNumber}` : ''}
-                      . ↑↓ 이동 · Enter 열기 · Ctrl+Enter 고정 탭
+                      {ft.summaryHints}
                     </span>
                     <button
                       type="button"
                       className="icon-btn explorer-search-copy"
-                      aria-label={`${result.relativePath}${result.lineNumber ? ` ${result.lineNumber}줄` : ''} 검색 결과 위치 복사`}
-                      title="선택한 검색 결과 위치 복사"
+                      aria-label={formatStr(ft.copyResultLabel, { loc: `${result.relativePath}${result.lineNumber ? formatStr(ft.resultLine, { line: result.lineNumber }) : ''}` })}
+                      title={ft.copyResultTitle}
                       onClick={() => void copySearchResultLocation(result)}
                     >
                       <CopyIcon size={13} />
@@ -876,9 +880,9 @@ export default function FilesTab(props: Props) {
                     <button
                       type="button"
                       className={isPinned ? 'icon-btn explorer-search-pin active' : 'icon-btn explorer-search-pin'}
-                      aria-label={isPinned ? `${result.relativePath} 즐겨찾기 해제` : `${result.relativePath} 즐겨찾기 추가`}
+                      aria-label={isPinned ? formatStr(ft.unpinResultLabel, { rel: result.relativePath }) : formatStr(ft.pinResultLabel, { rel: result.relativePath })}
                       aria-pressed={isPinned}
-                      title={isPinned ? '선택한 검색 결과 즐겨찾기 해제' : '선택한 검색 결과 즐겨찾기에 추가'}
+                      title={isPinned ? ft.unpinResultTitle : ft.pinResultTitle}
                       onClick={() => togglePinnedFile(result.path)}
                     >
                       <StarIcon size={13} filled={isPinned} />
@@ -886,10 +890,10 @@ export default function FilesTab(props: Props) {
                   </div>
                 );
               })()}
-            <div ref={searchResultsRef} id="explorer-search-results" className="explorer-search-results" role="listbox" aria-label="파일 검색 결과">
-              {searching && searchResults.length === 0 ? <div className="tree-loading">{searchMode === 'content' ? '파일 내용을 찾는 중…' : '파일을 찾는 중…'}</div>
+            <div ref={searchResultsRef} id="explorer-search-results" className="explorer-search-results" role="listbox" aria-label={ft.resultsLabel}>
+              {searching && searchResults.length === 0 ? <div className="tree-loading">{searchMode === 'content' ? ft.searchingContent : ft.searchingName}</div>
                 : searchError ? <div className="tree-error">{searchError}</div>
-                  : searchResults.length === 0 ? <div className="tree-loading">{searchMode === 'content' ? '일치하는 내용이 없어.' : '일치하는 파일이 없어.'}</div>
+                  : searchResults.length === 0 ? <div className="tree-loading">{searchMode === 'content' ? ft.noMatchContent : ft.noMatchName}</div>
                     : <>
                       {searchResults.map((result, index) => {
                         const name = result.relativePath.split(/[\\/]/).pop() || result.relativePath;
@@ -921,13 +925,13 @@ export default function FilesTab(props: Props) {
                       })}
                     </>}
             </div>
-              {searchTruncated && <div className="explorer-search-note">검색 범위가 커서 일부 파일이나 결과가 생략됐어. 검색어를 더 구체적으로 입력해줘.</div>}
+              {searchTruncated && <div className="explorer-search-note">{ft.truncatedNote}</div>}
             </div>
           ) : (
             <FileTree root={folder} version={treeVersion} collapseVersion={collapseVersion} changedFiles={changedFiles} changedKinds={changedKinds} activeFilePath={activeFilePath} activeView={props.active} pinnedFilePaths={pinnedFilePaths} onTogglePinned={togglePinnedFile} onCreateEntry={createEntry} onRequestRename={requestRenameEntry} onRequestDelete={requestDeleteEntry} onNotice={props.onNotice} onOpenFile={onOpenFile} onOpenTerminalAt={props.onOpenTerminalAt} />
           )
         ) : (
-          <div className="empty-note">작업 폴더를 열면 파일 트리가 표시됩니다.</div>
+          <div className="empty-note">{ft.noFolderNote}</div>
         )}
       </div>
       {entryDialog && <div className="modal-backdrop explorer-entry-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !entryDialogBusy) closeEntryDialog(); }}>
@@ -942,16 +946,16 @@ export default function FilesTab(props: Props) {
             else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
           }
         }}>
-          <div className="modal-header"><h3 id="explorer-entry-title">{entryDialog.mode === 'rename' ? '이름 변경' : entryDialog.mode === 'delete' ? '휴지통으로 이동' : entryDialog.mode === 'create-file' ? '새 파일' : '새 폴더'}</h3></div>
+          <div className="modal-header"><h3 id="explorer-entry-title">{entryDialog.mode === 'rename' ? ft.dlgRename : entryDialog.mode === 'delete' ? ft.dlgTrash : entryDialog.mode === 'create-file' ? ft.newFile : ft.newFolder}</h3></div>
           <div className="modal-body">
-            {entryDialog.mode === 'delete' ? <p className="modal-note">{entryDialog.isDir ? '폴더와 내부 항목' : '파일'} <code>{entryDialog.name}</code>을(를) 휴지통으로 옮길게. 필요하면 휴지통에서 복원할 수 있어.</p> : <label className="field">이름
+            {entryDialog.mode === 'delete' ? <p className="modal-note">{entryDialog.isDir ? ft.trashDir : ft.trashFile} <code>{entryDialog.name}</code>{ft.trashNote}</p> : <label className="field">{ft.nameLabel}
               <input ref={entryNameRef} value={entryDialog.name} disabled={entryDialogBusy} onChange={(event) => { setEntryDialog({ ...entryDialog, name: event.target.value }); setEntryDialogError(''); }} autoComplete="off" spellCheck={false} aria-invalid={!!entryDialogError} />
             </label>}
             {entryDialogError && <div className="tree-error explorer-entry-error" role="alert">{entryDialogError}</div>}
           </div>
           <div className="modal-footer">
-            <button className="btn" type="button" disabled={entryDialogBusy} onClick={() => closeEntryDialog()}>취소</button>
-            <button className={entryDialog.mode === 'delete' ? 'btn-danger' : 'btn-primary'} type="button" disabled={entryDialogBusy || (entryDialog.mode !== 'delete' && !entryDialog.name.trim())} onClick={() => void submitEntryDialog()}>{entryDialogBusy ? '처리 중…' : entryDialog.mode === 'delete' ? '휴지통으로 이동' : entryDialog.mode === 'rename' ? '이름 변경' : '만들기'}</button>
+            <button className="btn" type="button" disabled={entryDialogBusy} onClick={() => closeEntryDialog()}>{strings.common.cancel}</button>
+            <button className={entryDialog.mode === 'delete' ? 'btn-danger' : 'btn-primary'} type="button" disabled={entryDialogBusy || (entryDialog.mode !== 'delete' && !entryDialog.name.trim())} onClick={() => void submitEntryDialog()}>{entryDialogBusy ? ft.processing : entryDialog.mode === 'delete' ? ft.dlgTrash : entryDialog.mode === 'rename' ? ft.dlgRename : ft.createBtn}</button>
           </div>
         </section>
       </div>}

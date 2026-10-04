@@ -17,10 +17,11 @@ export function duplicateSession(session, options) {
   } catch {
     return null;
   }
-  const title = typeof session.title === 'string' && session.title.trim() ? session.title.trim() : '새 스레드';
+  const en = opts.lang === 'en';
+  const title = typeof session.title === 'string' && session.title.trim() ? session.title.trim() : en ? 'New thread' : '새 스레드';
   return {
     id: makeId('s', now),
-    title: `${title} 복사본`,
+    title: en ? `${title} (copy)` : `${title} 복사본`,
     createdAt: now,
     messages: messages
       .filter((m) => m && typeof m === 'object')

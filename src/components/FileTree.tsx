@@ -3,6 +3,8 @@ import type { FileEntry, GitStatusKind } from '../types';
 import { api, hasBridge } from '../lib/mudex';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { ChevronDownIcon, ChevronRightIcon, CopyIcon, FileTypeIcon, FolderIcon, getFileTypeDescription, NewFileIcon, NewFolderIcon, PencilIcon, PlusIcon, StarIcon, TerminalIcon, TrashIcon } from './icons';
+import { useLang, useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 const sortEntries = (entries: FileEntry[]) => [...entries].sort((a, b) => {
   if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
@@ -78,6 +80,8 @@ function TreeNode({
   onOpenFile: (filePath: string) => void;
   onOpenTerminalAt: (dirPath: string) => void;
 }) {
+  const s = useStrings();
+  const lang = useLang();
   const [open, setOpen] = useState(() => entry.isDir && readExpandedFolders(root).has(normalizePath(entry.path)));
   const [children, setChildren] = useState<FileEntry[] | null>(null);
   const [error, setError] = useState('');
@@ -128,11 +132,11 @@ function TreeNode({
     if (isActiveFile && activeView) rowRef.current?.scrollIntoView({ block: 'nearest' });
   }, [isActiveFile, activeView]);
 
-  useEffect(() => {
-    if (!entry.isDir) return;
-    setChildren(null);
-    setError('');
-  }, [version, entry.isDir, entry.path]);
+  // No reset-on-version effect here by design: background refreshes swap the
+  // child list silently (see below) so open folders never flash back to the
+  // loading state — and never steal scroll — on every external file change.
+  // A different path remounts via key={c.path}, so stale children are
+  // impossible without an explicit reset.
 
   useEffect(() => {
     if (!entry.isDir || !open || !focusFirstChildOnOpenRef.current || children === null) return;
@@ -154,7 +158,7 @@ function TreeNode({
     api().listDir(entry.path).then((res) => {
       if (cancelled) return;
       if (res.ok) setChildren(sortEntries(res.entries || []));
-      else setError(res.error || '읽기 실패');
+      else setError(res.error || s.tree.readFailed);
     }).catch((e: unknown) => {
       if (!cancelled) setError(e instanceof Error ? e.message : String(e));
     });
@@ -213,7 +217,7 @@ function TreeNode({
         aria-posinset={position}
         aria-setsize={setSize}
         aria-current={isActiveFile ? 'page' : undefined}
-        aria-label={entry.isDir ? `${entry.name}, 폴더` : `${entry.name}, ${getFileTypeDescription(entry.name)}`}
+        aria-label={entry.isDir ? formatStr(s.tree.dirLabel, { name: entry.name }) : formatStr(s.tree.fileLabel, { name: entry.name, desc: getFileTypeDescription(entry.name, lang) })}
         data-file-path={entry.path}
         tabIndex={focusedPath === entry.path || (focusedPath === null && depth === 0) ? 0 : -1}
         className={isActiveFile ? 'tree-row active-file' : 'tree-row'}
@@ -272,7 +276,7 @@ function TreeNode({
           }
         }}
         onFocus={() => setFocusedPath(entry.path)}
-        title={entry.isDir ? entry.path : `${entry.path} · ${getFileTypeDescription(entry.name)}`}
+        title={entry.isDir ? entry.path : `${entry.path} · ${getFileTypeDescription(entry.name, lang)}`}
       >
         {entry.isDir ? (
           open ? (
@@ -285,13 +289,13 @@ function TreeNode({
         )}
         {entry.isDir ? <FolderIcon size={15} open={open} className="tree-folder-icon" /> : <FileTypeIcon size={17} name={entry.name} />}
         <span className="tree-name">{entry.name}</span>
-        {changeKind && <span className={`tree-change-indicator status-${changeKind.toLowerCase()}${entry.isDir && !directKind ? ' directory' : ''}`} title={`Git ${changeKind} 상태`} aria-label={`Git ${changeKind} 상태`}>{entry.isDir && !directKind ? '•' : changeKind}</span>}
+        {changeKind && <span className={`tree-change-indicator status-${changeKind.toLowerCase()}${entry.isDir && !directKind ? ' directory' : ''}`} title={formatStr(s.tree.gitState, { kind: changeKind })} aria-label={formatStr(s.tree.gitState, { kind: changeKind })}>{entry.isDir && !directKind ? '•' : changeKind}</span>}
       </div>
         <button
           type="button"
           className="icon-btn tree-node-menu-trigger"
-          title={`${entry.name} 작업`}
-          aria-label={`${entry.name} 작업`}
+          title={formatStr(s.tree.entryMenu, { name: entry.name })}
+          aria-label={formatStr(s.tree.entryMenu, { name: entry.name })}
           aria-expanded={menuOpen}
           aria-haspopup="menu"
           onClick={() => { if (menuOpen) setMenuOpen(false); else openMenu(); }}
@@ -320,39 +324,39 @@ function TreeNode({
             (e.key === 'Home' ? items[0] : items[items.length - 1])?.focus();
           }
         }}>
-          {entry.isDir && <button role="menuitem" onClick={() => { setMenuOpen(false); void onCreateEntry(entry.path, 'file'); }}><NewFileIcon size={13} /> 새 파일</button>}
-          {entry.isDir && <button role="menuitem" onClick={() => { setMenuOpen(false); void onCreateEntry(entry.path, 'folder'); }}><NewFolderIcon size={13} /> 새 폴더</button>}
-          {!entry.isDir && <button role="menuitem" onClick={() => { setMenuOpen(false); onTogglePinned(entry.path); }}><StarIcon size={13} filled={isPinned} /> {isPinned ? '즐겨찾기에서 제거' : '즐겨찾기에 고정'}</button>}
+          {entry.isDir && <button role="menuitem" onClick={() => { setMenuOpen(false); void onCreateEntry(entry.path, 'file'); }}><NewFileIcon size={13} /> {s.tree.newFile}</button>}
+          {entry.isDir && <button role="menuitem" onClick={() => { setMenuOpen(false); void onCreateEntry(entry.path, 'folder'); }}><NewFolderIcon size={13} /> {s.tree.newFolder}</button>}
+          {!entry.isDir && <button role="menuitem" onClick={() => { setMenuOpen(false); onTogglePinned(entry.path); }}><StarIcon size={13} filled={isPinned} /> {isPinned ? s.tree.unpin : s.tree.pin}</button>}
           <button role="menuitem" onClick={() => {
             setMenuOpen(false);
             onRequestRename(entry);
-          }}><PencilIcon size={13} /> 이름 변경</button>
+          }}><PencilIcon size={13} /> {s.common.rename}</button>
           <button role="menuitem" onClick={() => {
             setMenuOpen(false);
-            void navigator.clipboard.writeText(entry.path).then(() => onNotice('파일 경로를 복사했어.')).catch(() => onNotice('경로를 복사하지 못했어.'));
-          }}><CopyIcon size={13} /> 전체 경로 복사</button>
+            void navigator.clipboard.writeText(entry.path).then(() => onNotice(s.tree.copiedFull)).catch(() => onNotice(s.tree.copyFullFailed));
+          }}><CopyIcon size={13} /> {s.tree.copyFull}</button>
           <button role="menuitem" onClick={() => {
             setMenuOpen(false);
-            void navigator.clipboard.writeText(displayRelativePath || entry.name).then(() => onNotice('상대 경로를 복사했어.')).catch(() => onNotice('상대 경로를 복사하지 못했어.'));
-          }}><CopyIcon size={13} /> 상대 경로 복사</button>
-          <button role="menuitem" onClick={() => { setMenuOpen(false); onOpenTerminalAt(entryDirectory); }}><TerminalIcon size={13} /> {entry.isDir ? '여기서 터미널 열기' : '포함 폴더에서 터미널 열기'}</button>
+            void navigator.clipboard.writeText(displayRelativePath || entry.name).then(() => onNotice(s.tree.copiedRel)).catch(() => onNotice(s.tree.copyRelFailed));
+          }}><CopyIcon size={13} /> {s.tree.copyRel}</button>
+          <button role="menuitem" onClick={() => { setMenuOpen(false); onOpenTerminalAt(entryDirectory); }}><TerminalIcon size={13} /> {entry.isDir ? s.tree.termHere : s.tree.termInFolder}</button>
           <button role="menuitem" onClick={() => {
             setMenuOpen(false);
             void api().revealEntry(root, entry.path).then((result) => {
-              onNotice(result.ok ? '파일 위치를 열었어.' : `위치를 열지 못했어: ${result.error || '알 수 없는 오류'}`);
+              onNotice(result.ok ? s.tree.revealOk : formatStr(s.tree.revealFailed, { error: result.error || s.common.unknownError }));
             }).catch((error: unknown) => onNotice(error instanceof Error ? error.message : String(error)));
-          }}><FolderIcon size={13} className="tree-folder-icon" /> 위치 열기</button>
+          }}><FolderIcon size={13} className="tree-folder-icon" /> {s.tree.reveal}</button>
           <button className="tree-node-delete" role="menuitem" onClick={() => {
             setMenuOpen(false);
             onRequestDelete(entry);
-          }}><TrashIcon size={13} /> 삭제</button>
+          }}><TrashIcon size={13} /> {s.common.delete}</button>
         </div>
       )}
       {entry.isDir && open && (
-        <div id={childGroupId} role="group" aria-label={`${entry.name} 폴더 항목`} aria-busy={children === null && !error}>
+        <div id={childGroupId} role="group" aria-label={formatStr(s.tree.childGroup, { name: entry.name })} aria-busy={children === null && !error}>
           {error && <div className="tree-error">{error}</div>}
-          {children === null && !error && <div className="tree-loading">불러오는 중…</div>}
-          {children !== null && children.length === 0 && <div className="tree-loading">비어 있음</div>}
+          {children === null && !error && <div className="tree-loading">{s.common.loading}</div>}
+          {children !== null && children.length === 0 && <div className="tree-loading">{s.common.empty}</div>}
           {(children || []).map((c, index) => (
             <TreeNode key={c.path} entry={c} depth={depth + 1} position={index + 1} setSize={children?.length || 0} version={version} collapseVersion={collapseVersion} focusedPath={focusedPath} setFocusedPath={setFocusedPath} root={root} changedFiles={changedFiles} changedKinds={changedKinds} activeFilePath={activeFilePath} activeView={activeView} pinnedFilePaths={pinnedFilePaths} onTogglePinned={onTogglePinned} onCreateEntry={onCreateEntry} onRequestRename={onRequestRename} onRequestDelete={onRequestDelete} onNotice={onNotice} onOpenFile={onOpenFile} onOpenTerminalAt={onOpenTerminalAt} />
           ))}
@@ -395,10 +399,12 @@ export default function FileTree({
   pinnedFilePaths?: string[];
   onTogglePinned?: (filePath: string) => void;
 }) {
+  const s = useStrings();
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   const [error, setError] = useState('');
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const typeAheadRef = useRef({ query: '', at: 0 });
+  const loadedRootRef = useRef('');
 
   useEffect(() => {
     if (!root || !hasBridge()) return;
@@ -408,21 +414,35 @@ export default function FileTree({
 
   useEffect(() => {
     let cancelled = false;
-    setEntries(null);
-    setError('');
     if (!hasBridge()) {
-      setError('Electron 앱에서 실행해야 파일에 접근할 수 있습니다.');
+      setError(s.tree.needElectron);
       return;
+    }
+    // Stale-while-revalidate: background refreshes (version bumps from the
+    // file watcher) swap the list silently so scroll and expansion survive.
+    // Only a folder switch blanks the tree to the loading state.
+    const rootChanged = loadedRootRef.current !== root;
+    if (rootChanged) {
+      setEntries(null);
+      setError('');
     }
     api()
       .listDir(root)
       .then((res) => {
         if (cancelled) return;
-        if (res.ok) setEntries(sortEntries(res.entries || []));
-        else setError(res.error || '읽기 실패');
+        if (res.ok) {
+          loadedRootRef.current = root;
+          setEntries(sortEntries(res.entries || []));
+          if (rootChanged) setError('');
+        } else if (rootChanged) {
+          setError(res.error || s.tree.readFailed);
+        }
+        // Background-refresh failures keep the stale list: the next watcher
+        // event retries, and flashing an error on every transient failure
+        // is worse than briefly stale names.
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled && rootChanged) setError(e instanceof Error ? e.message : String(e));
       });
     return () => {
       cancelled = true;
@@ -432,8 +452,8 @@ export default function FileTree({
   useEffect(() => setFocusedPath(null), [root, version]);
 
   if (error) return <div className="tree-error">{error}</div>;
-  if (entries === null) return <div className="tree-loading">불러오는 중…</div>;
-  if (entries.length === 0) return <div className="tree-loading">비어 있음</div>;
+  if (entries === null) return <div className="tree-loading">{s.common.loading}</div>;
+  if (entries.length === 0) return <div className="tree-loading">{s.common.empty}</div>;
   return (
     <div role="tree" onKeyDown={(event) => {
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1 || /\s/.test(event.key)) return;

@@ -1,6 +1,7 @@
 // Minimal inline SVG icon set (stroke = currentColor). No emoji icons.
 import React from 'react';
 import guitarPictogramDark from '../../build/icon-dark.png';
+import { useLang } from '../lib/lang';
 
 type P = { size?: number };
 
@@ -294,23 +295,64 @@ const FILE_KIND_NAME: Record<string, string> = {
   key: '키 파일', crt: '인증서 파일', cer: '인증서 파일', p12: '인증서 파일', pfx: '인증서 파일',
 };
 
-export const getFileTypeDescription = (name: string) => {
+const FILE_KIND_NAME_EN: Record<string, string> = {
+  'bun.lock': 'Bun lockfile', 'bun.lockb': 'Bun lockfile', 'bunfig.toml': 'Bun config',
+  'pnpm-workspace.yaml': 'pnpm workspace config', '.npmrc': 'npm config', '.nvmrc': 'Node.js version config',
+  '.yarnrc': 'Yarn config', '.yarnrc.yml': 'Yarn config', 'biome.json': 'Biome config', 'biome.jsonc': 'Biome config',
+  'deno.json': 'Deno config', 'deno.jsonc': 'Deno config', 'vercel.json': 'Vercel deploy config',
+  'netlify.toml': 'Netlify deploy config', 'vite.config': 'Vite config', 'vitest.config': 'Vitest config',
+  'webpack.config': 'Webpack config', 'rollup.config': 'Rollup config', 'next.config': 'Next.js config',
+  'nuxt.config': 'Nuxt config', 'astro.config': 'Astro config', 'tailwind.config': 'Tailwind CSS config',
+  'postcss.config': 'PostCSS config', 'eslint.config': 'ESLint config', '.eslintrc': 'ESLint config',
+  '.prettierrc': 'Prettier config', '.babelrc': 'Babel config', 'tsconfig': 'TypeScript config',
+  'jsconfig': 'JavaScript project config', 'cargo.toml': 'Rust package config', 'cargo.lock': 'Rust lockfile',
+  'pyproject.toml': 'Python project config', 'requirements.txt': 'Python dependencies',
+  'requirements-dev.txt': 'Python dev dependencies', 'poetry.lock': 'Poetry lockfile',
+  'uv.lock': 'uv lockfile', 'composer.json': 'Composer package config', 'composer.lock': 'Composer lockfile',
+  'gemfile': 'Ruby dependencies', 'gemfile.lock': 'Ruby lockfile', 'go.mod': 'Go module config',
+  'go.sum': 'Go dependency checksums', 'go.work': 'Go workspace config', 'go.work.sum': 'Go workspace checksums',
+  'makefile': 'Make build script', 'justfile': 'Just task script', 'license': 'License document',
+  'changelog': 'Changelog', 'contributing': 'Contributing guide', '.gitmodules': 'Git submodule config',
+  ts: 'TypeScript', tsx: 'TypeScript React', mts: 'TypeScript module', cts: 'TypeScript CommonJS',
+  js: 'JavaScript', jsx: 'JavaScript React', mjs: 'JavaScript module', cjs: 'JavaScript CommonJS',
+  vue: 'Vue component', svelte: 'Svelte component', astro: 'Astro component', py: 'Python',
+  json: 'JSON data', jsonc: 'JSON config', json5: 'JSON5 data', md: 'Markdown document', mdx: 'MDX document',
+  css: 'CSS stylesheet', scss: 'SCSS stylesheet', less: 'Less stylesheet', html: 'HTML document', htm: 'HTML document',
+  rs: 'Rust', go: 'Go', java: 'Java', cs: 'C#', cpp: 'C++', c: 'C', swift: 'Swift', kt: 'Kotlin',
+  yaml: 'YAML config', yml: 'YAML config', toml: 'TOML config', xml: 'XML document', ini: 'INI config',
+  sh: 'Shell script', bash: 'Bash script', ps1: 'PowerShell script', bat: 'Windows batch file',
+  png: 'PNG image', jpg: 'JPEG image', jpeg: 'JPEG image', webp: 'WebP image', gif: 'GIF image', svg: 'SVG vector image',
+  pdf: 'PDF document', doc: 'Word document', docx: 'Word document', xls: 'Excel spreadsheet', xlsx: 'Excel spreadsheet',
+  ppt: 'PowerPoint presentation', pptx: 'PowerPoint presentation', mp3: 'Audio file', wav: 'Audio file',
+  mp4: 'Video file', mov: 'Video file', zip: 'ZIP archive', rar: 'RAR archive', '7z': '7-Zip archive',
+  sql: 'SQL database script', prisma: 'Prisma schema', graphql: 'GraphQL schema', gql: 'GraphQL schema',
+  'tar.gz': 'TAR.GZ archive', tgz: 'TAR.GZ archive', heic: 'HEIC image', heif: 'HEIF image', raw: 'RAW image',
+  cr2: 'Canon RAW image', dng: 'DNG RAW image', opus: 'Opus audio file', mid: 'MIDI audio file', midi: 'MIDI audio file',
+  avi: 'AVI video file', m4v: 'M4V video file', mpeg: 'MPEG video file', mpg: 'MPEG video file',
+  db: 'Database file', sqlite: 'SQLite database', sqlite3: 'SQLite database', pem: 'Certificate or key file',
+  key: 'Key file', crt: 'Certificate file', cer: 'Certificate file', p12: 'Certificate file', pfx: 'Certificate file',
+};
+
+export const getFileTypeDescription = (name: string, lang?: string) => {
+  const en = lang === 'en';
+  const kindName = en ? FILE_KIND_NAME_EN : FILE_KIND_NAME;
   const base = name.split(/[\\/]/).pop()?.toLowerCase() || '';
   const ext = base.startsWith('.') && !base.slice(1).includes('.') ? base.slice(1) : base.split('.').pop() || '';
   const compoundExt = base.endsWith('.tar.gz') ? 'tar.gz' : ext;
   const specialName = Object.keys(SPECIAL_FILE_KIND).find((key) => base === key || base.startsWith(`${key}.`));
   const configStem = base.replace(/\.(jsonc?|mjs|cjs|js|ts|mts|cts|yaml|yml)$/, '');
   const typeName = base === 'dockerfile' || base.startsWith('dockerfile.')
-    ? 'Docker 설정'
-    : base === 'package.json' ? 'Node.js 패키지 설정'
-      : base === 'package-lock.json' || base === 'pnpm-lock.yaml' || base === 'yarn.lock' || base === 'bun.lock' || base === 'bun.lockb' ? '패키지 잠금 파일'
-        : base === '.env' || base.startsWith('.env.') ? '환경 변수 파일'
-          : base === 'readme' || base.startsWith('readme.') ? 'README 문서'
-          : FILE_KIND_NAME[specialName || ''] || FILE_KIND_NAME[configStem] || FILE_KIND_NAME[compoundExt] || FILE_KIND_NAME[ext] || (ext ? `${ext.toUpperCase()} 파일` : '일반 파일');
+    ? (en ? 'Docker config' : 'Docker 설정')
+    : base === 'package.json' ? (en ? 'Node.js package config' : 'Node.js 패키지 설정')
+      : base === 'package-lock.json' || base === 'pnpm-lock.yaml' || base === 'yarn.lock' || base === 'bun.lock' || base === 'bun.lockb' ? (en ? 'Package lockfile' : '패키지 잠금 파일')
+        : base === '.env' || base.startsWith('.env.') ? (en ? 'Environment file' : '환경 변수 파일')
+          : base === 'readme' || base.startsWith('readme.') ? (en ? 'README document' : 'README 문서')
+          : kindName[specialName || ''] || kindName[configStem] || kindName[compoundExt] || kindName[ext] || (ext ? `${ext.toUpperCase()} ${en ? 'file' : '파일'}` : (en ? 'Generic file' : '일반 파일'));
   return typeName;
 };
 
 export const FileTypeIcon = ({ name, size = 15 }: { name: string; size?: number }) => {
+  const lang = useLang();
   const base = name.split(/[\\/]/).pop()?.toLowerCase() || '';
   const ext = base.startsWith('.') && !base.slice(1).includes('.') ? base.slice(1) : base.split('.').pop() || '';
   const compoundExt = base.endsWith('.tar.gz') ? 'tar.gz' : ext;
@@ -331,7 +373,7 @@ export const FileTypeIcon = ({ name, size = 15 }: { name: string; size?: number 
       : base === 'readme' || base.startsWith('readme.')
         ? { label: 'R', color: '#81b8f4' }
         : (specialName && SPECIAL_FILE_KIND[specialName]) || SPECIAL_FILE_KIND[configStem] || FILE_KIND[compoundExt] || FILE_KIND[ext] || { label: '', color: '#9299a4' };
-  const typeName = getFileTypeDescription(name);
+  const typeName = getFileTypeDescription(name, lang);
   return (
     <svg width={size} height={size} viewBox="0 0 20 22" fill="none" className="tree-file-icon" aria-hidden="true">
       <title>{`${typeName} · ${base}`}</title>

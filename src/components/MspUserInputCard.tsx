@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import type { MspUserInputAnswer, MspUserInputPrompt } from '../types';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
+import { useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 interface Props {
   prompt: MspUserInputPrompt;
@@ -9,6 +11,7 @@ interface Props {
 }
 
 export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) {
+  const s = useStrings();
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [freeText, setFreeText] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -31,7 +34,7 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
       return text.length > 500 || (!text && (question.selection.mode === 'single' ? choices.length !== 1 : choices.length < min));
     });
     if (missing) {
-      setError(`“${missing.header || missing.question}”에 답을 선택하거나 직접 입력해줘.`);
+      setError(formatStr(s.msp.missingAnswer, { header: missing.header || missing.question }));
       setErrorQuestionId(missing.id);
       scheduleAfterPaint(() => document.getElementById(`msp-user-input-question-${prompt.key}-${missing.id}`)?.focus());
       return;
@@ -51,7 +54,7 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
     try {
       const result = await onAnswer(answers);
       if (result.ok) setSubmitted(true);
-      else setError(result.error || '답변을 보내지 못했어. 다시 시도해줘.');
+      else setError(result.error || s.msp.sendFailed);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -67,7 +70,7 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
     try {
       const result = await onCancel();
       if (result.ok) setSubmitted(true);
-      else setError(result.error || '질문을 건너뛰지 못했어. 다시 시도해줘.');
+      else setError(result.error || s.msp.skipFailed);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -79,12 +82,12 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
     <section className="msp-user-input-card" aria-labelledby={`msp-user-input-title-${prompt.key}`}>
       <div className="msp-user-input-heading">
         <div>
-          <strong id={`msp-user-input-title-${prompt.key}`}>{prompt.toolName}가 확인을 요청했어</strong>
-          <span>답변은 이 세션으로 전달돼.</span>
+          <strong id={`msp-user-input-title-${prompt.key}`}>{formatStr(s.msp.confirmRequest, { tool: prompt.toolName })}</strong>
+          <span>{s.msp.answerRouted}</span>
         </div>
         <span className="tag tag-msp">MSP</span>
       </div>
-      {submitted ? <div className="msp-user-input-submitted" role="status">응답을 보냈어. Muse가 계속 진행 중이야…</div> : (
+      {submitted ? <div className="msp-user-input-submitted" role="status">{s.msp.submitted}</div> : (
         <form onSubmit={(event) => void submit(event)}>
           {prompt.questions.map((question, index) => {
             const chosen = selected[question.id] || [];
@@ -99,7 +102,7 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
                 aria-invalid={errorQuestionId === question.id}
                 aria-describedby={errorQuestionId === question.id ? `msp-user-input-error-${prompt.key}` : undefined}
               >
-                <legend><span>{question.header || `질문 ${index + 1}`}</span>{question.question}</legend>
+                <legend><span>{question.header || formatStr(s.msp.questionN, { n: index + 1 })}</span>{question.question}</legend>
                 <div className="msp-input-options">
                   {question.options.map((option) => {
                     const checked = chosen.includes(option.label);
@@ -125,13 +128,13 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
                         <span className="msp-input-option-copy">
                           <b>{option.label}</b>
                           {option.description && <small>{option.description}</small>}
-                          {option.preview && <details><summary>미리보기</summary><pre>{option.preview.content}</pre></details>}
+                          {option.preview && <details><summary>{s.msp.preview}</summary><pre>{option.preview.content}</pre></details>}
                         </span>
                       </label>
                     );
                   })}
                 </div>
-                <label className="msp-input-free-text">직접 입력 (선택지를 대신할 수 있어)
+                <label className="msp-input-free-text">{s.msp.freeText}
                   <input
                     type="text"
                     maxLength={500}
@@ -145,14 +148,14 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
                     }}
                   />
                 </label>
-                {multi && <small className="msp-input-limit">최소 {question.selection.minSelections ?? 1}개 · 최대 {max}개 선택</small>}
+                {multi && <small className="msp-input-limit">{formatStr(s.msp.limitMinMax, { min: question.selection.minSelections ?? 1, max })}</small>}
               </fieldset>
             );
           })}
           {error && <div id={`msp-user-input-error-${prompt.key}`} className="msp-input-error" role="alert">{error}</div>}
           <div className="msp-user-input-actions">
-            <button className="btn" type="button" onClick={() => void skip()} disabled={busy}>이번 질문 건너뛰기</button>
-            <button className="btn btn-primary" type="submit" disabled={busy}>{busy ? '보내는 중…' : '답변 보내기'}</button>
+            <button className="btn" type="button" onClick={() => void skip()} disabled={busy}>{s.msp.skip}</button>
+            <button className="btn btn-primary" type="submit" disabled={busy}>{busy ? s.msp.sending : s.msp.send}</button>
           </div>
         </form>
       )}

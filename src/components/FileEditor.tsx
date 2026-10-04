@@ -7,6 +7,8 @@ import { adjustImageZoom, imageZoomPercent } from '../lib/image-zoom.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { CheckIcon, ChevronRightIcon, ClockIcon, CopyIcon, DiffIcon, ExternalLinkIcon, RefreshIcon, SaveIcon, SearchIcon, SendIcon, StarIcon } from './icons';
 import remarkGfm from 'remark-gfm';
+import { useLang, useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 const ReactMarkdown = React.lazy(() => import('react-markdown'));
 const loadMonaco = () => import('../lib/monacoSetup').then(() => import('@monaco-editor/react'));
@@ -51,6 +53,8 @@ interface Props {
 // Single-file code tab content. Only the active tab registers the shared
 // EditorApi (chat "insert at cursor" / line reveal target it).
 export default function FileEditor(props: Props) {
+  const s = useStrings();
+  const lang = useLang();
   const { file, monacoTheme, active, onChange, onSave, onReload, onOpenExternal, onToggleDiff, onSearchSelection, apiRef } = props;
   const isMarkdown = /\.(md|markdown|mdx)$/i.test(file.path);
   const locationKey = (location: { path: string; line: number; column: number }) => `${location.path.replace(/\\/g, '/').toLocaleLowerCase()}:${location.line}:${location.column}`;
@@ -134,7 +138,7 @@ export default function FileEditor(props: Props) {
       ...selection,
       relativePath: relativePathFromRoot(props.workspaceRoot, file.path),
       language: languageFromPath(file.path),
-    });
+    }, lang);
     if (prompt) window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text: prompt } }));
   };
 
@@ -229,7 +233,7 @@ export default function FileEditor(props: Props) {
     setPreviewError('');
     setPreviewLoading(true);
     if (!hasBridge()) {
-      setPreviewError('Electron 앱에서 파일 미리보기를 사용할 수 있어.');
+      setPreviewError(s.editor.previewDesktopOnly);
       setPreviewLoading(false);
       return;
     }
@@ -241,8 +245,8 @@ export default function FileEditor(props: Props) {
             : file.preview === 'video' ? result.mime?.startsWith('video/')
               : false;
       if (!result.ok || !result.base64 || !validMime) {
-        const typeName = file.preview === 'image' ? '이미지' : file.preview === 'pdf' ? 'PDF' : file.preview === 'audio' ? '오디오' : '영상';
-        setPreviewError(result.error === 'TOO_LARGE' ? `${typeName} 파일이 너무 커서 미리볼 수 없어 (8MB 제한).` : result.error || `${typeName} 미리보기를 불러오지 못했어.`);
+        const typeName = file.preview === 'image' ? s.editor.mediaImage : file.preview === 'pdf' ? s.editor.mediaPdf : file.preview === 'audio' ? s.editor.mediaAudio : s.editor.mediaVideo;
+        setPreviewError(result.error === 'TOO_LARGE' ? formatStr(s.editor.tooLarge, { type: typeName }) : result.error || formatStr(s.editor.previewLoadFailed, { type: typeName }));
         return;
       }
       setPreviewDataUrl(`data:${result.mime};base64,${result.base64}`);
@@ -299,9 +303,9 @@ export default function FileEditor(props: Props) {
       }}>
         <span className="editor-location-history-file">{relativePath}</span>
         <span className="editor-location-history-line">{location.line}:{location.column}</span>
-        {current && <span className="editor-location-history-current">현재</span>}
+        {current && <span className="editor-location-history-current">{s.editor.locCurrent}</span>}
       </button>
-      <button type="button" role="menuitemcheckbox" aria-checked={bookmarked} className={bookmarked ? 'editor-location-bookmark on' : 'editor-location-bookmark'} aria-label={bookmarked ? `${relativePath} ${location.line}줄 북마크 해제` : `${relativePath} ${location.line}줄 북마크 저장`} title={bookmarked ? '북마크 해제' : '북마크 저장'} onClick={() => props.onToggleNavigationBookmark(location)}>
+      <button type="button" role="menuitemcheckbox" aria-checked={bookmarked} className={bookmarked ? 'editor-location-bookmark on' : 'editor-location-bookmark'} aria-label={formatStr(bookmarked ? s.editor.bookmarkOff : s.editor.bookmarkOn, { path: relativePath, line: location.line })} title={bookmarked ? s.editor.unbookmarkTitle : s.editor.bookmarkTitle} onClick={() => props.onToggleNavigationBookmark(location)}>
         <StarIcon size={13} filled={bookmarked} />
       </button>
     </div>;
@@ -313,22 +317,22 @@ export default function FileEditor(props: Props) {
         <span className="file-name" title={file.path}>
           {file.dirty && !file.readOnly && <span className="dirty-dot" />} {file.name}
         </span>
-        <span className={`file-status${file.diskState ? ` disk-${file.diskState}` : ''}`} role={file.diskState ? 'status' : undefined}>{file.diskState === 'missing' ? '디스크에서 삭제됨' : file.diskState === 'unavailable' ? '파일을 불러올 수 없음' : file.diskState === 'changed' ? '디스크 변경됨 · 저장 안 됨' : file.preview === 'image' ? '이미지 미리보기' : file.preview === 'pdf' ? 'PDF 미리보기' : file.preview === 'audio' ? '오디오 미리보기' : file.preview === 'video' ? '영상 미리보기' : file.preview === 'binary' ? '바이너리 파일' : file.dirty ? '저장 안 됨' : '저장됨'}</span>
-        <button type="button" className="file-path-context" title={`파일 경로 복사: ${file.path}`} aria-label={`파일 경로 복사: ${file.path}`} onClick={props.onCopyPath}>
-          <span>{relativePathFromRoot(props.workspaceRoot, file.path).split('/').slice(0, -1).join(' / ') || '프로젝트 루트'}</span>
+        <span className={`file-status${file.diskState ? ` disk-${file.diskState}` : ''}`} role={file.diskState ? 'status' : undefined}>{file.diskState === 'missing' ? s.editor.statusMissing : file.diskState === 'unavailable' ? s.editor.statusUnavailable : file.diskState === 'changed' ? s.editor.statusChanged : file.preview === 'image' ? s.editor.statusImage : file.preview === 'pdf' ? s.editor.statusPdf : file.preview === 'audio' ? s.editor.statusAudio : file.preview === 'video' ? s.editor.statusVideo : file.preview === 'binary' ? s.editor.statusBinary : file.dirty ? s.editor.statusDirty : s.editor.statusSaved}</span>
+        <button type="button" className="file-path-context" title={formatStr(s.editor.copyPathTitle, { path: file.path })} aria-label={formatStr(s.editor.copyPathTitle, { path: file.path })} onClick={props.onCopyPath}>
+          <span>{relativePathFromRoot(props.workspaceRoot, file.path).split('/').slice(0, -1).join(' / ') || s.editor.projectRoot}</span>
           <CopyIcon size={11} />
         </button>
-        {!file.preview && <button type="button" className="icon-btn editor-selection-prompt" title="선택한 코드와 파일 위치를 메시지 입력창에 추가" aria-label="선택한 코드를 메시지 입력창에 추가" disabled={!hasSelection} onClick={addSelectionToPrompt}><SendIcon size={13} /></button>}
-        {!file.preview && <button type="button" className="icon-btn editor-search-selection" title="선택한 텍스트를 프로젝트 파일에서 검색" aria-label="선택한 텍스트를 프로젝트 파일에서 검색" disabled={!hasSelection} onClick={onSearchSelection}><SearchIcon size={13} /></button>}
-        {!file.preview && <div className="editor-location-nav" role="group" aria-label="코드 위치 기록" ref={navigationMenuRef}>
-          <button type="button" className="icon-btn editor-location-nav-back" title="이전 코드 위치 (Alt+←)" aria-label="이전 코드 위치" aria-keyshortcuts="Alt+ArrowLeft" disabled={!props.canNavigateBack} onClick={props.onNavigateBack}><ChevronRightIcon size={13} /></button>
-          <button type="button" className="icon-btn editor-location-nav-forward" title="다음 코드 위치 (Alt+→)" aria-label="다음 코드 위치" aria-keyshortcuts="Alt+ArrowRight" disabled={!props.canNavigateForward} onClick={props.onNavigateForward}><ChevronRightIcon size={13} /></button>
-          <button type="button" className="icon-btn editor-location-nav-history" title="코드 위치 기록과 북마크" aria-label="코드 위치 기록과 북마크 열기" aria-haspopup="menu" aria-expanded={navigationMenuOpen} disabled={!props.navigationEntries.length && !props.navigationBookmarks.length} onClick={() => {
+        {!file.preview && <button type="button" className="icon-btn editor-selection-prompt" title={s.editor.addSelectionTitle} aria-label={s.editor.addSelectionLabel} disabled={!hasSelection} onClick={addSelectionToPrompt}><SendIcon size={13} /></button>}
+        {!file.preview && <button type="button" className="icon-btn editor-search-selection" title={s.editor.searchSelection} aria-label={s.editor.searchSelection} disabled={!hasSelection} onClick={onSearchSelection}><SearchIcon size={13} /></button>}
+        {!file.preview && <div className="editor-location-nav" role="group" aria-label={s.editor.locNavGroup} ref={navigationMenuRef}>
+          <button type="button" className="icon-btn editor-location-nav-back" title={s.editor.locBackTitle} aria-label={s.editor.locBackLabel} aria-keyshortcuts="Alt+ArrowLeft" disabled={!props.canNavigateBack} onClick={props.onNavigateBack}><ChevronRightIcon size={13} /></button>
+          <button type="button" className="icon-btn editor-location-nav-forward" title={s.editor.locFwdTitle} aria-label={s.editor.locFwdLabel} aria-keyshortcuts="Alt+ArrowRight" disabled={!props.canNavigateForward} onClick={props.onNavigateForward}><ChevronRightIcon size={13} /></button>
+          <button type="button" className="icon-btn editor-location-nav-history" title={s.editor.locMenuTitle} aria-label={s.editor.locMenuLabel} aria-haspopup="menu" aria-expanded={navigationMenuOpen} disabled={!props.navigationEntries.length && !props.navigationBookmarks.length} onClick={() => {
             const opening = !navigationMenuOpen;
             setNavigationMenuOpen(opening);
             if (opening) scheduleAfterPaint(() => navigationMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')?.focus());
           }}><ClockIcon size={13} /></button>
-          {navigationMenuOpen && <div className="editor-location-history-menu" role="menu" aria-label="최근 코드 위치" onKeyDown={(event) => {
+          {navigationMenuOpen && <div className="editor-location-history-menu" role="menu" aria-label={s.editor.locMenuAria} onKeyDown={(event) => {
             if (event.key === 'Escape') {
               event.preventDefault();
               setNavigationMenuOpen(false);
@@ -342,63 +346,63 @@ export default function FileEditor(props: Props) {
             }
           }}>
             {props.navigationBookmarks.length > 0 && <>
-              <div className="editor-location-history-head"><StarIcon size={11} filled /> 북마크 위치</div>
+              <div className="editor-location-history-head"><StarIcon size={11} filled /> {s.editor.bookmarksHead}</div>
               {props.navigationBookmarks.slice().reverse().map((location, index) => renderNavigationLocation(location, `bookmark:${locationKey(location)}:${index}`, false))}
             </>}
             {recentNavigationLocations.length > 0 && <>
-              <div className="editor-location-history-head">최근 코드 위치</div>
+              <div className="editor-location-history-head">{s.editor.recentHead}</div>
               {recentNavigationLocations.map(({ location, index }) => renderNavigationLocation(location, `recent:${locationKey(location)}:${index}`, index === props.navigationIndex))}
             </>}
           </div>}
         </div>}
-        {!file.preview && <button type="button" className="file-cursor-position" title="줄 또는 열로 이동 (Ctrl+G)" aria-label={`현재 줄 ${cursorPosition.line}, 열 ${cursorPosition.column}. 눌러서 위치로 이동`} onClick={props.onRequestGoToLine}>Ln {cursorPosition.line}, Col {cursorPosition.column}</button>}
-        {isMarkdown && !file.preview && !file.showDiff && <button type="button" className="btn editor-preview-toggle" title="Markdown 원문/미리보기 전환 (Ctrl+Shift+V)" aria-label="Markdown 미리보기 전환" aria-keyshortcuts="Control+Shift+V Meta+Shift+V" aria-pressed={markdownPreview} onClick={() => setMarkdownPreview((value) => !value)}>{markdownPreview ? '원문' : '미리보기'}</button>}
+        {!file.preview && <button type="button" className="file-cursor-position" title={s.editor.gotoTitle} aria-label={formatStr(s.editor.cursorLabel, { line: cursorPosition.line, column: cursorPosition.column })} onClick={props.onRequestGoToLine}>Ln {cursorPosition.line}, Col {cursorPosition.column}</button>}
+        {isMarkdown && !file.preview && !file.showDiff && <button type="button" className="btn editor-preview-toggle" title={s.editor.mdToggleTitle} aria-label={s.editor.mdToggleLabel} aria-keyshortcuts="Control+Shift+V Meta+Shift+V" aria-pressed={markdownPreview} onClick={() => setMarkdownPreview((value) => !value)}>{markdownPreview ? s.editor.sourceBtn : s.editor.previewBtn}</button>}
         {!file.preview && <button
           type="button"
           className={file.showDiff ? 'icon-btn on' : 'icon-btn'}
-          title={file.externalContent !== undefined ? '디스크 변경 내용과 비교 보기' : 'diff 보기 토글'}
-          aria-label={file.showDiff ? '변경 사항 diff 숨기기' : file.externalContent !== undefined ? '디스크 변경 내용과 비교 보기' : '변경 사항 diff 보기'}
+          title={file.externalContent !== undefined ? s.editor.diffExternal : s.editor.diffToggle}
+          aria-label={file.showDiff ? s.editor.diffHide : file.externalContent !== undefined ? s.editor.diffExternal : s.editor.diffShow}
           aria-pressed={file.showDiff}
           onClick={onToggleDiff}
         >
           <DiffIcon size={14} />
         </button>}
-        {!file.preview && !file.readOnly && <button className="icon-btn" type="button" onClick={onReload} title="디스크에서 다시 불러오기" aria-label="디스크에서 다시 불러오기">
+        {!file.preview && !file.readOnly && <button className="icon-btn" type="button" onClick={onReload} title={s.editor.reloadDisk} aria-label={s.editor.reloadDisk}>
           <RefreshIcon size={14} />
         </button>}
-        {file.preview && <button className="btn" type="button" onClick={onOpenExternal} title="운영체제 기본 앱에서 열기">
-          <ExternalLinkIcon size={14} /> 기본 앱
+        {file.preview && <button className="btn" type="button" onClick={onOpenExternal} title={s.editor.openExternalTitle}>
+          <ExternalLinkIcon size={14} /> {s.editor.defaultApp}
         </button>}
-        {file.preview === 'image' && <div className="file-image-zoom" role="group" aria-label="이미지 확대/축소">
-          <button type="button" title="이미지 축소 (Ctrl+마우스 휠 아래)" aria-label="이미지 축소" disabled={imageZoom <= 0.25} onClick={() => setImageZoom((value) => adjustImageZoom(value, -1))}>−</button>
-          <output aria-live="polite" aria-label={`이미지 확대 비율 ${imageZoomPercent(imageZoom)}`}>{imageZoomPercent(imageZoom)}</output>
-          <button type="button" title="이미지 확대 (Ctrl+마우스 휠 위)" aria-label="이미지 확대" disabled={imageZoom >= 5} onClick={() => setImageZoom((value) => adjustImageZoom(value, 1))}>+</button>
-          <button type="button" title="이미지 맞춤 크기로" aria-label="이미지 맞춤 크기로" onClick={() => setImageZoom(1)}>맞춤</button>
+        {file.preview === 'image' && <div className="file-image-zoom" role="group" aria-label={s.editor.zoomGroup}>
+          <button type="button" title={s.editor.zoomOutTitle} aria-label={s.editor.zoomOutLabel} disabled={imageZoom <= 0.25} onClick={() => setImageZoom((value) => adjustImageZoom(value, -1))}>−</button>
+          <output aria-live="polite" aria-label={formatStr(s.editor.zoomRatioLabel, { pct: imageZoomPercent(imageZoom) })}>{imageZoomPercent(imageZoom)}</output>
+          <button type="button" title={s.editor.zoomInTitle} aria-label={s.editor.zoomInLabel} disabled={imageZoom >= 5} onClick={() => setImageZoom((value) => adjustImageZoom(value, 1))}>+</button>
+          <button type="button" title={s.editor.zoomFit} aria-label={s.editor.zoomFit} onClick={() => setImageZoom(1)}>{s.editor.zoomFitBtn}</button>
         </div>}
         {!file.readOnly && (
           <button className="btn" onClick={onSave} disabled={!file.dirty}>
-            <SaveIcon size={14} /> 저장
+            <SaveIcon size={14} /> {s.common.save}
           </button>
         )}
       </div>
       <div className="file-body">
         {file.preview ? (
-          <div className={`file-media-preview file-preview-${file.preview}`} aria-label={`${file.name} ${file.preview} 미리보기`} onWheel={(event) => {
+          <div className={`file-media-preview file-preview-${file.preview}`} aria-label={formatStr(s.editor.mediaPreviewLabel, { name: file.name, preview: file.preview })} onWheel={(event) => {
             if (file.preview !== 'image' || !(event.ctrlKey || event.metaKey)) return;
             event.preventDefault();
             setImageZoom((value) => adjustImageZoom(value, event.deltaY < 0 ? 1 : -1));
           }}>
-            {previewLoading ? <div className="empty-note">미리보기를 불러오는 중…</div>
+            {previewLoading ? <div className="empty-note">{s.editor.loadingPreview}</div>
               : previewError ? <div className="tree-error">{previewError}</div>
-                : file.preview === 'binary' ? <div className="binary-preview-message"><strong>{file.name}</strong><span>이 형식은 텍스트 편집기에서 열 수 없어.</span><span>파일 아이콘과 이름으로 종류를 확인해줘.</span></div>
-                  : previewDataUrl && file.preview === 'image' ? <img src={previewDataUrl} alt={file.name} style={{ width: `${imageZoom * 100}%`, height: `${imageZoom * 100}%` }} onError={() => setPreviewError('이 이미지 형식은 앱에서 미리볼 수 없어.')} />
-                    : previewDataUrl && file.preview === 'pdf' ? <iframe src={previewDataUrl} title={`${file.name} PDF 미리보기`} onError={() => setPreviewError('PDF 미리보기를 표시하지 못했어.')} />
-                      : previewDataUrl && file.preview === 'audio' ? <audio src={previewDataUrl} controls onError={() => setPreviewError('이 오디오 코덱은 미리보기에서 지원하지 않아.')} />
-                        : previewDataUrl && file.preview === 'video' ? <video src={previewDataUrl} controls onError={() => setPreviewError('이 영상 코덱은 미리보기에서 지원하지 않아.')} /> : null}
+                : file.preview === 'binary' ? <div className="binary-preview-message"><strong>{file.name}</strong><span>{s.editor.binaryLine1}</span><span>{s.editor.binaryLine2}</span></div>
+                  : previewDataUrl && file.preview === 'image' ? <img src={previewDataUrl} alt={file.name} style={{ width: `${imageZoom * 100}%`, height: `${imageZoom * 100}%` }} onError={() => setPreviewError(s.editor.imgFormatErr)} />
+                    : previewDataUrl && file.preview === 'pdf' ? <iframe src={previewDataUrl} title={formatStr(s.editor.pdfTitle, { name: file.name })} onError={() => setPreviewError(s.editor.pdfErr)} />
+                      : previewDataUrl && file.preview === 'audio' ? <audio src={previewDataUrl} controls onError={() => setPreviewError(s.editor.audioErr)} />
+                        : previewDataUrl && file.preview === 'video' ? <video src={previewDataUrl} controls onError={() => setPreviewError(s.editor.videoErr)} /> : null}
           </div>
         ) : markdownPreview && isMarkdown && !file.showDiff ? (
-          <div className="markdown-file-preview" aria-label={`${file.name} Markdown 미리보기`}>
-            <React.Suspense fallback={<div className="editor-loading" role="status">미리보기를 불러오는 중…</div>}>
+          <div className="markdown-file-preview" aria-label={formatStr(s.editor.mdPreviewLabel, { name: file.name })}>
+            <React.Suspense fallback={<div className="editor-loading" role="status">{s.editor.loadingPreview}</div>}>
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
                 a({ href, children }: { href?: string; children?: React.ReactNode }) {
                   const openLink = (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -415,7 +419,7 @@ export default function FileEditor(props: Props) {
                   const code = markdownNodeText(children).replace(/\n$/, '');
                   const copied = copiedMarkdownCode === code;
                   return <div className="markdown-code-block">
-                    <button type="button" className="markdown-code-copy" onClick={() => void copyMarkdownCode(code)} aria-label={markdownCopyError && copied ? '코드 복사 실패' : copied ? '코드 복사됨' : '코드 복사'} title={markdownCopyError && copied ? '클립보드에 복사하지 못했어' : copied ? '복사됨' : '코드 복사'}>
+                    <button type="button" className="markdown-code-copy" onClick={() => void copyMarkdownCode(code)} aria-label={markdownCopyError && copied ? s.editor.codeCopyFailed : copied ? s.editor.codeCopied : s.editor.codeCopy} title={markdownCopyError && copied ? s.editor.copyFailedTitle : copied ? s.editor.copiedTitle : s.editor.codeCopy}>
                       {copied && !markdownCopyError ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
                     </button>
                     <pre>{children}</pre>
@@ -425,7 +429,7 @@ export default function FileEditor(props: Props) {
             </React.Suspense>
           </div>
         ) : file.showDiff ? (
-          <React.Suspense fallback={<div className="editor-loading" role="status">코드 편집기를 준비하는 중…</div>}>
+          <React.Suspense fallback={<div className="editor-loading" role="status">{s.editor.loadingEditor}</div>}>
             <MonacoDiffEditor
               key={`diff:${file.path}`}
               original={file.externalContent ?? file.original}
@@ -436,7 +440,7 @@ export default function FileEditor(props: Props) {
                 trackCursor(ed);
                 ed.getModifiedEditor().addAction({
                   id: 'musician.searchSelectionInFiles',
-                  label: '프로젝트 파일에서 선택 항목 검색',
+                  label: s.editor.searchSelectionCtx,
                   contextMenuGroupId: 'navigation',
                   contextMenuOrder: 1.5,
                   precondition: 'editorHasSelection',
@@ -451,7 +455,7 @@ export default function FileEditor(props: Props) {
             />
           </React.Suspense>
         ) : (
-          <React.Suspense fallback={<div className="editor-loading" role="status">코드 편집기를 준비하는 중…</div>}>
+          <React.Suspense fallback={<div className="editor-loading" role="status">{s.editor.loadingEditor}</div>}>
             <MonacoEditor
               key={`edit:${file.path}`}
               value={file.content}
@@ -462,7 +466,7 @@ export default function FileEditor(props: Props) {
                 trackCursor(ed);
                 ed.addAction({
                   id: 'musician.searchSelectionInFiles',
-                  label: '프로젝트 파일에서 선택 항목 검색',
+                  label: s.editor.searchSelectionCtx,
                   contextMenuGroupId: 'navigation',
                   contextMenuOrder: 1.5,
                   precondition: 'editorHasSelection',

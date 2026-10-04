@@ -97,9 +97,13 @@ const DEFAULT_SETTINGS = {
   browserAgent: true,
   browserHome: '',
   backgroundNotifications: true,
+  lang: 'ko',
 };
 function sanitizeTheme(value) {
   return value === 'light' ? 'light' : 'dark';
+}
+function sanitizeLang(value) {
+  return value === 'en' ? 'en' : 'ko';
 }
 function loadSettings() {
   try {
@@ -108,6 +112,7 @@ function loadSettings() {
     // strip the whole file is rejected and defaults silently take over.
     const merged = { ...DEFAULT_SETTINGS, ...JSON.parse(raw.replace(/^\uFEFF/, '')) };
     merged.theme = sanitizeTheme(merged.theme);
+    merged.lang = sanitizeLang(merged.lang);
     return merged;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -220,7 +225,10 @@ ipcMain.handle('mudex:show-notification', async (event, payload = {}) => {
   const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId.slice(0, 160) : '';
   const status = ['success', 'failed', 'stopped', 'scheduled'].includes(payload.status) ? payload.status : 'success';
   if (!sessionId) return { ok: false };
-  const body = status === 'success' ? '작업이 완료됐습니다.' : status === 'stopped' ? '작업이 중지됐습니다.' : status === 'scheduled' ? '예약된 프롬프트가 실행됐습니다.' : '작업이 실패했습니다.';
+  const notifyLang = loadSettings().lang;
+  const body = notifyLang === 'en'
+    ? status === 'success' ? 'Task completed.' : status === 'stopped' ? 'Task stopped.' : status === 'scheduled' ? 'Scheduled prompt ran.' : 'Task failed.'
+    : status === 'success' ? '작업이 완료됐습니다.' : status === 'stopped' ? '작업이 중지됐습니다.' : status === 'scheduled' ? '예약된 프롬프트가 실행됐습니다.' : '작업이 실패했습니다.';
   if (process.platform === 'win32') {
     const toastIcon = app.isPackaged
       ? path.join(process.resourcesPath, 'icon.ico')
@@ -405,10 +413,11 @@ ipcMain.handle('mudex:pick-files', async () => {
 ipcMain.handle('mudex:export-markdown', async (_e, { title: rawTitle, markdown }) => {
   try {
     if (typeof markdown !== 'string' || markdown.length > 25 * 1024 * 1024) return { ok: false, error: 'INVALID_CONTENT' };
-    const filename = exportMarkdownFilename(rawTitle);
+    const exportLang = loadSettings().lang;
+    const filename = exportMarkdownFilename(rawTitle, exportLang);
     const result = await dialog.showSaveDialog(win, {
-      title: '대화 Markdown으로 내보내기',
-      buttonLabel: '내보내기',
+      title: exportLang === 'en' ? 'Export conversation as Markdown' : '대화 Markdown으로 내보내기',
+      buttonLabel: exportLang === 'en' ? 'Export' : '내보내기',
       defaultPath: path.join(app.getPath('downloads'), `${filename}.md`),
       filters: [{ name: 'Markdown', extensions: ['md'] }],
     });
@@ -798,6 +807,7 @@ ipcMain.handle('mudex:get-settings', () => ({ ok: true, settings: loadSettings()
 ipcMain.handle('mudex:save-settings', (_e, patch) => {
   const next = { ...loadSettings(), ...(patch || {}) };
   next.theme = sanitizeTheme(next.theme);
+  next.lang = sanitizeLang(next.lang);
   return { ok: true, settings: persistSettings(next) };
 });
 
@@ -1075,7 +1085,7 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
       resolvedPath: resolved.path,
       source: resolved.source,
       mcpHealth: null,
-      diagnostics: { reason: 'EXEC_NO_SESSION_MCP', detail: 'exec 모드에서는 브라우저 도구를 쓸 수 없습니다' },
+      diagnostics: { reason: 'EXEC_NO_SESSION_MCP', detail: s.lang === 'en' ? 'Browser tools are unavailable in exec mode' : 'exec 모드에서는 브라우저 도구를 쓸 수 없습니다' },
     };
   }
   running.set(reqId, { engine: 'exec', child });
@@ -1116,7 +1126,7 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
     send('mudex:chat-done', { reqId, code, signal: signal || null });
   });
 
-  return { ok: true, reqId, engine: 'exec', cmd, cwd: workdir, resolvedPath: resolved.path, source: resolved.source, mcpHealth: null, diagnostics: { reason: 'EXEC_NO_SESSION_MCP', detail: 'exec 모드에서는 브라우저 도구를 쓸 수 없습니다' } };
+  return { ok: true, reqId, engine: 'exec', cmd, cwd: workdir, resolvedPath: resolved.path, source: resolved.source, mcpHealth: null, diagnostics: { reason: 'EXEC_NO_SESSION_MCP', detail: s.lang === 'en' ? 'Browser tools are unavailable in exec mode' : 'exec 모드에서는 브라우저 도구를 쓸 수 없습니다' } };
 });
 
 // ---------------------------------------------------------------- git (diff chips)

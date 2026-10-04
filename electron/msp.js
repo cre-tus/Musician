@@ -273,11 +273,13 @@ class MspEngine {
     return host;
   }
 
-  _assertMcpCapable(host, config, mspSessionId) {
+  _assertMcpCapable(host, config, mspSessionId, lang = 'ko') {
     const needsMcp = config && config.mcpServers && Object.keys(config.mcpServers).length > 0;
     if (needsMcp && host.sessionMcp === false) {
       this.send('msp:mcp-unavailable', { key: host.key, mspSessionId: mspSessionId || null });
-      throw serveError('CLI_NO_SESSION_MCP', '브라우저 도구를 쓰려면 Muse CLI 업데이트가 필요합니다 (세션 MCP 미지원)');
+      throw serveError('CLI_NO_SESSION_MCP', lang === 'en'
+        ? 'Browser tools need a Muse CLI update (session MCP unsupported)'
+        : '브라우저 도구를 쓰려면 Muse CLI 업데이트가 필요합니다 (세션 MCP 미지원)');
     }
   }
 
@@ -313,7 +315,7 @@ class MspEngine {
     const s = settings || {};
     const id = (live && live.mspSessionId) || mspSessionId;
     const config = this.getSessionConfig ? await this.getSessionConfig(s) : undefined;
-    this._assertMcpCapable(host, config, id);
+    this._assertMcpCapable(host, config, id, s.lang);
     // Optional servers fail silently on the host (no error, no event), so
     // pre-flight them here and publish the result for UI/logs. The config is
     // left intact: the host still decides, and editing it could desync a
@@ -342,12 +344,14 @@ class MspEngine {
         if (!/conflicts with the loaded session runtime/.test(String((err && err.message) || err))) throw err;
         const busy = [...this.threads.values()].some((t) => t.host === host && !t.host.dead && t.turnId);
         if (busy) {
-          throw serveError('CLI_MCP_CONFIG_CONFLICT', '다른 대화가 진행 중입니다. 끝난 뒤 다시 이어하기하면 브라우저 도구 설정이 적용됩니다');
+          throw serveError('CLI_MCP_CONFIG_CONFLICT', s.lang === 'en'
+            ? 'Another conversation is running. Resume again after it ends to apply the browser tool settings'
+            : '다른 대화가 진행 중입니다. 끝난 뒤 다시 이어하기하면 브라우저 도구 설정이 적용됩니다');
         }
         this.send('msp:host-bounced', { key: host.key, reason: 'mcp-config-conflict' });
         await this._dropHost(host);
         host = await this.ensureHost(cwd, settings);
-        this._assertMcpCapable(host, config, id);
+        this._assertMcpCapable(host, config, id, s.lang);
         res = await attempt();
       }
       session = new Session({

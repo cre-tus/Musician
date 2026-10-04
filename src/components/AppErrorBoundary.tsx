@@ -1,4 +1,17 @@
 import React from 'react';
+import { STRINGS, sanitizeLang } from '../lib/i18n.mjs';
+
+function crashStrings() {
+  // The boundary sits above the language provider (and renders when React
+  // itself broke), so it reads the last persisted language directly.
+  let lang: 'ko' | 'en' = 'ko';
+  try {
+    lang = sanitizeLang(localStorage.getItem('mudex:lang'));
+  } catch {
+    /* fall back to Korean */
+  }
+  return STRINGS[lang];
+}
 
 interface State {
   error: Error | null;
@@ -33,21 +46,22 @@ export default class AppErrorBoundary extends React.Component<React.PropsWithChi
   render() {
     const { error, copied } = this.state;
     if (!error) return this.props.children;
+    const s = crashStrings();
 
     return (
       <main className="app-crash" role="alert">
         <section className="app-crash-card" aria-labelledby="app-crash-title">
           <div className="app-crash-mark" aria-hidden="true">!</div>
           <p className="app-crash-eyebrow">Musician</p>
-          <h1 id="app-crash-title">화면을 표시하지 못했어</h1>
-          <p className="app-crash-copy">오류가 발생했지만 앱을 다시 불러오거나 오류 내용을 복사해 복구를 이어갈 수 있어.</p>
+          <h1 id="app-crash-title">{s.crash.title}</h1>
+          <p className="app-crash-copy">{s.crash.copy}</p>
           <details className="app-crash-details">
-            <summary>오류 내용 보기</summary>
+            <summary>{s.crash.showDetails}</summary>
             <pre>{error.name}: {error.message}{'\n'}{error.stack}</pre>
           </details>
           <div className="app-crash-actions">
-            <button className="btn" type="button" onClick={() => void this.copyError()}>{copied ? '복사했어' : '오류 내용 복사'}</button>
-            <button className="btn-primary" type="button" onClick={() => window.location.reload()}>앱 다시 불러오기</button>
+            <button className="btn" type="button" onClick={() => void this.copyError()}>{copied ? s.crash.copied : s.crash.copyAction}</button>
+            <button className="btn-primary" type="button" onClick={() => window.location.reload()}>{s.crash.reload}</button>
           </div>
         </section>
       </main>

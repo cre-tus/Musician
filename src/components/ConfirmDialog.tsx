@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { useStrings } from '../lib/lang';
 
 export interface ConfirmOptions {
   title: string;
@@ -15,6 +16,7 @@ interface Props extends ConfirmOptions {
 }
 
 export default function ConfirmDialog({ title, message, confirmLabel, alternateLabel, destructive = false, onResolve }: Props) {
+  const s = useStrings();
   const dialogRef = useRef<HTMLElement | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
 
@@ -47,7 +49,7 @@ export default function ConfirmDialog({ title, message, confirmLabel, alternateL
         <div className="modal-header"><h3 id="confirm-dialog-title">{title}</h3></div>
         <div className="modal-body"><p id="confirm-dialog-message" className="confirm-dialog-message">{message}</p></div>
         <div className="modal-footer">
-          <button ref={cancelRef} className="btn" type="button" onClick={() => onResolve('cancel')}>취소</button>
+          <button ref={cancelRef} className="btn" type="button" onClick={() => onResolve('cancel')}>{s.common.cancel}</button>
           {alternateLabel && <button className="btn" type="button" onClick={() => onResolve('alternate')}>{alternateLabel}</button>}
           <button className={destructive ? 'btn-danger' : 'btn-primary'} type="button" onClick={() => onResolve('confirm')}>{confirmLabel}</button>
         </div>

@@ -11,6 +11,8 @@ import { allVisibleSidebarSessionsSelected, selectSidebarSessionRange, selectVis
 import { normalizePathForComparison } from '../lib/path-utils.mjs';
 import { filterHostSessions } from '../lib/host-session-filter.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
+import { formatStr } from '../lib/i18n.mjs';
+import { useLang, useStrings } from '../lib/lang';
 import {
   ArchiveIcon,
   ChatIcon,
@@ -115,6 +117,9 @@ function highlightSidebarText(value: string, query: string): React.ReactNode {
 }
 
 export default function Sidebar(props: Props) {
+  const lang = useLang();
+  const strings = useStrings();
+  const sb = strings.sidebar;
   const draftSessionIdSet = useMemo(() => new Set(props.draftSessionIds), [props.draftSessionIds]);
   const [query, setQuery] = useState('');
   const [queryHelpOpen, setQueryHelpOpen] = useState(false);
@@ -148,14 +153,14 @@ export default function Sidebar(props: Props) {
   const mspState = props.msp?.state || 'idle';
   const cliText =
     cliStatus === 'ok'
-      ? 'Muse 준비됨'
+      ? sb.cliReady
       : cliStatus === 'missing'
-        ? 'CLI 없음'
+        ? sb.cliMissing
         : cliStatus === 'checking'
-          ? '확인 중…'
+          ? sb.cliChecking
           : cliStatus === 'error'
-            ? 'CLI 오류'
-            : '미확인';
+            ? sb.cliError
+            : sb.cliUnknown;
   const cliDot =
     cliStatus === 'ok'
       ? 's-dot ok'
@@ -166,11 +171,11 @@ export default function Sidebar(props: Props) {
           : 's-dot';
   const profileSub =
     mspState === 'warming'
-      ? `${cliText} · MSP 연결 중…`
+      ? `${cliText} · ${sb.mspConnecting}`
       : mspState === 'error'
-        ? `${cliText} · MSP 실패`
+        ? `${cliText} · ${sb.mspFailed}`
         : mspState === 'ok'
-          ? `${cliText} · MSP 연결됨`
+          ? `${cliText} · ${sb.mspConnected}`
           : cliText;
   const [profileOpen, setProfileOpen] = useState(false);
   const profileDialogRef = useRef<HTMLElement | null>(null);
@@ -354,9 +359,9 @@ export default function Sidebar(props: Props) {
       const failed = activeFiltered.filter((s) => !runningIds.includes(s.id) && isSidebarSessionFailed(s)).sort(byPreference);
       const rest = activeFiltered.filter((s) => !runningIds.includes(s.id) && !isSidebarSessionFailed(s)).sort(byPreference);
       return [
-        { key: 'st-running', title: '실행 중', items: running },
-        { key: 'st-failed', title: '실패', items: failed },
-        { key: 'st-rest', title: '나머지', items: rest },
+        { key: 'st-running', title: sb.statusRunning, items: running },
+        { key: 'st-failed', title: sb.statusFailed, items: failed },
+        { key: 'st-rest', title: sb.statusRest, items: rest },
       ].filter((g) => g.items.length > 0);
     }
     const map = new Map<string, Session[]>();
@@ -380,9 +385,9 @@ export default function Sidebar(props: Props) {
         return (q ? (sessionSearchScores.get(b.id) || 0) - (sessionSearchScores.get(a.id) || 0) : 0)
           || pinnedOrder || br - ar || compareSidebarSessions(a, b, sessionSort);
       });
-      return { key: cwd || '(none)', title: cwd ? baseName(cwd) : '폴더 없음', sub: cwd || undefined, items: sorted };
+      return { key: cwd || '(none)', title: cwd ? baseName(cwd) : sb.noFolder, sub: cwd || undefined, items: sorted };
     });
-  }, [activeFiltered, groupBy, pinnedProjectKeys, runningIds, props.projects, sessionSort, q, sessionSearchScores]);
+  }, [activeFiltered, groupBy, pinnedProjectKeys, runningIds, props.projects, sb, sessionSort, q, sessionSearchScores]);
 
   const toggleGroup = (key: string) => setOpenGroupsByMode((previous) => ({
     ...previous,
@@ -413,17 +418,17 @@ export default function Sidebar(props: Props) {
           <GuitarIcon size={24} />
         </span>
         <span className="brand-name">Musician</span>
-        <button type="button" className="icon-btn brand-collapse" onClick={props.onCollapse} title="사이드바 숨기기 (Ctrl+B)" aria-label="사이드바 숨기기">
+        <button type="button" className="icon-btn brand-collapse" onClick={props.onCollapse} title={sb.hideSidebarTitle} aria-label={sb.hideSidebar}>
           <SidebarIcon size={16} />
         </button>
       </div>
 
       <div className="side-actions">
-        <button className="side-action" onClick={props.onOpenFiles} title="파일 탐색기 열기 (Ctrl+Shift+E)">
-          <ExplorerIcon size={15} /> 파일 탐색기
+        <button className="side-action" onClick={props.onOpenFiles} title={sb.openExplorerTitle}>
+          <ExplorerIcon size={15} /> {sb.explorer}
         </button>
-        <button className="side-action" onClick={props.onNew} title="새 스레드 (Ctrl+N)" aria-keyshortcuts="Control+N Meta+N">
-          <PencilIcon size={15} /> 새 스레드
+        <button className="side-action" onClick={props.onNew} title={sb.newThreadTitle} aria-keyshortcuts="Control+N Meta+N">
+          <PencilIcon size={15} /> {strings.common.newThread}
         </button>
         <div className="side-search-wrap" ref={sessionSearchShellRef} onKeyDown={(event) => {
           if (event.key === 'Escape' && queryHelpOpen) {
@@ -462,41 +467,41 @@ export default function Sidebar(props: Props) {
                 }
               }
             }}
-            placeholder="세션 검색 · in:경로 · is:실패 · has:초안"
-            title="검색 조건: in:경로, is:실행중/실패/고정/보관, has:초안/대기열. 조건과 일반 검색어를 함께 쓸 수 있어요."
-            aria-label="세션 검색. in:경로, is:실패/고정/실행중/보관, has:초안/대기열 조건을 사용할 수 있습니다. 아래/위 화살표로 결과 이동, Enter로 열기, Esc로 검색어 지우기"
+            placeholder={sb.searchPlaceholder}
+            title={sb.searchTitle}
+            aria-label={sb.searchLabel}
             />
-            {query && <button type="button" className="icon-btn side-search-clear" onClick={() => setQuery('')} aria-label="검색 지우기" title="검색 지우기 (Esc)"><XIcon size={13} /></button>}
+            {query && <button type="button" className="icon-btn side-search-clear" onClick={() => setQuery('')} aria-label={sb.searchClear} title={sb.searchClearTitle}><XIcon size={13} /></button>}
           </div>
-          <button type="button" className={queryHelpOpen ? 'icon-btn session-search-help-toggle active' : 'icon-btn session-search-help-toggle'} aria-label="세션 검색 조건 도움말" aria-expanded={queryHelpOpen} aria-haspopup="dialog" aria-controls="session-search-help" title="고급 검색 조건 도움말" onClick={() => setQueryHelpOpen((open) => !open)}>
+          <button type="button" className={queryHelpOpen ? 'icon-btn session-search-help-toggle active' : 'icon-btn session-search-help-toggle'} aria-label={sb.searchHelp} aria-expanded={queryHelpOpen} aria-haspopup="dialog" aria-controls="session-search-help" title={sb.searchHelpTitle} onClick={() => setQueryHelpOpen((open) => !open)}>
             <SlidersIcon size={14} />
           </button>
-          {queryHelpOpen && <div className="session-search-help" id="session-search-help" role="dialog" aria-label="세션 검색 조건 도움말">
-            <div className="session-search-help-title">검색 조건</div>
-            <p><code>in:</code> 뒤에 프로젝트 경로를 입력하세요. 공백이 있으면 따옴표로 묶고, 다른 조건과 함께 조합할 수 있어요.</p>
-            <div className="session-search-help-group"><span>프로젝트</span><button type="button" title="프로젝트 경로 조건 시작" onClick={() => addSearchToken('in:')}><code>in:</code><span>경로 조건 시작</span></button></div>
-            <div className="session-search-help-group"><span>상태</span>{[['is:running', '실행 중'], ['is:failed', '실패'], ['is:pinned', '고정'], ['is:archived', '보관']].map(([token, label]) => <button type="button" key={token} title={`${token} 조건 추가`} onClick={() => addSearchToken(token)}><code>{token}</code><span>{label}</span></button>)}</div>
-            <div className="session-search-help-group"><span>포함 조건</span>{[['has:draft', '초안'], ['has:queued', '대기열']].map(([token, label]) => <button type="button" key={token} title={`${token} 조건 추가`} onClick={() => addSearchToken(token)}><code>{token}</code><span>{label}</span></button>)}</div>
+          {queryHelpOpen && <div className="session-search-help" id="session-search-help" role="dialog" aria-label={sb.searchHelp}>
+            <div className="session-search-help-title">{sb.searchHelpHeading}</div>
+            <p><code>in:</code> {sb.searchHelpInDesc}</p>
+            <div className="session-search-help-group"><span>{sb.searchHelpGroupProject}</span><button type="button" title={sb.searchHelpStartInTitle} onClick={() => addSearchToken('in:')}><code>in:</code><span>{sb.searchHelpStartIn}</span></button></div>
+            <div className="session-search-help-group"><span>{sb.searchHelpGroupStatus}</span>{[['is:running', sb.statusRunning], ['is:failed', sb.statusFailed], ['is:pinned', sb.pinBtn], ['is:archived', sb.archiveBtn]].map(([token, label]) => <button type="button" key={token} title={formatStr(sb.searchHelpAddToken, { token })} onClick={() => addSearchToken(token)}><code>{token}</code><span>{label}</span></button>)}</div>
+            <div className="session-search-help-group"><span>{sb.searchHelpGroupInclude}</span>{[['has:draft', sb.draftTag], ['has:queued', sb.filterQueued]].map(([token, label]) => <button type="button" key={token} title={formatStr(sb.searchHelpAddToken, { token })} onClick={() => addSearchToken(token)}><code>{token}</code><span>{label}</span></button>)}</div>
           </div>}
         </div>
       </div>
 
-      <div className="session-filters" role="group" aria-label="세션 빠른 필터">
+      <div className="session-filters" role="group" aria-label={sb.filterGroup}>
         {([
-          ['all', '전체'],
-          ['pinned', '고정'],
-          ['running', '실행 중'],
-          ['failed', '실패'],
-          ['draft', '초안 있음'],
-          ['queued', '대기열'],
-        ] as const).map(([filter, label]) => (
+          ['all', sb.filterAll],
+          ['pinned', sb.filterPinned],
+          ['running', sb.filterRunning],
+          ['failed', sb.filterFailed],
+          ['draft', sb.filterDraft],
+          ['queued', sb.filterQueued],
+        ] as Array<readonly [typeof sessionFilter, string]>).map(([filter, label]) => (
           <button
             key={filter}
             type="button"
             className={sessionFilter === filter ? 'session-filter active' : 'session-filter'}
             aria-pressed={sessionFilter === filter}
-            aria-label={`${label} 세션 ${sessionFilterCounts[filter]}개`}
-            title={`${label} 세션 ${sessionFilterCounts[filter]}개`}
+            aria-label={formatStr(sb.filterCount, { label, count: sessionFilterCounts[filter] })}
+            title={formatStr(sb.filterCount, { label, count: sessionFilterCounts[filter] })}
             onClick={() => setSessionFilter(filter)}
           >
             {label}<span>{sessionFilterCounts[filter]}</span>
@@ -514,30 +519,30 @@ export default function Sidebar(props: Props) {
             selectionAnchorRef.current = null;
           }}
         >
-          {selectionMode ? '선택 취소' : '여러 개 선택'}
+          {selectionMode ? sb.selectionCancel : sb.selectionMulti}
         </button>
         {selectionMode && (
           <>
-            <span className="session-selection-count" aria-live="polite">{selectedVisibleIds.length}개 선택</span>
+            <span className="session-selection-count" aria-live="polite">{formatStr(sb.selectionCount, { count: selectedVisibleIds.length })}</span>
             <button
               type="button"
               className="session-selection-action"
               disabled={selectedVisibleIds.length === 0}
-              title="선택한 대화를 하나의 Markdown 파일로 내보내기"
+              title={sb.exportTitle}
               onClick={async () => {
                 if (await props.onExportMany(selectedVisibleIds)) setSelectedSessionIds([]);
               }}
             >
-              <ExportIcon size={12} /> 내보내기
+              <ExportIcon size={12} /> {sb.exportBtn}
             </button>
             <button
               type="button"
               className="session-selection-action"
               disabled={visibleSessionIds.length === 0}
-              title="표시된 세션 선택 (Ctrl+A)"
+              title={sb.selectVisibleTitle}
               onClick={() => setSelectedSessionIds((previous) => selectVisibleSidebarSessions(previous, visibleSessionIds, !allVisibleSelected))}
             >
-              {allVisibleSelected ? '선택 해제' : '표시 항목 선택'}
+              {allVisibleSelected ? sb.deselectAll : sb.selectVisible}
             </button>
             <button
               type="button"
@@ -548,25 +553,25 @@ export default function Sidebar(props: Props) {
                 setSelectedSessionIds([]);
               }}
             >
-              {selectedAllPinned ? '고정 해제' : '고정'}
+              {selectedAllPinned ? sb.unpinBtn : sb.pinBtn}
             </button>
             <button
               type="button"
               className="session-selection-action"
               disabled={selectedVisibleIds.length === 0 || (!selectedAllArchived && selectedContainsRunning)}
-              title={!selectedAllArchived && selectedContainsRunning ? '실행 중인 세션은 보관할 수 없습니다.' : selectedAllArchived ? '선택한 세션 보관 해제' : '선택한 세션 보관'}
+              title={!selectedAllArchived && selectedContainsRunning ? sb.archiveRunningTitle : selectedAllArchived ? sb.unarchiveTitle : sb.archiveTitle}
               onClick={() => {
                 props.onToggleArchivedMany(selectedVisibleIds);
                 setSelectedSessionIds([]);
               }}
             >
-              {selectedAllArchived ? '보관 해제' : '보관'}
+              {selectedAllArchived ? sb.unarchiveBtn : sb.archiveBtn}
             </button>
             <button
               type="button"
               className="session-selection-action danger"
               disabled={selectedVisibleIds.length === 0 || selectedContainsRunning}
-              title={selectedContainsRunning ? '실행 중인 세션은 삭제할 수 없습니다.' : '선택한 세션 영구 삭제'}
+              title={selectedContainsRunning ? sb.deleteRunningTitle : sb.deleteSelectedTitle}
               onClick={async () => {
                 if (await props.onDeleteMany(selectedVisibleIds)) {
                   setSelectedSessionIds([]);
@@ -574,28 +579,28 @@ export default function Sidebar(props: Props) {
                 }
               }}
             >
-              삭제
+              {strings.common.delete}
             </button>
           </>
         )}
       </div>
 
       <div className="side-section split">
-        <span>{groupBy === 'project' ? '프로젝트' : '상태별 세션'}</span>
+        <span>{groupBy === 'project' ? sb.sectionProject : sb.sectionStatus}</span>
         <div className="side-section-actions">
           <select
             className="sidebar-sort"
-            aria-label="세션 정렬"
-            title="세션 정렬"
+            aria-label={sb.sortLabel}
+            title={sb.sortLabel}
             value={sessionSort}
             onChange={(event) => setSessionSort(event.target.value as 'recent' | 'oldest' | 'name')}
           >
-            <option value="recent">최근 활동</option>
-            <option value="oldest">오래된 순</option>
-            <option value="name">이름순</option>
+            <option value="recent">{sb.sortRecent}</option>
+            <option value="oldest">{sb.sortOldest}</option>
+            <option value="name">{sb.sortName}</option>
           </select>
           {groupBy === 'project' && (
-            <button type="button" className="icon-btn" title="프로젝트 폴더 추가" aria-label="프로젝트 폴더 추가" onClick={props.onAddProject}>
+            <button type="button" className="icon-btn" title={sb.addProject} aria-label={sb.addProject} onClick={props.onAddProject}>
               <PlusIcon size={13} />
             </button>
           )}
@@ -604,8 +609,8 @@ export default function Sidebar(props: Props) {
       <div className="side-groups">
         {groups.length === 0 && (
           <div className="empty-note">{sessionFilter !== 'all' && matchingActiveSessions.length > 0
-            ? '조건에 맞는 세션이 없습니다. 전체 필터를 선택해 보세요.'
-            : hasQuery ? (archivedItems.length ? '검색 결과는 보관함에 있습니다.' : '검색 결과가 없습니다.') : (archivedItems.length ? '활성 스레드가 없습니다. 보관함에서 복원할 수 있어요.' : '아직 스레드가 없습니다.')}</div>
+            ? sb.emptyNoMatchFilter
+            : hasQuery ? (archivedItems.length ? sb.emptySearchInArchive : sb.emptyNoSearchResult) : (archivedItems.length ? sb.emptyNoActive : sb.emptyNoThreads)}</div>
         )}
         {groups.map((g) => {
           const open = hasQuery || openGroups[g.key] !== false;
@@ -626,8 +631,8 @@ export default function Sidebar(props: Props) {
                   {g.sub && (
                     <button
                         className="icon-btn"
-                        title="이 폴더를 작업 폴더로"
-                        aria-label={`${g.title} 폴더를 작업 폴더로 열기`}
+                        title={sb.workFolderTitle}
+                        aria-label={formatStr(sb.workFolderLabel, { title: g.title })}
                         onClick={(e) => {
                           e.stopPropagation();
                           props.onSelectProject(g.sub || '');
@@ -640,8 +645,8 @@ export default function Sidebar(props: Props) {
                       <button
                         type="button"
                         className={isProjectPinned(g.sub) ? 'icon-btn project-pin on' : 'icon-btn project-pin'}
-                        title={isProjectPinned(g.sub) ? '프로젝트 고정 해제' : '프로젝트 고정'}
-                        aria-label={isProjectPinned(g.sub) ? `${g.title} 프로젝트 고정 해제` : `${g.title} 프로젝트 고정`}
+                        title={isProjectPinned(g.sub) ? sb.projectUnpinTitle : sb.projectPinTitle}
+                        aria-label={isProjectPinned(g.sub) ? formatStr(sb.projectUnpinLabel, { title: g.title }) : formatStr(sb.projectPinLabel, { title: g.title })}
                         aria-pressed={isProjectPinned(g.sub)}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -653,8 +658,8 @@ export default function Sidebar(props: Props) {
                     )}
                     <button
                       className="icon-btn"
-                      title={g.sub ? `${g.title}에 새 세션` : '새 세션'}
-                      aria-label={g.sub ? `${g.title}에서 새 세션` : '새 세션'}
+                      title={g.sub ? formatStr(sb.newSessionIn, { title: g.title }) : sb.newSessionPlain}
+                      aria-label={g.sub ? formatStr(sb.newSessionInLabel, { title: g.title }) : sb.newSessionPlain}
                       onClick={(e) => {
                         e.stopPropagation();
                         props.onNewSessionInFolder(g.sub || '');
@@ -665,8 +670,8 @@ export default function Sidebar(props: Props) {
                     {g.sub && props.projects.some((p) => normalizePathForComparison(p) === normalizePathForComparison(g.sub || '')) && (
                       <button
                         className="icon-btn danger"
-                        title="프로젝트 목록에서 제거"
-                        aria-label={`${g.title} 프로젝트 목록에서 제거`}
+                        title={sb.removeProjectTitle}
+                        aria-label={formatStr(sb.removeProjectLabel, { title: g.title })}
                         onClick={(e) => {
                           e.stopPropagation();
                           props.onRemoveProject(g.sub || '');
@@ -681,8 +686,8 @@ export default function Sidebar(props: Props) {
               {open && groupBy === 'project' && g.items.length === 0 && (
                 <div className="empty-note">
                   {archivedItems.some((s) => (s.cwd || '(none)') === g.key)
-                    ? '세션이 보관함에 있습니다.'
-                    : '아직 세션이 없습니다. + 버튼으로 추가하세요.'}
+                    ? sb.emptyArchivedNote
+                    : sb.emptyGroupNote}
                 </div>
               )}
               {open &&
@@ -696,7 +701,7 @@ export default function Sidebar(props: Props) {
                                   const matchPreviewStart = match ? Math.max(0, matchIndex - 24) : 0;
                                   const matchPreview = match
                                     ? match.slice(matchPreviewStart, matchIndex + q.length + 45).replace(/\s+/g, ' ')
-                                    : q && (s.cwd || '').toLowerCase().includes(q) ? `프로젝트 · ${s.cwd}` : '';
+                                    : q && (s.cwd || '').toLowerCase().includes(q) ? formatStr(sb.cwdPreview, { cwd: s.cwd }) : '';
                                   const previewMatchStart = matchIndex - matchPreviewStart;
                   const lastUserText = [...s.messages].reverse().find((message) => message.role === 'user')?.text.replace(/\s+/g, ' ').trim() || '';
                   const sessionPreview = matchPreview || lastUserText;
@@ -715,7 +720,7 @@ export default function Sidebar(props: Props) {
                           className="session-select-checkbox"
                           type="checkbox"
                           checked={selectedVisibleIds.includes(s.id)}
-                          aria-label={`${s.title} 선택`}
+                          aria-label={formatStr(sb.selectSession, { title: s.title })}
                           onClick={(event) => { event.stopPropagation(); selectSession(s.id, event.shiftKey); }}
                           onChange={() => {}}
                         />
@@ -727,7 +732,7 @@ export default function Sidebar(props: Props) {
                           autoFocus
                           value={editTitle}
                           maxLength={80}
-                          aria-label="스레드 이름"
+                          aria-label={sb.renameLabel}
                           onChange={(e) => setEditTitle(e.target.value)}
                           onClick={(e) => e.stopPropagation()}
                           onKeyDown={(e) => {
@@ -753,21 +758,21 @@ export default function Sidebar(props: Props) {
                         </span>
                       )}
                       {groupBy === 'status' && s.cwd && (
-                        <span className="thread-project-path" title={s.cwd} aria-label={`작업 폴더 ${s.cwd}`}>
+                        <span className="thread-project-path" title={s.cwd} aria-label={formatStr(sb.workFolderRowLabel, { cwd: s.cwd })}>
                           <FolderIcon size={11} />
                           <span>{compactProjectPath(s.cwd)}</span>
                         </span>
                       )}
                       {s.engine === 'msp' && <span className="tag tag-msp">MSP</span>}
-                      {draftSessionIdSet.has(s.id) && <span className="thread-draft-indicator" title="이 대화에 전송하지 않은 초안이 저장되어 있습니다." aria-label="저장된 초안 있음">초안</span>}
-                      {!!props.queuedSessionCounts[s.id] && <span className="thread-queue-indicator" title="이 세션에 실행 대기 중인 요청이 있습니다." aria-label={`대기 중인 요청 ${props.queuedSessionCounts[s.id]}개`}>대기 {props.queuedSessionCounts[s.id]}</span>}
+                      {draftSessionIdSet.has(s.id) && <span className="thread-draft-indicator" title={sb.draftTitle} aria-label={sb.draftLabel}>{sb.draftTag}</span>}
+                      {!!props.queuedSessionCounts[s.id] && <span className="thread-queue-indicator" title={sb.queueTitle} aria-label={formatStr(sb.queueLabel, { count: props.queuedSessionCounts[s.id] })}>{formatStr(sb.queueTag, { count: props.queuedSessionCounts[s.id] })}</span>}
                       <span className="thread-meta">
-                        {running ? <span className="st-word running">실행 중</span> : failed ? <span className="st-word failed">실패</span> : timeAgo(lastTs(s), clockNow)}
+                        {running ? <span className="st-word running">{sb.statusRunning}</span> : failed ? <span className="st-word failed">{sb.statusFailed}</span> : timeAgo(lastTs(s), clockNow, lang)}
                       </span>
                       <button
                         className="icon-btn thread-archive-toggle"
-                        title="보관함으로 이동"
-                        aria-label={`${s.title} 보관`}
+                        title={sb.moveToArchiveTitle}
+                        aria-label={formatStr(sb.archiveRowLabel, { title: s.title })}
                         disabled={running}
                         onClick={(e) => { e.stopPropagation(); props.onToggleArchived(s.id); }}
                       >
@@ -775,8 +780,8 @@ export default function Sidebar(props: Props) {
                       </button>
                       <button
                         className={s.pinned ? 'icon-btn thread-pin on' : 'icon-btn thread-pin'}
-                        title={s.pinned ? '고정 해제' : '스레드 고정'}
-                        aria-label={s.pinned ? `${s.title} 고정 해제` : `${s.title} 고정`}
+                        title={s.pinned ? sb.threadUnpinTitle : sb.threadPinTitle}
+                        aria-label={s.pinned ? formatStr(sb.threadUnpinLabel, { title: s.title }) : formatStr(sb.threadPinLabel, { title: s.title })}
                         aria-pressed={!!s.pinned}
                         onClick={(e) => { e.stopPropagation(); props.onTogglePinned(s.id); }}
                       >
@@ -784,16 +789,16 @@ export default function Sidebar(props: Props) {
                       </button>
                       <button
                         className="icon-btn thread-rename-btn"
-                        title="이름 변경 (F2)"
-                        aria-label={`${s.title} 이름 변경`}
+                        title={sb.renameTitle}
+                        aria-label={formatStr(sb.renameRowLabel, { title: s.title })}
                         onClick={(e) => { e.stopPropagation(); startRename(s); }}
                       >
                         <PencilIcon size={13} />
                       </button>
                       <button
                         className="icon-btn danger thread-del"
-                        title={running ? '작업이 끝난 뒤 삭제할 수 있습니다' : '삭제'}
-                        aria-label={`${s.title} 삭제`}
+                        title={running ? sb.deleteAfterRunTitle : strings.common.delete}
+                        aria-label={formatStr(sb.deleteRowLabel, { title: s.title })}
                         disabled={running}
                         onClick={(e) => {
                           e.stopPropagation();
@@ -814,7 +819,7 @@ export default function Sidebar(props: Props) {
             <button className="archive-section-toggle" onClick={() => setArchiveOpen((open) => !open)} aria-expanded={hasQuery || archiveOpen}>
               {hasQuery || archiveOpen ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
               <ArchiveIcon size={14} />
-              <span>보관함</span>
+              <span>{sb.archiveSection}</span>
               <span className="group-count">{archivedItems.length}</span>
             </button>
           </div>
@@ -825,7 +830,7 @@ export default function Sidebar(props: Props) {
                   key={s.id}
                   data-session-id={s.id}
                   className={`thread-row archived-thread${s.id === activeId ? ' active' : ''}${selectedVisibleIds.includes(s.id) ? ' selected' : ''}`}
-                  title={`${s.title} · 보관됨`}
+                  title={formatStr(sb.archivedRowTitle, { title: s.title })}
                   onClick={(event) => selectionMode
                     ? selectSession(s.id, event.shiftKey)
                     : props.onSelect(s.id)}
@@ -835,28 +840,28 @@ export default function Sidebar(props: Props) {
                       className="session-select-checkbox"
                       type="checkbox"
                       checked={selectedVisibleIds.includes(s.id)}
-                      aria-label={`${s.title} 선택`}
+                      aria-label={formatStr(sb.selectSession, { title: s.title })}
                       onClick={(event) => { event.stopPropagation(); selectSession(s.id, event.shiftKey); }}
                       onChange={() => {}}
                     />
                   )}
                   <span className="t-dot" />
                   <button type="button" className="thread-title" aria-current={s.id === activeId ? 'page' : undefined} aria-keyshortcuts="ArrowUp ArrowDown Home End" onKeyDown={(e) => handleSessionTitleKeyDown(e, null)}>{s.title}</button>
-                  {draftSessionIdSet.has(s.id) && <span className="thread-draft-indicator" title="이 대화에 전송하지 않은 초안이 저장되어 있습니다." aria-label="저장된 초안 있음">초안</span>}
-                  {!!props.queuedSessionCounts[s.id] && <span className="thread-queue-indicator" title="이 세션에 실행 대기 중인 요청이 있습니다." aria-label={`대기 중인 요청 ${props.queuedSessionCounts[s.id]}개`}>대기 {props.queuedSessionCounts[s.id]}</span>}
+                  {draftSessionIdSet.has(s.id) && <span className="thread-draft-indicator" title={sb.draftTitle} aria-label={sb.draftLabel}>{sb.draftTag}</span>}
+                  {!!props.queuedSessionCounts[s.id] && <span className="thread-queue-indicator" title={sb.queueTitle} aria-label={formatStr(sb.queueLabel, { count: props.queuedSessionCounts[s.id] })}>{formatStr(sb.queueTag, { count: props.queuedSessionCounts[s.id] })}</span>}
                   {s.pinned && <StarIcon size={12} filled />}
                   <button
                     className="icon-btn thread-unarchive"
-                    title="보관 해제"
-                    aria-label={`${s.title} 보관 해제`}
+                    title={sb.unarchiveRowTitle}
+                    aria-label={formatStr(sb.unarchiveRowLabel, { title: s.title })}
                     onClick={(e) => { e.stopPropagation(); props.onToggleArchived(s.id); }}
                   >
                     <UnarchiveIcon size={13} />
                   </button>
                   <button
                     className="icon-btn danger thread-del"
-                    title="삭제"
-                    aria-label={`${s.title} 삭제`}
+                    title={strings.common.delete}
+                    aria-label={formatStr(sb.deleteRowLabel, { title: s.title })}
                     onClick={(e) => { e.stopPropagation(); props.onDelete(s.id); }}
                   >
                     <TrashIcon size={13} />
@@ -871,7 +876,7 @@ export default function Sidebar(props: Props) {
 
       {props.hostSessions.length > 0 && (
         <>
-          <div className="side-section">CLI 세션</div>
+          <div className="side-section">{sb.cliSection}</div>
           <div className="host-search">
             <SearchIcon size={13} />
             <input
@@ -883,34 +888,34 @@ export default function Sidebar(props: Props) {
                   setHostQuery('');
                 }
               }}
-              placeholder="이름 · 날짜 검색 (예: 10-03)"
-              aria-label="CLI 세션 검색. 이름과 날짜로 검색합니다."
+              placeholder={sb.cliSearchPlaceholder}
+              aria-label={sb.cliSearchLabel}
             />
-            {hostQuery && <button type="button" className="icon-btn host-search-clear" onClick={() => setHostQuery('')} aria-label="CLI 세션 검색 지우기" title="검색 지우기 (Esc)"><XIcon size={12} /></button>}
+            {hostQuery && <button type="button" className="icon-btn host-search-clear" onClick={() => setHostQuery('')} aria-label={sb.cliSearchClear} title={sb.searchClearTitle}><XIcon size={12} /></button>}
           </div>
           <div className="side-groups host-groups">
             {visibleHostSessions.length === 0 && (
-              <div className="empty-note">검색과 일치하는 CLI 세션이 없습니다.</div>
+              <div className="empty-note">{sb.cliEmpty}</div>
             )}
             {visibleHostSessions.map((h) => (
               <div key={h.sessionId} className="thread-row host" title={h.workspaceRoot || h.sessionId}>
                 <span className="t-dot msp" />
                 <span className="thread-title">{h.title || h.name || h.sessionId.slice(0, 8)}</span>
-                <span className="thread-meta" title={h.updatedAt ? `마지막 활동: ${new Date(h.updatedAt).toLocaleString()}` : undefined}>
-                  {h.turnCount}턴{h.updatedAt && Number.isFinite(Date.parse(h.updatedAt)) ? ` · ${timeAgo(Date.parse(h.updatedAt), clockNow)}` : ''}{h.modelId ? ` · ${h.modelId}` : ''}
+                <span className="thread-meta" title={h.updatedAt ? formatStr(sb.lastActivityTitle, { date: new Date(h.updatedAt).toLocaleString(lang === 'en' ? 'en-US' : 'ko-KR') }) : undefined}>
+                  {formatStr(sb.turns, { count: h.turnCount })}{h.updatedAt && Number.isFinite(Date.parse(h.updatedAt)) ? ` · ${timeAgo(Date.parse(h.updatedAt), clockNow, lang)}` : ''}{h.modelId ? ` · ${h.modelId}` : ''}
                 </span>
                 <button
                   className="resume-btn"
                   disabled={!!props.resumingId}
-                  title={props.resumingId && props.resumingId !== h.sessionId ? '다른 CLI 세션을 연결하는 중입니다.' : undefined}
+                  title={props.resumingId && props.resumingId !== h.sessionId ? sb.resumeBusyTitle : undefined}
                   onClick={() => props.onResume(h.sessionId)}
                 >
-                  {props.resumingId === h.sessionId ? '연결…' : '이어하기'}
+                  {props.resumingId === h.sessionId ? sb.resuming : sb.resume}
                 </button>
                 <button
                   className="icon-btn danger thread-del"
-                  title="CLI 세션 목록에서 삭제"
-                  aria-label={`${h.title || h.name || h.sessionId.slice(0, 8)} 삭제`}
+                  title={sb.removeCliTitle}
+                  aria-label={formatStr(sb.removeCliLabel, { name: h.title || h.name || h.sessionId.slice(0, 8) })}
                   disabled={!!props.resumingId}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -926,7 +931,7 @@ export default function Sidebar(props: Props) {
       )}
 
       <div className="side-statusbar">
-        <button className="mini-profile" onClick={() => setProfileOpen(true)} title={`프로필 · ${profileSub}`}>
+        <button className="mini-profile" onClick={() => setProfileOpen(true)} title={formatStr(sb.profileTitle, { sub: profileSub })}>
           <span className="avatar" aria-hidden>
             <GuitarIcon size={17} />
             <span className={cliDot} />
@@ -975,7 +980,7 @@ export default function Sidebar(props: Props) {
                 <span id="profile-dialog-title" className="mini-name">Musician</span>
                 <span className="mini-sub">{profileSub}</span>
               </span>
-              <button type="button" className="icon-btn" onClick={() => setProfileOpen(false)} title="닫기" aria-label="프로필 닫기">
+              <button type="button" className="icon-btn" onClick={() => setProfileOpen(false)} title={strings.common.close} aria-label={sb.profileClose}>
                 <XIcon size={15} />
               </button>
             </div>
@@ -988,7 +993,7 @@ export default function Sidebar(props: Props) {
                 }}
               >
                 <ChatIcon size={16} />
-                <span>코덱스 연동하기</span>
+                <span>{sb.connectCodex}</span>
                 <ChevronRightIcon size={14} />
               </button>
               <button
@@ -999,7 +1004,7 @@ export default function Sidebar(props: Props) {
                 }}
               >
                 <SlidersIcon size={16} />
-                <span>설정</span>
+                <span>{sb.settingsRow}</span>
                 <ChevronRightIcon size={14} />
               </button>
             </div>

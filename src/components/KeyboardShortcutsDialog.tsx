@@ -2,75 +2,76 @@ import React, { useEffect, useRef } from 'react';
 import { XIcon } from './icons';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { shortcutGroupId, splitShortcutKeys } from '../lib/shortcut-display.mjs';
-
-const groups = [
-  {
-    title: '탐색',
-    shortcuts: [
-      ['Ctrl+P', '파일 빠르게 열기'],
-      ['Ctrl+N', '새 스레드 시작'],
-      ['Ctrl+Shift+P / Ctrl+K / F1', '명령 팔레트'],
-      ['> / # / @ (명령 팔레트)', '명령 / 세션 / 열린 탭 결과만 검색'],
-      ['Ctrl+Shift+E', '파일 탐색기 열기'],
-      ['Ctrl+Alt+S', '세션 검색 열기'],
-      ['Ctrl+Alt+R', '예약된 프롬프트 관리'],
-      ['Ctrl+L', '브라우저 탭에서 주소창 선택'],
-      ['Ctrl+F (브라우저 탭)', '웹페이지에서 찾기'],
-      ['Alt+← / Alt+→', '브라우저 뒤로 / 앞으로'],
-      ['Ctrl+R / F5', '브라우저 새로고침'],
-      ['Esc', '브라우저 로딩 중지'],
-      ['↑ / ↓ · ← / → (탐색기)', '항목 이동 · 폴더 접기/펼치기 · 펼친 폴더의 첫 항목으로 이동'],
-      ['F2 / Delete', '포커스된 탐색기 항목 이름 변경 / 삭제'],
-      ['Ctrl+B', '사이드바 표시/숨기기'],
-      ['Ctrl+Alt+E', '채팅/편집기 패널 표시/숨기기'],
-      ['Ctrl+,', '설정 열기'],
-      ['Ctrl+F (설정)', '설정 옵션 검색'],
-      ['Ctrl+Shift+`', '새 터미널 열기'],
-      ['Ctrl+R (터미널)', '명령 기록 검색'],
-      ['Ctrl+L (터미널)', '터미널 화면 지우기'],
-      ['Ctrl+Shift+/', '키보드 단축키 도움말'],
-    ],
-  },
-  {
-    title: '대화와 파일',
-    shortcuts: [
-      ['Ctrl+F', '현재 대화에서 찾기'],
-      ['Ctrl+Shift+F', '파일 내용 검색 (선택한 한 줄 미리 채움)'],
-      ['Ctrl+Shift+T', '닫은 탭 다시 열기'],
-      ['Ctrl+Alt+PageUp / PageDown', '최근 사용 세션 전환'],
-      ['↑ / ↓ · Home / End (사이드바)', '세션 목록 키보드 이동'],
-      ['Ctrl+S', '현재 파일 저장'],
-      ['Ctrl+Shift+S', '변경 파일 모두 저장'],
-      ['Ctrl+Shift+V (Markdown)', '원문/미리보기 전환'],
-      ['/new', '슬래시 명령 (입력 시작)'],
-    ],
-  },
-  {
-    title: '탭과 편집기',
-    shortcuts: [
-      ['Ctrl+Tab / Ctrl+Shift+Tab', '최근 사용한 탭 전환'],
-      ['Ctrl+1 – Ctrl+9', '번호로 탭 이동 (9는 마지막 탭)'],
-      ['Ctrl+PageDown / Ctrl+PageUp', '다음 / 이전 탭'],
-      ['Ctrl+Shift+← / → / PageUp / PageDown', '현재 탭 순서 이동'],
-      ['Ctrl+W', '현재 탭 닫기'],
-      ['Ctrl+Shift+W', '모든 탭 닫기'],
-      ['Ctrl+G', '줄 또는 줄:열로 이동'],
-      ['Alt+← / Alt+→ (편집기)', '이전 / 다음 코드 위치'],
-      ['Ctrl+Shift+O', '현재 파일에서 기호로 이동'],
-      ['F12 / Shift+F12', '정의로 이동 / 참조 찾기'],
-      ['Alt+F12', '정의 미리보기'],
-      ['Ctrl+F12', '형식 정의로 이동'],
-      ['Shift+Alt+F', '현재 파일 서식 정리'],
-      ['Ctrl+K Ctrl+F', '선택 영역 서식 정리'],
-      ['Ctrl+K Ctrl+0 / Ctrl+K Ctrl+J', '코드 모두 접기 / 펼치기'],
-      ['Alt+Z', '줄바꿈 켜기/끄기'],
-      ['Ctrl+= / Ctrl+-', '편집기 글자 크기 조절'],
-      ['Ctrl+0', '편집기 글자 크기 초기화'],
-    ],
-  },
-];
+import { useStrings } from '../lib/lang';
 
 export default function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
+  const s = useStrings();
+  const groups = [
+    {
+      title: s.shortcuts.g0t,
+      shortcuts: [
+        ['Ctrl+P', s.shortcuts.nl00],
+        ['Ctrl+N', s.shortcuts.nl01],
+        ['Ctrl+Shift+P / Ctrl+K / F1', s.shortcuts.nl02],
+        [s.shortcuts.scopeTabsKeys, s.shortcuts.nl03],
+        ['Ctrl+Shift+E', s.shortcuts.nl04],
+        ['Ctrl+Alt+S', s.shortcuts.nl05],
+        ['Ctrl+Alt+R', s.shortcuts.nl06],
+        ['Ctrl+L', s.shortcuts.nl07],
+        [s.shortcuts.findBrowserKeys, s.shortcuts.nl08],
+        ['Alt+← / Alt+→', s.shortcuts.nl09],
+        ['Ctrl+R / F5', s.shortcuts.nl10],
+        ['Esc', s.shortcuts.nl11],
+        [s.shortcuts.explorerMoveKeys, s.shortcuts.nl12],
+        ['F2 / Delete', s.shortcuts.nl13],
+        ['Ctrl+B', s.shortcuts.nl14],
+        ['Ctrl+Alt+E', s.shortcuts.nl15],
+        ['Ctrl+,', s.shortcuts.nl16],
+        [s.shortcuts.settingsFindKeys, s.shortcuts.nl17],
+        ['Ctrl+Shift+`', s.shortcuts.nl18],
+        [s.shortcuts.termHistoryKeys, s.shortcuts.nl19],
+        [s.shortcuts.termClearKeys, s.shortcuts.nl20],
+        ['Ctrl+Shift+/', s.shortcuts.nl21],
+      ],
+    },
+    {
+      title: s.shortcuts.g1t,
+      shortcuts: [
+        ['Ctrl+F', s.shortcuts.cl00],
+        ['Ctrl+Shift+F', s.shortcuts.cl01],
+        ['Ctrl+Shift+T', s.shortcuts.cl02],
+        ['Ctrl+Alt+PageUp / PageDown', s.shortcuts.cl03],
+        [s.shortcuts.sidebarMoveKeys, s.shortcuts.cl04],
+        ['Ctrl+S', s.shortcuts.cl05],
+        ['Ctrl+Shift+S', s.shortcuts.cl06],
+        ['Ctrl+Shift+V (Markdown)', s.shortcuts.cl07],
+        ['/new', s.shortcuts.cl08],
+      ],
+    },
+    {
+      title: s.shortcuts.g2t,
+      shortcuts: [
+        ['Ctrl+Tab / Ctrl+Shift+Tab', s.shortcuts.tl00],
+        ['Ctrl+1 – Ctrl+9', s.shortcuts.tl01],
+        ['Ctrl+PageDown / Ctrl+PageUp', s.shortcuts.tl02],
+        ['Ctrl+Shift+← / → / PageUp / PageDown', s.shortcuts.tl03],
+        ['Ctrl+W', s.shortcuts.tl04],
+        ['Ctrl+Shift+W', s.shortcuts.tl05],
+        ['Ctrl+G', s.shortcuts.tl06],
+        [s.shortcuts.editorNavKeys, s.shortcuts.tl07],
+        ['Ctrl+Shift+O', s.shortcuts.tl08],
+        ['F12 / Shift+F12', s.shortcuts.tl09],
+        ['Alt+F12', s.shortcuts.tl10],
+        ['Ctrl+F12', s.shortcuts.tl11],
+        ['Shift+Alt+F', s.shortcuts.tl12],
+        ['Ctrl+K Ctrl+F', s.shortcuts.tl13],
+        ['Ctrl+K Ctrl+0 / Ctrl+K Ctrl+J', s.shortcuts.tl14],
+        ['Alt+Z', s.shortcuts.tl15],
+        ['Ctrl+= / Ctrl+-', s.shortcuts.tl16],
+        ['Ctrl+0', s.shortcuts.tl17],
+      ],
+    },
+  ];
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
 
@@ -103,10 +104,10 @@ export default function KeyboardShortcutsDialog({ onClose }: { onClose: () => vo
       >
         <header className="shortcuts-dialog-head">
           <div>
-            <h2 id="shortcuts-dialog-title">키보드 단축키</h2>
-            <p>자주 쓰는 탐색·대화·편집기 명령</p>
+            <h2 id="shortcuts-dialog-title">{s.shortcuts.title}</h2>
+            <p>{s.shortcuts.sub}</p>
           </div>
-          <button ref={closeButtonRef} type="button" className="icon-btn" aria-label="단축키 도움말 닫기" onClick={onClose}><XIcon size={15} /></button>
+          <button ref={closeButtonRef} type="button" className="icon-btn" aria-label={s.shortcuts.close} onClick={onClose}><XIcon size={15} /></button>
         </header>
         <div className="shortcuts-groups">
           {groups.map((group, groupIndex) => (

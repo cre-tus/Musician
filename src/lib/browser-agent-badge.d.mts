@@ -9,10 +9,10 @@ export interface AgentBadgeHealth {
   ok: boolean;
   reason?: string | null;
 }
-export function reasonLabel(reason: string | null | undefined): string;
+export function reasonLabel(reason: string | null | undefined, lang?: 'ko' | 'en'): string;
 export function agentBadgeState(input: {
   agentEnabled: boolean;
   health: AgentBadgeHealth | null;
   agentActive: boolean;
   method: string;
-}): AgentBadgeState;
+}, lang?: 'ko' | 'en'): AgentBadgeState;

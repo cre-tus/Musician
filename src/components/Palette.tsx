@@ -3,6 +3,8 @@ import type { Session } from '../types';
 import { readRecentCommandIds, recordRecentCommand, writeRecentCommandIds } from '../lib/recent-command-history.mjs';
 import { matchScore, parsePaletteQuery, scopePaletteItems } from '../lib/palette-query.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
+import { useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 export interface PaletteAction {
   id: string;
@@ -20,6 +22,7 @@ interface Props {
 }
 
 export default function Palette({ sessions, actions, onSelectThread, onClose }: Props) {
+  const s = useStrings();
   const [query, setQuery] = useState('');
   const [index, setIndex] = useState(0);
   const [recentCommandIds, setRecentCommandIds] = useState(() => readRecentCommandIds());
@@ -77,7 +80,7 @@ export default function Palette({ sessions, actions, onSelectThread, onClose }: 
   const total = threads.length + recentActions.length + otherActions.length;
   const selectedIndex = total > 0 ? Math.min(index, total - 1) : 0;
   const activeOptionId = total > 0 ? `command-palette-option-${selectedIndex}` : undefined;
-  const actionSectionLabel = parsedQuery.scope === 'tabs' ? '열린 탭' : '명령';
+  const actionSectionLabel = parsedQuery.scope === 'tabs' ? s.palette.tabsSection : s.palette.commandsSection;
 
   useEffect(() => {
     setIndex(0);
@@ -148,26 +151,26 @@ export default function Palette({ sessions, actions, onSelectThread, onClose }: 
         }
       }}
     >
-      <div ref={paletteRef} className="palette" role="dialog" aria-modal="true" aria-label="명령 팔레트" onClick={(e) => e.stopPropagation()}>
+      <div ref={paletteRef} className="palette" role="dialog" aria-modal="true" aria-label={s.palette.dialogLabel} onClick={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="검색 · >명령 · #세션 · @열린 탭"
-          aria-label="검색"
+          placeholder={s.palette.placeholder}
+          aria-label={s.palette.searchLabel}
           role="combobox"
           aria-autocomplete="list"
           aria-expanded="true"
           aria-controls="command-palette-options"
           aria-activedescendant={activeOptionId}
         />
-        <div ref={listRef} id="command-palette-options" className="palette-list" role="listbox" aria-label={`${actionSectionLabel} 팔레트 결과`}>
+        <div ref={listRef} id="command-palette-options" className="palette-list" role="listbox" aria-label={formatStr(s.palette.resultsFor, { section: actionSectionLabel })}>
           {threads.length > 0 && (
-            <div role="group" aria-label="스레드">
-              <div className="palette-head" aria-hidden="true">스레드</div>
-              {threads.map((s, i) => (
+            <div role="group" aria-label={s.palette.threads}>
+              <div className="palette-head" aria-hidden="true">{s.palette.threads}</div>
+              {threads.map((thread, i) => (
                 <div
-                  key={s.id}
+                  key={thread.id}
                   id={`command-palette-option-${i}`}
                   role="option"
                   aria-selected={i === selectedIndex}
@@ -178,17 +181,17 @@ export default function Palette({ sessions, actions, onSelectThread, onClose }: 
                   onMouseEnter={() => setIndex(i)}
                 >
                   <span className="palette-session-main">
-                    <span className="palette-title">{s.title}</span>
-                    {s.cwd && <span className="palette-session-context" title={s.cwd}>{s.cwd}</span>}
+                    <span className="palette-title">{thread.title}</span>
+                    {thread.cwd && <span className="palette-session-context" title={thread.cwd}>{thread.cwd}</span>}
                   </span>
-                  {(s.pinned || s.archived) && <span className="palette-session-state">{s.archived ? '보관됨' : '고정됨'}</span>}
+                  {(thread.pinned || thread.archived) && <span className="palette-session-state">{thread.archived ? s.palette.archived : s.palette.pinned}</span>}
                 </div>
               ))}
             </div>
           )}
           {recentActions.length > 0 && (
-            <div role="group" aria-label="최근 명령">
-              <div className="palette-head" aria-hidden="true">최근 명령</div>
+            <div role="group" aria-label={s.palette.recentCommands}>
+              <div className="palette-head" aria-hidden="true">{s.palette.recentCommands}</div>
               {recentActions.map((action, index) => {
                 const optionIndex = threads.length + index;
                 return (
@@ -204,7 +207,7 @@ export default function Palette({ sessions, actions, onSelectThread, onClose }: 
                     onMouseEnter={() => setIndex(optionIndex)}
                   >
                     <span className="palette-title">{action.title}</span>
-                    <span className="palette-hint">{action.hint || '최근 사용'}</span>
+                    <span className="palette-hint">{action.hint || s.palette.recentUsed}</span>
                   </div>
                 );
               })}
@@ -234,14 +237,14 @@ export default function Palette({ sessions, actions, onSelectThread, onClose }: 
               })}
             </div>
           )}
-          {total === 0 && <div className="empty-note">{parsedQuery.scope === 'tabs' ? '일치하는 열린 탭이 없습니다.' : '결과가 없습니다.'}</div>}
+          {total === 0 && <div className="empty-note">{parsedQuery.scope === 'tabs' ? s.palette.noMatchingTabs : s.palette.noResults}</div>}
         </div>
         <div className="palette-hint">
-          <span role="status" aria-live="polite">{total > 0 ? `${total}개 결과 · ↑↓ 이동 · Enter 실행 · Home/End 처음/끝 · PgUp/PgDn 빠른 이동` : '결과가 없습니다.'} · &gt; 명령 · # 세션 · @ 열린 탭{recentActions.length > 0 ? ' · 최근 명령은 이 기기에 저장' : ''}</span>
+          <span role="status" aria-live="polite">{total > 0 ? formatStr(s.palette.footerResults, { total }) : s.palette.noResults} · {s.palette.footerScopes}{recentActions.length > 0 ? ` · ${s.palette.footerRecentStored}` : ''}</span>
           {!q && recentActions.length > 0 && <button type="button" className="palette-history-clear" onClick={() => {
             setRecentCommandIds([]);
             writeRecentCommandIds([]);
-          }}>최근 기록 지우기</button>}
+          }}>{s.palette.clearHistory}</button>}
         </div>
       </div>
     </div>

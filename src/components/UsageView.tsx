@@ -2,6 +2,10 @@ import React, { useEffect, useState } from 'react';
 import type { Session, SubscriptionUsage } from '../types';
 import { api, hasBridge } from '../lib/mudex';
 import { BackIcon } from './icons';
+import { useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
+
+type Strings = Record<string, Record<string, string>>;
 
 interface Props {
   sessions: Session[];
@@ -22,16 +26,16 @@ function fmtClock(ms: number): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-function fmtReset(ms: number): string {
+function fmtReset(ms: number, s: Strings): string {
   const d = ms - Date.now();
-  if (!ms || d <= 0) return '곧 초기화';
+  if (!ms || d <= 0) return s.usage.resetSoon;
   const days = Math.floor(d / 86400000);
   const h = Math.floor((d % 86400000) / 3600000);
   const m = Math.floor((d % 3600000) / 60000);
-  if (days > 0) return `${days}일 ${h}시간 후 초기화`;
-  if (h > 0) return `${h}시간 ${m}분 후 초기화`;
-  if (m > 0) return `${m}분 후 초기화`;
-  return '곧 초기화';
+  if (days > 0) return formatStr(s.usage.resetDays, { d: days, h });
+  if (h > 0) return formatStr(s.usage.resetHours, { h, m });
+  if (m > 0) return formatStr(s.usage.resetMins, { m });
+  return s.usage.resetSoon;
 }
 
 function barClass(pct: number): string {
@@ -41,13 +45,14 @@ function barClass(pct: number): string {
 }
 
 function UsageBar({ label, pct, resetMs }: { label: string; pct: number; resetMs: number }) {
+  const s = useStrings();
   const rem = Math.max(0, 100 - pct);
   return (
-    <div className="usage-row" title={`${label} 남음 ${rem.toFixed(1)}% · 초기화: ${fmtClock(resetMs)}`}>
+    <div className="usage-row" title={formatStr(s.usage.barTitle, { label, rem: rem.toFixed(1), clock: fmtClock(resetMs) })}>
       <div className="usage-head">
         <b>{label}</b>
         <span>
-          남음 {rem.toFixed(1)}% · {fmtReset(resetMs)}
+          {formatStr(s.usage.barLeft, { rem: rem.toFixed(1), reset: fmtReset(resetMs, s) })}
         </span>
       </div>
       <div className="usage-bar">
@@ -58,6 +63,7 @@ function UsageBar({ label, pct, resetMs }: { label: string; pct: number; resetMs
 }
 
 export default function UsageView({ sessions, folder, onBack, onSelectThread }: Props) {
+  const s = useStrings();
   const [usage, setUsage] = useState<SubscriptionUsage | null | undefined>(undefined);
 
   useEffect(() => {
@@ -97,51 +103,51 @@ export default function UsageView({ sessions, folder, onBack, onSelectThread }: 
     <section className="page">
       <header className="topbar">
         <button className="btn" onClick={onBack}>
-          <BackIcon size={14} /> 스레드
+          <BackIcon size={14} /> {s.usage.back}
         </button>
         <div className="topbar-title">
-          <h2>사용량</h2>
-          <p>구독 요금제 기준. 비용 추정은 표시하지 않습니다.</p>
+          <h2>{s.usage.title}</h2>
+          <p>{s.usage.sub}</p>
         </div>
       </header>
       <div className="page-body">
-        <div className="section-cap">구독 사용률</div>
+        <div className="section-cap">{s.usage.capQuota}</div>
         <div className="panel">
-          {usage === undefined && <div className="empty-note">불러오는 중…</div>}
+          {usage === undefined && <div className="empty-note">{s.common.loading}</div>}
           {usage === null && (
             <div className="empty-note">
-              사용량 정보를 가져올 수 없습니다. MSP에 연결된 뒤 다시 열어 보세요.
+              {s.usage.unavailable}
             </div>
           )}
           {usage && (
             <>
-              <UsageBar label="이번 창" pct={usage.window.usedPercent} resetMs={usage.window.resetsAtMs} />
-              <UsageBar label="주간" pct={usage.weekly.usedPercent} resetMs={usage.weekly.resetsAtMs} />
+              <UsageBar label={s.usage.barNow} pct={usage.window.usedPercent} resetMs={usage.window.resetsAtMs} />
+              <UsageBar label={s.usage.barWeek} pct={usage.weekly.usedPercent} resetMs={usage.weekly.resetsAtMs} />
               <p className="modal-note" style={{ margin: '8px 0 0' }}>
-                요금제: {usage.tier} · 관측: {fmtClock(usage.observedAtMs)}
+                {formatStr(s.usage.planLine, { tier: usage.tier, clock: fmtClock(usage.observedAtMs) })}
               </p>
             </>
           )}
         </div>
 
-        <div className="section-cap">스레드별 토큰</div>
+        <div className="section-cap">{s.usage.capTokens}</div>
         <div className="panel">
           {rows.length === 0 && (
-            <div className="empty-note">아직 집계된 토큰이 없습니다. MSP로 대화하면 여기에 쌓입니다.</div>
+            <div className="empty-note">{s.usage.noTokens}</div>
           )}
           {rows.length > 0 && (
             <table className="token-table">
               <thead>
                 <tr>
-                  <th>스레드</th>
-                  <th className="num">입력</th>
-                  <th className="num">출력</th>
-                  <th className="num">합계</th>
+                  <th>{s.usage.thThread}</th>
+                  <th className="num">{s.usage.thIn}</th>
+                  <th className="num">{s.usage.thOut}</th>
+                  <th className="num">{s.usage.thTotal}</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <tr key={r.s.id} onClick={() => onSelectThread(r.s.id)} title={`${r.turns}턴 · 클릭하면 스레드로 이동`}>
+                  <tr key={r.s.id} onClick={() => onSelectThread(r.s.id)} title={formatStr(s.usage.rowTitle, { turns: r.turns })}>
                     <td className="tok-title">
                       {r.s.title}
                       {r.s.engine === 'msp' && <span className="tag tag-msp">MSP</span>}
@@ -154,7 +160,7 @@ export default function UsageView({ sessions, folder, onBack, onSelectThread }: 
                   </tr>
                 ))}
                 <tr className="total">
-                  <td>합계</td>
+                  <td>{s.usage.totalRow}</td>
                   <td className="num">{fmtTokens(totIn)}</td>
                   <td className="num">{fmtTokens(totOut)}</td>
                   <td className="num">
@@ -165,7 +171,7 @@ export default function UsageView({ sessions, folder, onBack, onSelectThread }: 
             </table>
           )}
           <p className="modal-note" style={{ margin: '8px 0 0' }}>
-            토큰은 MSP 실행에서 보고된 값만 집계합니다. exec 실행은 집계되지 않습니다.
+            {s.usage.note}
           </p>
         </div>
       </div>

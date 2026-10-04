@@ -159,10 +159,11 @@ export function rollRepeatingPrompt(list, id, now) {
   return current.map((item) => (item.id === id ? { ...item, fireAt: rolled, status: 'pending' } : item));
 }
 
-export function formatRepeat(repeat) {
-  if (repeat === 'daily') return '매일';
-  if (repeat === 'weekly') return '매주';
-  if (repeat === 'monthly') return '매월';
+export function formatRepeat(repeat, lang) {
+  const en = lang === 'en';
+  if (repeat === 'daily') return en ? 'Daily' : '매일';
+  if (repeat === 'weekly') return en ? 'Weekly' : '매주';
+  if (repeat === 'monthly') return en ? 'Monthly' : '매월';
   return '';
 }
 
@@ -186,22 +187,23 @@ function fmtClock(ms) {
   return `${hh}:${mm}`;
 }
 
-export function formatScheduledFireTime(fireAt, now) {
+export function formatScheduledFireTime(fireAt, now, lang) {
   if (!Number.isFinite(fireAt)) return '';
+  const en = lang === 'en';
   const at = Number.isFinite(now) ? now : Date.now();
   const diff = fireAt - at;
-  if (diff <= 0) return '지금 실행';
+  if (diff <= 0) return en ? 'Now' : '지금 실행';
   if (diff < 3600000) {
     const minutes = Math.max(1, Math.round(diff / 60000));
-    return `${minutes}분 후`;
+    return en ? `In ${minutes} min` : `${minutes}분 후`;
   }
   if (diff < 24 * 3600000 && startOfDay(fireAt) === startOfDay(at)) {
     const hours = Math.floor(diff / 3600000);
-    if (hours >= 1 && diff < (hours + 1) * 3600000 && hours < 6) return `${hours}시간 후`;
-    return `오늘 ${fmtClock(fireAt)}`;
+    if (hours >= 1 && diff < (hours + 1) * 3600000 && hours < 6) return en ? `In ${hours}h` : `${hours}시간 후`;
+    return en ? `Today ${fmtClock(fireAt)}` : `오늘 ${fmtClock(fireAt)}`;
   }
   const tomorrow = startOfDay(at) + 86400000;
-  if (startOfDay(fireAt) === tomorrow) return `내일 ${fmtClock(fireAt)}`;
+  if (startOfDay(fireAt) === tomorrow) return en ? `Tomorrow ${fmtClock(fireAt)}` : `내일 ${fmtClock(fireAt)}`;
   const date = new Date(fireAt);
   return `${date.getMonth() + 1}-${date.getDate()} ${fmtClock(fireAt)}`;
 }

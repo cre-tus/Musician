@@ -14,6 +14,7 @@ export interface CliSettings {
   browserAgent: boolean;
   browserHome: string;
   backgroundNotifications: boolean;
+  lang?: 'ko' | 'en';
 }
 
 export interface BrowserState {

@@ -4,9 +4,10 @@
 // sanitization exactly: collapse newlines/tabs, strip Windows-illegal
 // characters and trailing dots/spaces, cap at 120 chars, fall back to the
 // default title when nothing remains.
-function exportMarkdownFilename(rawTitle) {
-  const title = String(rawTitle || 'Musician 대화').replace(/[\r\n\t]+/g, ' ').trim() || 'Musician 대화';
-  return title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').replace(/[. ]+$/g, '').slice(0, 120) || 'Musician 대화';
+function exportMarkdownFilename(rawTitle, lang = 'ko') {
+  const fallback = lang === 'en' ? 'Musician conversation' : 'Musician 대화';
+  const title = String(rawTitle || fallback).replace(/[\r\n\t]+/g, ' ').trim() || fallback;
+  return title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').replace(/[. ]+$/g, '').slice(0, 120) || fallback;
 }
 
 module.exports = { exportMarkdownFilename };

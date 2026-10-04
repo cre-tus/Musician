@@ -21,7 +21,7 @@ export function createScheduledPrompt(input: {
 } | null | undefined): ScheduledPrompt | null;
 export function nextRepeatFireTime(fireAt: number, repeat: unknown, now?: number): number | null;
 export function rollRepeatingPrompt(list: unknown, id: unknown, now?: number): ScheduledPrompt[];
-export function formatRepeat(repeat: unknown): string;
+export function formatRepeat(repeat: unknown, lang?: string): string;
 export function addScheduledPrompt(list: unknown, item: unknown): ScheduledPrompt[];
 export function cancelScheduledPrompt(list: unknown, id: unknown): ScheduledPrompt[];
 export function rescheduleScheduledPrompt(
@@ -39,7 +39,7 @@ export function fireableScheduledPrompt(
   firing: unknown,
 ): ScheduledPrompt | null;
 export function staleScheduledPrompts(list: unknown, now?: number): ScheduledPrompt[];
-export function formatScheduledFireTime(fireAt: number, now?: number): string;
+export function formatScheduledFireTime(fireAt: number, now?: number, lang?: string): string;
 export function readScheduledPrompts(storage?: {
   getItem(key: string): string | null;
 } | null): ScheduledPrompt[];

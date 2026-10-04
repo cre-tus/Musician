@@ -3,4 +3,4 @@ export interface McpChatHealthEntry {
   ok: boolean;
   reason: string | null;
 }
-export function mcpChatNotice(mcpHealth: McpChatHealthEntry[] | null | undefined): string | null;
+export function mcpChatNotice(mcpHealth: McpChatHealthEntry[] | null | undefined, lang?: 'ko' | 'en'): string | null;

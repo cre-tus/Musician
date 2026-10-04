@@ -9,6 +9,8 @@ import { unpinnedPaneTabIds } from '../lib/pane-tab-management.mjs';
 import BrowserTab from './BrowserTab';
 import FilesTab from './FilesTab';
 import { ChatIcon, FileIcon, FileTypeIcon, FolderIcon, GlobeIcon, PinIcon, PlusIcon, SaveIcon, TerminalIcon, WrapLinesIcon, XIcon } from './icons';
+import { useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 const FileEditor = React.lazy(() => import('./FileEditor'));
 const TerminalTab = React.lazy(() => import('./TerminalTab'));
@@ -97,6 +99,7 @@ function TabIcon({ tab }: { tab: PaneTab }) {
 // per tab. All tabs stay mounted (terminals keep running, editors keep
 // state); only the selected one is shown.
 export default function RightPane(props: Props) {
+  const s = useStrings();
   const { tabs, activeId } = props;
   const selectedFileTab = tabs.find((tab) => tab.id === activeId && tab.kind === 'file' && tab.file);
   const dirtyFileCount = tabs.filter((tab) => tab.kind === 'file' && tab.file?.dirty && !tab.file.readOnly).length;
@@ -133,7 +136,7 @@ export default function RightPane(props: Props) {
   useEffect(() => {
     if (!props.goToLineRequest) return;
     if (!selectedFileTab?.file) {
-      props.onNotice('먼저 코드 파일 탭을 선택해줘.');
+      props.onNotice(s.pane.pickCodeTab);
       return;
     }
     setGoToLineValue('');
@@ -148,13 +151,13 @@ export default function RightPane(props: Props) {
     event.preventDefault();
     const position = parseEditorPosition(goToLineValue);
     if (!position) {
-      props.onNotice('줄 번호 또는 줄:열 형식으로 입력해줘. 예: 42 또는 42:8');
+      props.onNotice(s.pane.lineFormat);
       return;
     }
     const editorApi = props.editorApiRef.current;
     const moved = !!editorApi && !!selectedFileTab?.file?.path && pathsEqual(editorApi.filePath, selectedFileTab.file.path)
       && editorApi.revealLine(position.line, position.column);
-    if (!moved) props.onNotice('줄 위치로 이동하지 못했어. 파일이 아직 열리는 중인지 확인해줘.');
+    if (!moved) props.onNotice(s.pane.gotoFailed);
     setGoToLineOpen(false);
   };
 
@@ -183,9 +186,9 @@ export default function RightPane(props: Props) {
     if (tab.kind !== 'file' || !tab.file) return;
     try {
       await navigator.clipboard.writeText(tab.file.path);
-      props.onNotice('파일 경로를 복사했어.');
+      props.onNotice(s.pane.copiedPath);
     } catch {
-      props.onNotice('파일 경로를 복사하지 못했어.');
+      props.onNotice(s.pane.copyPathFailed);
     }
   };
 
@@ -193,12 +196,12 @@ export default function RightPane(props: Props) {
     closeTabContextMenu();
     if (tab.kind !== 'file' || !tab.file) return;
     if (!hasBridge()) {
-      props.onNotice('파일 위치 열기는 데스크톱 앱에서 사용할 수 있어.');
+      props.onNotice(s.pane.revealDesktopOnly);
       return;
     }
     try {
       const result = await api().revealEntry(props.folder, tab.file.path);
-      props.onNotice(result.ok ? '파일 위치를 파일 탐색기에서 열었어.' : (result.error || '파일 위치를 열지 못했어.'));
+      props.onNotice(result.ok ? s.pane.revealedExplorer : (result.error || s.pane.revealFailed));
     } catch (error) {
       props.onNotice(error instanceof Error ? error.message : String(error));
     }
@@ -223,25 +226,25 @@ export default function RightPane(props: Props) {
     <div className="right-pane" style={{ flex: '1 1 0', minWidth: 0 }}>
       <div className="strip">
         {goToLineOpen && <form className="go-to-line-popover" onSubmit={submitGoToLine}>
-          <label htmlFor="go-to-line-input">줄로 이동</label>
+          <label htmlFor="go-to-line-input">{s.pane.gotoLabel}</label>
           <input
             ref={goToLineInputRef}
             id="go-to-line-input"
-            aria-label="줄 번호"
+            aria-label={s.pane.lineLabel}
             inputMode="numeric"
             pattern="[0-9]+(:[0-9]+)?"
-            placeholder="줄 또는 줄:열 (예: 42:8)"
+            placeholder={s.pane.linePlaceholder}
             value={goToLineValue}
             onChange={(event) => setGoToLineValue(event.target.value)}
             onKeyDown={(event) => { if (event.key === 'Escape') setGoToLineOpen(false); }}
           />
-          <span>Enter 이동 · Esc 닫기</span>
-          <button type="button" className="icon-btn" aria-label="줄 이동 닫기" onClick={() => setGoToLineOpen(false)}><XIcon size={12} /></button>
+          <span>{s.pane.gotoHint}</span>
+          <button type="button" className="icon-btn" aria-label={s.pane.gotoClose} onClick={() => setGoToLineOpen(false)}><XIcon size={12} /></button>
         </form>}
-        <button className="icon-btn strip-chat-return" type="button" onClick={props.onBackToChat} title="채팅으로 돌아가기" aria-label="채팅으로 돌아가기">
+        <button className="icon-btn strip-chat-return" type="button" onClick={props.onBackToChat} title={s.pane.backToChat} aria-label={s.pane.backToChat}>
           <ChatIcon size={14} />
         </button>
-        <div ref={tabStripRef} className="strip-tabs" role="tablist" aria-label="오른쪽 패널 탭">
+        <div ref={tabStripRef} className="strip-tabs" role="tablist" aria-label={s.pane.tablistLabel}>
           {tabs.map((t, tabIndex) => {
             const dirty = t.kind === 'file' && t.file && t.file.dirty && !t.file.readOnly;
             const duplicateFileName = t.kind === 'file' && t.file && (fileNameCounts.get(t.file.name.toLowerCase()) || 0) > 1;
@@ -277,10 +280,10 @@ export default function RightPane(props: Props) {
                   aria-setsize={tabs.length}
                   aria-haspopup="menu"
                   aria-expanded={tabContextMenu?.tabId === t.id}
-                  aria-label={`${t.title}${parentFolder ? `, ${parentFolder} 폴더` : ''}${dirty ? ', 저장하지 않은 변경' : ''}${t.file?.diskState === 'changed' ? ', 디스크에서 변경됨' : t.file?.diskState === 'missing' ? ', 디스크에서 삭제됨' : t.file?.diskState === 'unavailable' ? ', 파일을 불러올 수 없음' : ''}`}
+                  aria-label={`${t.title}${parentFolder ? formatStr(s.pane.inFolder, { folder: parentFolder }) : ''}${dirty ? s.pane.unsaved : ''}${t.file?.diskState === 'changed' ? s.pane.diskChanged : t.file?.diskState === 'missing' ? s.pane.diskMissing : t.file?.diskState === 'unavailable' ? s.pane.diskUnavailable : ''}`}
                   tabIndex={t.id === activeId ? 0 : -1}
                   className={`${t.id === activeId ? 'ptab active' : 'ptab'}${t.pinned ? ' pinned' : ''}`}
-                  title={`${t.kind === 'file' && t.file ? t.file.path : t.title}${dirty ? ' · 저장되지 않은 변경' : ''}${t.file?.diskState === 'changed' ? ' · 디스크에서 변경됨' : t.file?.diskState === 'missing' ? ' · 디스크에서 삭제됨' : t.file?.diskState === 'unavailable' ? ' · 파일을 불러올 수 없음' : ''}`}
+                  title={`${t.kind === 'file' && t.file ? t.file.path : t.title}${dirty ? s.pane.unsavedTitle : ''}${t.file?.diskState === 'changed' ? s.pane.diskChangedTitle : t.file?.diskState === 'missing' ? s.pane.diskMissingTitle : t.file?.diskState === 'unavailable' ? s.pane.diskUnavailableTitle : ''}`}
                   onClick={(e) => { e.currentTarget.focus(); props.onSelectTab(t.id); }}
                   onContextMenu={(e) => {
                     e.preventDefault();
@@ -324,8 +327,8 @@ export default function RightPane(props: Props) {
                 </div>
                 <button
                   className="icon-btn ptab-x"
-                  title="탭 닫기 (Ctrl+W)"
-                  aria-label={`${t.title} 탭 닫기`}
+                  title={s.pane.closeTabTitle}
+                  aria-label={formatStr(s.pane.closeTabLabel, { title: t.title })}
                   onClick={(e) => {
                     e.stopPropagation();
                     props.onCloseTab(t.id);
@@ -337,22 +340,22 @@ export default function RightPane(props: Props) {
             );
           })}
         </div>
-        {dirtyFileCount > 0 && <button className="icon-btn" type="button" disabled={props.savingAllFiles} aria-busy={props.savingAllFiles} title={props.savingAllFiles ? '변경 파일을 저장하는 중…' : `변경된 파일 ${dirtyFileCount}개 모두 저장 (Ctrl+Shift+S)`} aria-label={props.savingAllFiles ? '변경 파일 저장 중' : `변경된 파일 ${dirtyFileCount}개 모두 저장`} onClick={props.onSaveAllFiles}>
+        {dirtyFileCount > 0 && <button className="icon-btn" type="button" disabled={props.savingAllFiles} aria-busy={props.savingAllFiles} title={props.savingAllFiles ? s.pane.saveAllBusy : formatStr(s.pane.saveAllTitle, { n: dirtyFileCount })} aria-label={props.savingAllFiles ? s.pane.saveAllBusyLabel : formatStr(s.pane.saveAllLabel, { n: dirtyFileCount })} onClick={props.onSaveAllFiles}>
           <SaveIcon size={14} />
         </button>}
-        {selectedFileTab?.file && !selectedFileTab.file.preview && <button className={props.wordWrap ? 'icon-btn on' : 'icon-btn'} type="button" title={`줄바꿈 ${props.wordWrap ? '끄기' : '켜기'} (Alt+Z)`} aria-label={`줄바꿈 ${props.wordWrap ? '끄기' : '켜기'}`} aria-pressed={props.wordWrap} onClick={props.onToggleWordWrap}>
+        {selectedFileTab?.file && !selectedFileTab.file.preview && <button className={props.wordWrap ? 'icon-btn on' : 'icon-btn'} type="button" title={formatStr(s.pane.wrapTitle, { state: props.wordWrap ? s.pane.wrapOff : s.pane.wrapOn })} aria-label={formatStr(s.pane.wrapLabel, { state: props.wordWrap ? s.pane.wrapOff : s.pane.wrapOn })} aria-pressed={props.wordWrap} onClick={props.onToggleWordWrap}>
           <WrapLinesIcon size={14} />
         </button>}
-        {selectedFileTab?.file && !selectedFileTab.file.preview && <div className="editor-font-controls" aria-label="편집기 글자 크기">
-          <button type="button" className="icon-btn" title="글자 작게 (Ctrl+-)" aria-label="편집기 글자 작게" disabled={props.editorFontSize <= 10} onClick={() => props.onChangeEditorFontSize(-1)}>A−</button>
+        {selectedFileTab?.file && !selectedFileTab.file.preview && <div className="editor-font-controls" aria-label={s.pane.fontSizeLabel}>
+          <button type="button" className="icon-btn" title={s.pane.fontSmaller} aria-label={s.pane.fontSmallerLabel} disabled={props.editorFontSize <= 10} onClick={() => props.onChangeEditorFontSize(-1)}>A−</button>
           <span aria-live="polite">{props.editorFontSize}px</span>
-          <button type="button" className="icon-btn" title="글자 크게 (Ctrl+=)" aria-label="편집기 글자 크게" disabled={props.editorFontSize >= 24} onClick={() => props.onChangeEditorFontSize(1)}>A+</button>
+          <button type="button" className="icon-btn" title={s.pane.fontBigger} aria-label={s.pane.fontBiggerLabel} disabled={props.editorFontSize >= 24} onClick={() => props.onChangeEditorFontSize(1)}>A+</button>
         </div>}
         <button
           type="button"
           className="icon-btn strip-add"
-          title="새 탭"
-          aria-label="새 탭"
+          title={s.pane.newTab}
+          aria-label={s.pane.newTab}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           aria-controls="pane-new-tab-menu"
@@ -363,15 +366,15 @@ export default function RightPane(props: Props) {
         {menuOpen && (
           <>
             <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
-            <div className="strip-menu" id="pane-new-tab-menu" role="menu" aria-label="새 탭 종류">
+            <div className="strip-menu" id="pane-new-tab-menu" role="menu" aria-label={s.pane.newTabMenu}>
               <button role="menuitem" onClick={() => newTab('browser')}>
-                <GlobeIcon size={14} /> 새 브라우저 탭
+                <GlobeIcon size={14} /> {s.pane.newBrowser}
               </button>
               <button role="menuitem" onClick={() => newTab('terminal')}>
-                <TerminalIcon size={14} /> 새 터미널
+                <TerminalIcon size={14} /> {s.pane.newTerminal}
               </button>
               <button role="menuitem" onClick={() => newTab('files')}>
-                <FolderIcon size={14} /> 파일 탐색기
+                <FolderIcon size={14} /> {s.pane.explorer}
               </button>
               <button
                 role="menuitem"
@@ -380,7 +383,7 @@ export default function RightPane(props: Props) {
                   props.onPickFileTab();
                 }}
               >
-                <FileIcon size={14} /> 파일 열기…
+                <FileIcon size={14} /> {s.pane.openFile}
               </button>
             </div>
           </>
@@ -400,7 +403,7 @@ export default function RightPane(props: Props) {
                 ref={tabContextMenuRef}
                 className="strip-menu pane-tab-context-menu"
                 role="menu"
-                aria-label={`${contextTab.title} 탭 메뉴`}
+                aria-label={formatStr(s.pane.tabMenuFor, { title: contextTab.title })}
                 style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
                 onKeyDown={(event) => {
                   if (event.key === 'Escape') {
@@ -415,16 +418,16 @@ export default function RightPane(props: Props) {
                   }
                 }}
               >
-                <button role="menuitem" onClick={() => closeFromMenu([contextTab.id])}>탭 닫기</button>
-                {contextTab.kind === 'file' && <button role="menuitem" onClick={() => { closeTabContextMenu(); props.onToggleTabPinned(contextTab.id); }}>{contextTab.pinned ? '탭 고정 해제' : '탭 고정'}</button>}
-                {tabs.length > 1 && <button role="menuitem" onClick={() => closeFromMenu(tabs.filter((tab) => tab.id !== contextTab.id).map((tab) => tab.id))}>다른 탭 닫기</button>}
-                {contextIndex < tabs.length - 1 && <button role="menuitem" onClick={() => closeFromMenu(tabs.slice(contextIndex + 1).map((tab) => tab.id))}>오른쪽 탭 닫기</button>}
-                {tabs.length > 1 && <button role="menuitem" onClick={() => closeFromMenu(tabs.map((tab) => tab.id))}>모든 탭 닫기</button>}
-                {savedFileTabIds.length > 0 && <button role="menuitem" onClick={() => closeFromMenu(savedFileTabIds)}>저장된 파일 탭 닫기 ({savedFileTabIds.length})</button>}
-                {unpinnedTabIds.length > 0 && <button role="menuitem" onClick={() => closeFromMenu(unpinnedTabIds)}>고정하지 않은 탭 닫기 ({unpinnedTabIds.length})</button>}
+                <button role="menuitem" onClick={() => closeFromMenu([contextTab.id])}>{s.pane.menuClose}</button>
+                {contextTab.kind === 'file' && <button role="menuitem" onClick={() => { closeTabContextMenu(); props.onToggleTabPinned(contextTab.id); }}>{contextTab.pinned ? s.pane.menuUnpin : s.pane.menuPin}</button>}
+                {tabs.length > 1 && <button role="menuitem" onClick={() => closeFromMenu(tabs.filter((tab) => tab.id !== contextTab.id).map((tab) => tab.id))}>{s.pane.menuCloseOthers}</button>}
+                {contextIndex < tabs.length - 1 && <button role="menuitem" onClick={() => closeFromMenu(tabs.slice(contextIndex + 1).map((tab) => tab.id))}>{s.pane.menuCloseRight}</button>}
+                {tabs.length > 1 && <button role="menuitem" onClick={() => closeFromMenu(tabs.map((tab) => tab.id))}>{s.pane.menuCloseAll}</button>}
+                {savedFileTabIds.length > 0 && <button role="menuitem" onClick={() => closeFromMenu(savedFileTabIds)}>{formatStr(s.pane.menuCloseSaved, { n: savedFileTabIds.length })}</button>}
+                {unpinnedTabIds.length > 0 && <button role="menuitem" onClick={() => closeFromMenu(unpinnedTabIds)}>{formatStr(s.pane.menuCloseUnpinned, { n: unpinnedTabIds.length })}</button>}
                 {contextTab.kind === 'file' && contextTab.file && <>
-                  <button role="menuitem" onClick={() => void revealTabFile(contextTab)}>파일 위치 열기</button>
-                  <button role="menuitem" onClick={() => void copyTabPath(contextTab)}>파일 경로 복사</button>
+                  <button role="menuitem" onClick={() => void revealTabFile(contextTab)}>{s.pane.menuReveal}</button>
+                  <button role="menuitem" onClick={() => void copyTabPath(contextTab)}>{s.pane.menuCopyPath}</button>
                 </>}
               </div>
             </>
@@ -434,7 +437,7 @@ export default function RightPane(props: Props) {
       <div className="strip-body">
         {tabs.length === 0 && (
           <div className="strip-empty">
-            탭이 없습니다. <button className="link-btn" onClick={() => setMenuOpen(true)}>+ 새 탭</button>으로 여세요.
+            {s.pane.noTabs} <button className="link-btn" onClick={() => setMenuOpen(true)}>{s.pane.newTabCta}</button>{s.pane.noTabsSuffix}
           </div>
         )}
         {tabs.map((t) => {
@@ -450,7 +453,7 @@ export default function RightPane(props: Props) {
               className={selected ? 'pane-page' : 'pane-page hidden'}
             >
               {t.kind === 'file' && t.file && (
-                <Suspense fallback={<div className="editor-loading" role="status">코드 편집기를 불러오는 중…</div>}>
+                <Suspense fallback={<div className="editor-loading" role="status">{s.pane.loadingEditor}</div>}>
                   <FileEditor
                     file={t.file}
                     workspaceRoot={props.folder}
@@ -546,7 +549,7 @@ export default function RightPane(props: Props) {
                 />
               )}
               {t.kind === 'terminal' && (
-                <Suspense fallback={<div className="editor-loading" role="status">터미널을 불러오는 중…</div>}>
+                <Suspense fallback={<div className="editor-loading" role="status">{s.pane.loadingTerminal}</div>}>
                   <TerminalTab
                     tabId={t.id}
                     shell={t.shell || 'powershell'}

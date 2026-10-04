@@ -18,6 +18,8 @@ import { normalizePromptQueue } from './lib/prompt-queue.mjs';
 import { reconcileOpenFileDiskState } from './lib/open-file-disk-state.mjs';
 import { ensureFilesTabFallback, unpinnedPaneTabIds } from './lib/pane-tab-management.mjs';
 import { detachProjectSessions } from './lib/project-sessions.mjs';
+import { formatStr, sanitizeLang, STRINGS } from './lib/i18n.mjs';
+import { LangContext } from './lib/lang';
 import { hideHostSessionId, readHiddenHostSessionIds, visibleHostSessions } from './lib/host-session-filter.mjs';
 import { shouldShowBackgroundNotification } from './lib/notification-rules.mjs';
 import { addScheduledPrompt, cancelScheduledPrompt, createScheduledPrompt, dueScheduledPrompts, fireableScheduledPrompt, formatRepeat, formatScheduledFireTime, markScheduledPrompt, readScheduledPrompts, rescheduleScheduledPrompt, rollRepeatingPrompt, staleScheduledPrompts, writeScheduledPrompts } from './lib/scheduled-prompts.mjs';
@@ -71,6 +73,7 @@ const DEFAULT_SETTINGS: CliSettings = {
   browserAgent: true,
   browserHome: '',
   backgroundNotifications: true,
+  lang: 'ko',
 };
 
 type ClosedPaneTab =
@@ -176,6 +179,12 @@ function loadClosedFilePaths(): string[] {
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
+// A session keeps the default title it was created with, whatever language
+// the UI shows now — so both languages' defaults count as "untitled".
+function isDefaultThreadTitle(title: string): boolean {
+  return title === STRINGS.ko.common.newThread || title === STRINGS.en.common.newThread;
+}
+
 function beginDrag(e: React.MouseEvent, onDx: (dx: number) => void) {
   e.preventDefault();
   const x0 = e.clientX;
@@ -196,10 +205,10 @@ export default function App() {
   const initialRef = useRef<Session[] | null>(null);
   if (!initialRef.current) {
     const loaded = loadSessions();
-    initialRef.current = loaded.length > 0 ? loaded : [newSession()];
+    initialRef.current = loaded.length > 0 ? loaded : [newSession(undefined, sanitizeLang(loadString('mudex:lang')))];
   }
   const tabsRef = useRef<PaneTab[] | null>(null);
-  if (!tabsRef.current) tabsRef.current = [{ id: uid('tab'), kind: 'files', title: '파일' }];
+  if (!tabsRef.current) tabsRef.current = [{ id: uid('tab'), kind: 'files', title: STRINGS[sanitizeLang(loadString('mudex:lang'))].app.filesTab }];
   const [tabs, setTabs] = useState<PaneTab[]>(tabsRef.current);
   const [activeTabId, setActiveTabId] = useState<string>(tabsRef.current[0].id);
   const [tabsHydrated, setTabsHydrated] = useState(false);
@@ -330,7 +339,7 @@ export default function App() {
 
   useEffect(() => {
     const labels = [
-      activeSessionTitle && activeSessionTitle !== '새 스레드' ? activeSessionTitle : '',
+      activeSessionTitle && !isDefaultThreadTitle(activeSessionTitle) ? activeSessionTitle : '',
       workspaceTitle,
       'Musician',
     ].filter(Boolean);
@@ -660,7 +669,7 @@ export default function App() {
       recentPaneTabIdsRef.current = touchRecentTab(recentPaneTabIdsRef.current, target.id, latestTabsRef.current.map((tab) => tab.id));
       setActiveTabId(target.id);
       setEditorVisible(true);
-      setNotice('에이전트가 브라우저 탭을 전환했어.');
+      setNotice(STRINGS[langRef.current].app.agentSwitchedTab);
     });
     return () => {
       off();
@@ -736,7 +745,7 @@ export default function App() {
     scheduledFiringRef.current = { id: item.id, sessionId: item.sessionId, nonce: scheduledNonceRef.current, since: Date.now() };
     setScheduledFire({ sessionId: item.sessionId, text: item.text, nonce: scheduledNonceRef.current });
     const wasActive = activeIdRef.current === item.sessionId;
-    const title = sessionsRef.current.find((session) => session.id === item.sessionId)?.title || '스레드';
+    const title = sessionsRef.current.find((session) => session.id === item.sessionId)?.title || av.threadFallback;
     if (hasBridge() && shouldShowBackgroundNotification({
       enabled: settingsRef.current.backgroundNotifications,
       isActiveSession: wasActive,
@@ -747,17 +756,17 @@ export default function App() {
     }
     setActiveId(item.sessionId);
     setView('thread');
-    setNotice(`예약 실행: ${title}`);
+    setNotice(formatStr(av.schedFired, { title }));
   };
 
   const fireScheduledNow = (id: string) => {
     if (scheduledFiringRef.current) {
-      setNotice('실행 중인 예약이 끝나면 순서대로 실행돼.');
+      setNotice(av.schedBusy);
       return;
     }
     const item = fireableScheduledPrompt(scheduledRef.current, id, sessionsRef.current, null);
     if (!item) {
-      setNotice('지금 실행할 수 없어. 이미 실행됐거나 스레드가 없어.');
+      setNotice(av.schedCannotRun);
       return;
     }
     fireScheduledItem(item);
@@ -860,7 +869,7 @@ export default function App() {
       const saved = readWorkspacePaneLayout(folder);
       if (!saved || !Array.isArray(saved.tabs)) {
         if (!cancelled) {
-          const emptyTab: PaneTab = { id: uid('tab'), kind: 'files', title: '파일' };
+          const emptyTab: PaneTab = { id: uid('tab'), kind: 'files', title: av.filesTab };
           const persistentTabs = latestTabsRef.current.filter((tab) => tab.kind === 'terminal' || tab.kind === 'browser');
           setTabs([...persistentTabs, emptyTab]);
           setActiveTabId(emptyTab.id);
@@ -964,16 +973,20 @@ export default function App() {
       // An empty tabset bricks the pane (no strip, no recovery target),
       // and stored layouts can legitimately be empty once closed tabs are
       // purged everywhere — always fall back to the Files tab.
-      nextTabs = ensureFilesTabFallback(nextTabs, () => ({ id: uid('tab'), kind: 'files', title: '파일' }));
+      nextTabs = ensureFilesTabFallback(nextTabs, () => ({ id: uid('tab'), kind: 'files', title: av.filesTab }));
       setTabs(nextTabs);
       const selectedId = typeof saved.activeTabId === 'string' ? saved.activeTabId : '';
       setActiveTabId(nextTabs.some((tab) => tab.id === selectedId) ? selectedId : (nextTabs[0]?.id || ''));
       if (unavailableFileNames.length > 0) {
-        setNotice(`열린 파일 ${unavailableFileNames.length}개를 불러오지 못해 탭을 보존했어${unavailableDraftCount ? ` (저장 안 된 초안 ${unavailableDraftCount}개 복구)` : ''}: ${unavailableFileNames.slice(0, 3).join(', ')}. 파일이 돌아오면 새로고침해줘.`);
+        setNotice(formatStr(av.restoreUnavailable, {
+          n: unavailableFileNames.length,
+          draft: unavailableDraftCount ? formatStr(av.restoreUnavailableDraft, { n: unavailableDraftCount }) : '',
+          names: unavailableFileNames.slice(0, 3).join(', '),
+        }));
       } else if (changedOnDiskDraftNames.length > 0) {
-        setNotice(`편집 내용을 복구했어. 디스크 파일도 바뀌어 있어 저장할 때 덮어쓰기 확인이 필요해: ${changedOnDiskDraftNames.slice(0, 3).join(', ')}.`);
+        setNotice(formatStr(av.restoreDiskChanged, { names: changedOnDiskDraftNames.slice(0, 3).join(', ') }));
       } else if (recoveredDraftNames.length > 0) {
-        setNotice(`저장하지 않은 편집 내용 ${recoveredDraftNames.length}개를 복구했어.`);
+        setNotice(formatStr(av.restoreDrafts, { n: recoveredDraftNames.length }));
       }
       setTabsHydrated(true);
     };
@@ -1000,7 +1013,7 @@ export default function App() {
       }
       if (result.omittedCount > 0 && !omittedDraftNoticeRef.current) {
         omittedDraftNoticeRef.current = true;
-        setNotice('일부 큰 파일은 자동 복구 백업 크기 제한으로 저장하지 못했어. 중요한 변경은 먼저 저장해줘.');
+        setNotice(av.draftBackupLimited);
       }
     }, 250);
     return () => window.clearTimeout(timer);
@@ -1053,6 +1066,22 @@ export default function App() {
     setDark(settings.theme !== 'light');
     document.documentElement.dataset.theme = settings.theme;
   }, [settings.theme]);
+
+  const lang = sanitizeLang(settings.lang);
+  // App sits above LangContext.Provider, so it reads STRINGS directly.
+  const av = STRINGS[lang].app;
+  const common = STRINGS[lang].common;
+  // Mount-once effects below read the live language through this ref.
+  const langRef = useRef(lang);
+  langRef.current = lang;
+  useEffect(() => {
+    document.documentElement.lang = lang;
+    try {
+      localStorage.setItem('mudex:lang', lang);
+    } catch {
+      /* the crash screen falls back to Korean */
+    }
+  }, [lang]);
 
   useEffect(() => {
     try {
@@ -1259,8 +1288,8 @@ export default function App() {
   const titleMaybe = (sessionId: string, firstPrompt: string) =>
     setSessions((prev) =>
       prev.map((s) =>
-        s.id === sessionId && s.title === '새 스레드' && s.messages.length <= 1
-          ? { ...s, title: sessionTitle(firstPrompt) }
+        s.id === sessionId && isDefaultThreadTitle(s.title) && s.messages.length <= 1
+          ? { ...s, title: sessionTitle(firstPrompt, lang) }
           : s,
       ),
     );
@@ -1286,12 +1315,12 @@ export default function App() {
     }
     const activeSession = sessions.find((session) => session.id === activeId);
     const reusable = linked || (activeSession && activeSession.messages.length === 0 && !runningIds.includes(activeSession.id) ? activeSession : null);
-    const created = reusable ? null : newSession(folder || undefined);
+    const created = reusable ? null : newSession(folder || undefined, lang);
     const threadId = reusable?.id || created!.id;
     setResumingId(hostSessionId);
     try {
       const result = await api().mspResume(threadId, hostSessionId, folder || '');
-      if (!result.ok) throw new Error(result.error || '알 수 없는 오류');
+      if (!result.ok) throw new Error(result.error || common.unknownError);
       const now = Date.now();
       const messages: ChatMessage[] = (result.messages || []).map((message, index) => ({
         id: `rm-${now}-${index}`,
@@ -1313,10 +1342,10 @@ export default function App() {
           : [nextSession, ...previous];
       });
       setActiveId(threadId);
-      const mcpNotice = mcpChatNotice(result.mcpHealth);
+      const mcpNotice = mcpChatNotice(result.mcpHealth, lang);
       if (mcpNotice) setNotice(mcpNotice);
     } catch (error) {
-      setNotice(`세션 이어하기 실패: ${error instanceof Error ? error.message : String(error)}`);
+      setNotice(formatStr(av.resumeFailed, { error: error instanceof Error ? error.message : String(error) }));
     } finally {
       setResumingId(null);
     }
@@ -1327,13 +1356,13 @@ export default function App() {
     const target = hostSessions.find((h) => h.sessionId === hostSessionId);
     if (!target) return;
     const label = target.title || target.name || hostSessionId.slice(0, 8);
-    if (await requestConfirm({ title: 'CLI 세션 삭제', message: `“${label}”을(를) 목록에서 삭제할까요? CLI 쪽 원본은 그대로 있고, 이 앱 목록에서만 숨겨집니다.`, confirmLabel: '삭제', destructive: true }) !== 'confirm') return;
+    if (await requestConfirm({ title: av.delHostTitle, message: formatStr(av.delHostMsg, { label }), confirmLabel: common.delete, destructive: true }) !== 'confirm') return;
     const hidden = hideHostSessionId(hostSessionId);
     setHostSessions((previous) => visibleHostSessions(previous, hidden));
   };
 
   const newChat = () => {
-    const s = newSession();
+    const s = newSession(undefined, lang);
     setSessions((prev) => [s, ...prev]);
     setActiveId(s.id);
   };
@@ -1355,15 +1384,15 @@ export default function App() {
   const deleteSession = async (id: string) => {
     const target = sessions.find((s) => s.id === id);
     if (runningIds.includes(id)) {
-      setNotice('실행 중인 스레드는 작업이 끝난 뒤 삭제할 수 있습니다.');
+      setNotice(av.delRunningThread);
       return;
     }
-    if (await requestConfirm({ title: '스레드 삭제', message: `“${target?.title || '스레드'}”을(를) 영구 삭제할까요? 이 작업은 되돌릴 수 없고, 저장된 입력 초안·대기열과 자동 실행 설정도 함께 삭제돼.`, confirmLabel: '영구 삭제', destructive: true }) !== 'confirm') return;
+    if (await requestConfirm({ title: av.delThreadTitle, message: formatStr(av.delThreadMsg, { title: target?.title || av.threadFallback }), confirmLabel: av.delThreadBtn, destructive: true }) !== 'confirm') return;
     clearSessionLocalState(id);
     // Updaters must stay pure (StrictMode double-invokes them): compute the
     // next list from the current render snapshot, then set both states.
     const next = sessions.filter((s) => s.id !== id);
-    const fixed = next.length > 0 ? next : [newSession()];
+    const fixed = next.length > 0 ? next : [newSession(undefined, lang)];
     setSessions(fixed);
     if (id === activeId) setActiveId(fixed[0].id);
   };
@@ -1373,25 +1402,25 @@ export default function App() {
     const targets = sessions.filter((session) => targetIds.has(session.id));
     if (targets.length === 0) return false;
     if (targets.some((session) => runningIdsRef.current.includes(session.id))) {
-      setNotice('실행 중인 스레드는 작업이 끝난 뒤 삭제할 수 있습니다.');
+      setNotice(av.delRunningThread);
       return false;
     }
     const names = targets.slice(0, 5).map((session) => `• ${session.title}`).join('\n');
-    const remaining = targets.length > 5 ? `\n외 ${targets.length - 5}개` : '';
+    const remaining = targets.length > 5 ? formatStr(av.listMore, { n: targets.length - 5 }) : '';
     const result = await requestConfirm({
-      title: `스레드 ${targets.length}개 삭제`,
-      message: `선택한 스레드를 영구 삭제할까요? 이 작업은 되돌릴 수 없고, 저장된 입력 초안·대기열과 자동 실행 설정도 함께 삭제돼.\n\n${names}${remaining}`,
-      confirmLabel: `${targets.length}개 영구 삭제`,
+      title: formatStr(av.delThreadsTitle, { n: targets.length }),
+      message: formatStr(av.delThreadsMsg, { names, rest: remaining }),
+      confirmLabel: formatStr(av.delThreadsBtn, { n: targets.length }),
       destructive: true,
     });
     if (result !== 'confirm') return false;
     if (targets.some((session) => runningIdsRef.current.includes(session.id))) {
-      setNotice('선택한 스레드에서 작업이 시작되어 삭제를 취소했어. 작업이 끝난 뒤 다시 시도해줘.');
+      setNotice(av.delCancelledRace);
       return false;
     }
     targetIds.forEach(clearSessionLocalState);
     const next = sessions.filter((session) => !targetIds.has(session.id));
-    const fixed = next.length > 0 ? next : [newSession()];
+    const fixed = next.length > 0 ? next : [newSession(undefined, lang)];
     setSessions(fixed);
     if (targetIds.has(activeId)) setActiveId(fixed[0].id);
     return true;
@@ -1419,7 +1448,7 @@ export default function App() {
 
   const toggleSessionArchived = (id: string) => {
     if (runningIds.includes(id)) {
-      setNotice('실행 중인 스레드는 작업이 끝난 뒤 보관할 수 있습니다.');
+      setNotice(av.archiveRunning);
       return;
     }
     setSessions((prev) => prev.map((s) => s.id === id ? { ...s, archived: !s.archived } : s));
@@ -1431,7 +1460,7 @@ export default function App() {
     const targets = sessions.filter((session) => targetIds.has(session.id));
     const shouldArchive = targets.some((session) => !session.archived);
     if (shouldArchive && targets.some((session) => runningIdsRef.current.includes(session.id))) {
-      setNotice('실행 중인 스레드는 작업이 끝난 뒤 보관할 수 있습니다.');
+      setNotice(av.archiveRunning);
       return;
     }
     setSessions((previous) => previous.map((session) => targetIds.has(session.id) ? { ...session, archived: shouldArchive } : session));
@@ -1439,10 +1468,10 @@ export default function App() {
 
   const copySessionTranscript = async (session: Session) => {
     try {
-      await navigator.clipboard.writeText(formatSessionTranscript(session));
-      setNotice(`“${session.title}” 대화를 Markdown으로 복사했어.`);
+      await navigator.clipboard.writeText(formatSessionTranscript(session, { lang }));
+      setNotice(formatStr(av.copiedTranscript, { title: session.title }));
     } catch {
-      setNotice('대화 내용을 클립보드에 복사하지 못했어.');
+      setNotice(av.copyTranscriptFailed);
     }
   };
 
@@ -1452,18 +1481,18 @@ export default function App() {
     if (!selectedSessions.length) return false;
     try {
       const result = await api().exportMarkdown(
-        `Musician-${selectedSessions.length}개-대화`,
-        formatSessionTranscripts(selectedSessions, { projectFallback: folder }),
+        formatStr(av.exportFileName, { n: selectedSessions.length }),
+        formatSessionTranscripts(selectedSessions, { projectFallback: folder, lang }),
       );
       if (!result.ok) {
-        setNotice(`대화를 내보내지 못했어: ${result.error || '알 수 없는 오류'}`);
+        setNotice(formatStr(av.exportFailed, { error: result.error || common.unknownError }));
         return false;
       }
       if (result.canceled) return false;
-      setNotice(`${selectedSessions.length}개 대화를 Markdown으로 내보냈어${result.path ? `: ${result.path}` : '.'}`);
+      setNotice(formatStr(av.exportedOk, { n: selectedSessions.length, tail: result.path ? formatStr(av.exportedPathTail, { path: result.path }) : av.exportedNoPath }));
       return true;
     } catch (error) {
-      setNotice(error instanceof Error ? `대화를 내보내지 못했어: ${error.message}` : '대화를 내보내지 못했어.');
+      setNotice(error instanceof Error ? formatStr(av.exportFailed, { error: error.message }) : av.exportFailedBare);
       return false;
     }
   };
@@ -1473,26 +1502,26 @@ export default function App() {
   const renameExplorerEntry = async (entryPath: string, newName: string): Promise<boolean> => {
     if (!folder) return false;
     if (hasProjectRun()) {
-      setNotice('이 프로젝트에서 작업 중인 에이전트가 끝난 뒤 파일 이름을 바꿔주세요.');
+      setNotice(av.renameBlockedRun);
       return false;
     }
     const affected = tabs.filter((tab) => tab.kind === 'file' && tab.file && isSameOrDescendantPath(entryPath, tab.file.path));
     if (affected.some((tab) => tab.kind === 'file' && tab.file?.dirty)) {
-      setNotice('수정된 파일 탭을 먼저 저장한 뒤 이름을 바꿔주세요.');
+      setNotice(av.renameDirtyTabs);
       return false;
     }
     try {
       const result = await api().renameEntry(folder, entryPath, newName);
       if (!result.ok || !result.path) {
         const message = result.error === 'ALREADY_EXISTS'
-          ? '같은 이름의 파일 또는 폴더가 이미 있어.'
+          ? av.renameExists
           : result.error === 'BAD_NAME'
-            ? '사용할 수 없는 파일 이름이야.'
+            ? av.renameBadName
             : result.error === 'OUTSIDE_WORKSPACE'
-              ? '프로젝트 폴더 밖의 항목은 변경할 수 없어.'
+              ? av.renameOutside
               : result.error === 'SYMLINK_UNSUPPORTED'
-                ? '심볼릭 링크는 이 탐색기에서 변경할 수 없어.'
-                : result.error || '이름을 바꾸지 못했어.';
+                ? av.renameSymlink
+                : result.error || av.renameFailed;
         setNotice(message);
         return false;
       }
@@ -1517,7 +1546,7 @@ export default function App() {
       editorNavigationRef.current = remappedNavigation;
       setEditorNavigation(remappedNavigation);
       writeEditorNavigationHistory(folder, remappedNavigation);
-      setNotice('이름을 바꿨어. 열린 탭과 최근 파일 경로도 업데이트했어.');
+      setNotice(av.renamedOk);
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -1528,22 +1557,22 @@ export default function App() {
   const deleteExplorerEntry = async (entryPath: string, isDir: boolean): Promise<boolean> => {
     if (!folder) return false;
     if (hasProjectRun()) {
-      setNotice('이 프로젝트에서 작업 중인 에이전트가 끝난 뒤 파일을 삭제해주세요.');
+      setNotice(av.deleteBlockedRun);
       return false;
     }
     const affected = tabs.filter((tab) => tab.kind === 'file' && tab.file && isSameOrDescendantPath(entryPath, tab.file.path));
     if (affected.some((tab) => tab.kind === 'file' && tab.file?.dirty)) {
-      setNotice('수정된 파일 탭을 먼저 저장한 뒤 삭제해주세요.');
+      setNotice(av.deleteDirtyTabs);
       return false;
     }
     try {
       const result = await api().deleteEntry(folder, entryPath);
       if (!result.ok) {
         const message = result.error === 'OUTSIDE_WORKSPACE'
-          ? '프로젝트 폴더 밖의 항목은 삭제할 수 없어.'
+          ? av.deleteOutside
           : result.error === 'SYMLINK_UNSUPPORTED'
-            ? '심볼릭 링크는 이 탐색기에서 삭제할 수 없어.'
-            : result.error || '삭제하지 못했어.';
+            ? av.deleteSymlink
+            : result.error || av.deleteFailed;
         setNotice(message);
         return false;
       }
@@ -1559,7 +1588,7 @@ export default function App() {
       editorNavigationRef.current = prunedNavigation;
       setEditorNavigation(prunedNavigation);
       writeEditorNavigationHistory(folder, prunedNavigation);
-      setNotice(isDir ? '폴더와 내부 항목을 휴지통으로 옮겼어.' : '파일을 휴지통으로 옮겼어.');
+      setNotice(isDir ? av.trashedDir : av.trashedFile);
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -1570,25 +1599,25 @@ export default function App() {
   const commitGitFiles = async (message: string): Promise<boolean> => {
     if (!folder) return false;
     if (hasProjectRun()) {
-      setNotice('이 프로젝트에서 작업 중인 에이전트가 끝난 뒤 커밋해주세요.');
+      setNotice(av.commitBlockedRun);
       return false;
     }
     try {
       const result = await api().gitCommit(folder, message);
       if (!result.ok) {
         const notice = result.error === 'NO_CHANGES'
-          ? '커밋할 스테이지된 변경이 없어. 먼저 파일을 스테이징해줘.'
+          ? av.commitNoStaged
           : result.error === 'EMPTY_MESSAGE'
-            ? '커밋 메시지를 입력해줘.'
+            ? STRINGS[lang].files.commitNeedMsg
             : result.error === 'MESSAGE_TOO_LONG'
-              ? '커밋 메시지가 너무 길어.'
+              ? STRINGS[lang].files.commitTooLong
               : result.error === 'GIT_NOT_FOUND'
-                ? 'git 실행 파일을 찾지 못했어.'
-                : result.error || '커밋하지 못했어.';
+                ? STRINGS[lang].files.gitNotFound
+                : result.error || av.commitFailedBare;
         setNotice(notice);
         return false;
       }
-      setNotice(result.hash ? `커밋했어. (${result.hash})` : '커밋했어.');
+      setNotice(result.hash ? formatStr(av.committedHash, { hash: result.hash }) : av.committedOk);
       void refreshChanged();
       return true;
     } catch (error) {
@@ -1655,7 +1684,7 @@ export default function App() {
 
   const pickFolder = async () => {
     if (!hasBridge()) {
-      setNotice('Electron 앱에서 실행해야 폴더를 열 수 있습니다.');
+      setNotice(av.pickFolderNeedApp);
       return;
     }
     try {
@@ -1668,7 +1697,7 @@ export default function App() {
 
   const newChatInFolder = (f: string) => {
     activateFolder(f);
-    const s = newSession(f);
+    const s = newSession(f, lang);
     setSessions((prev) => [s, ...prev]);
     setActiveId(s.id);
     setView('thread');
@@ -1676,7 +1705,7 @@ export default function App() {
 
   const openFile = async (filePath: string, pinned = false): Promise<boolean> => {
     if (!hasBridge()) {
-      setNotice('Electron 앱에서 실행해야 파일을 열 수 있습니다.');
+      setNotice(av.openFileNeedApp);
       return false;
     }
     const existing = tabs.find((t) => t.kind === 'file' && t.file && pathsEqual(t.file.path, filePath));
@@ -1707,8 +1736,8 @@ export default function App() {
         if (!res.ok) {
           setNotice(
             (res.error || '').startsWith('TOO_LARGE:')
-              ? '파일이 너무 커서 열 수 없습니다 (2MB 제한).'
-              : `파일 열기 실패: ${res.error}`,
+              ? av.fileTooLargeOpen
+              : formatStr(av.openFileFailed, { error: res.error }),
           );
           return false;
         }
@@ -1776,8 +1805,8 @@ export default function App() {
         setActiveTabId(restoredTab.id);
         setEditorVisible(true);
         updateClosedPaneTabs(closedPaneTabsRef.current.filter((item) => item !== closedTab));
-        if (closedTab.kind === 'terminal') setNotice('터미널 탭을 복원했어. 새 셸 세션으로 열었어.');
-        else if (closedTab.kind === 'browser') setNotice('브라우저 탭을 복원했어.');
+        if (closedTab.kind === 'terminal') setNotice(av.termTabRestored);
+        else if (closedTab.kind === 'browser') setNotice(av.browserTabRestored);
         return;
       } finally {
         reopeningClosedFileRef.current = false;
@@ -1785,7 +1814,7 @@ export default function App() {
     }
     const filePath = closedFilePathsRef.current[closedFilePathsRef.current.length - 1];
     if (!filePath) {
-      setNotice('다시 열 수 있는 닫은 탭이 없어.');
+      setNotice(av.noClosedTabs);
       return;
     }
     reopeningClosedFileRef.current = true;
@@ -1807,7 +1836,7 @@ export default function App() {
       pending.wasActive = true;
       if (activeTab.file.preview) {
         pendingLineRevealRef.current = null;
-        setNotice('미리보기 파일에서는 줄 위치로 이동할 수 없어.');
+        setNotice(STRINGS[langRef.current].app.revealPreviewBlocked);
         return;
       }
       const editor = editorApiRef.current;
@@ -1822,7 +1851,7 @@ export default function App() {
     pending.attempts += 1;
     if (pending.attempts >= 100) {
       pendingLineRevealRef.current = null;
-      if (pending.wasActive) setNotice('편집기 준비가 늦어져 줄 위치로 이동하지 못했어. 다시 시도해줘.');
+      if (pending.wasActive) setNotice(STRINGS[langRef.current].app.revealLate);
       return;
     }
     window.setTimeout(() => retryPendingLineReveal(pending), 50);
@@ -1836,7 +1865,7 @@ export default function App() {
       pending.wasActive = true;
       if (activeTab.file.preview) {
         pendingEditorInsertionRef.current = null;
-        setNotice('미리보기 파일은 편집할 수 없어 코드를 삽입하지 못했어.');
+        setNotice(STRINGS[langRef.current].app.insertPreviewBlocked);
         return;
       }
       const editor = editorApiRef.current;
@@ -1851,7 +1880,7 @@ export default function App() {
     pending.attempts += 1;
     if (pending.attempts >= 100) {
       pendingEditorInsertionRef.current = null;
-      if (pending.wasActive) setNotice('편집기 준비가 늦어져 코드를 삽입하지 못했어. 다시 시도해줘.');
+      if (pending.wasActive) setNotice(STRINGS[langRef.current].app.insertLate);
       return;
     }
     window.setTimeout(() => retryPendingEditorInsertion(pending), 50);
@@ -1883,7 +1912,7 @@ export default function App() {
     editorNavigationRef.current = next;
     setEditorNavigation(next);
     writeEditorNavigationHistory(folder, next);
-    setNotice(result.bookmarked ? '코드 위치를 북마크에 저장했어.' : '코드 위치 북마크를 해제했어.');
+    setNotice(result.bookmarked ? av.locBookmarked : av.locUnbookmarked);
   };
 
   const onEditorCursorLocationChange = (path: string, line: number, column: number) => {
@@ -1977,10 +2006,10 @@ export default function App() {
     try {
       let res = await api().writeFile(file.path, contentToSave, file.original);
       if (!res.ok && res.error === 'FILE_CHANGED') {
-        const overwrite = await requestConfirm({ title: '외부 변경 감지', message: `${file.name} 파일이 디스크에서 변경됐어. 편집 중인 내용으로 덮어쓸까?\n\n취소하면 편집 내용은 유지돼. 새로고침 버튼으로 디스크 내용을 다시 불러올 수 있어.`, confirmLabel: '내 내용으로 덮어쓰기', destructive: true });
+        const overwrite = await requestConfirm({ title: av.extChangeTitle, message: formatStr(av.extChangeMsg, { name: file.name }), confirmLabel: av.extChangeBtn, destructive: true });
         if (overwrite !== 'confirm') {
           setTabs((previous) => previous.map((tab) => tab.id === tabId && tab.file ? { ...tab, file: { ...tab.file, diskState: 'changed' } } : tab));
-          setNotice('외부 변경을 덮어쓰지 않았어. 편집 내용은 저장되지 않은 상태로 유지돼.');
+          setNotice(av.extChangeKept);
           return false;
         }
         res = await api().writeFile(file.path, contentToSave);
@@ -1988,7 +2017,7 @@ export default function App() {
       if (!res.ok) {
         const diskState = res.error === 'FILE_MISSING' ? 'missing' : res.error === 'FILE_CHANGED' ? 'changed' : res.error ? 'unavailable' : undefined;
         if (diskState) setTabs((previous) => previous.map((tab) => tab.id === tabId && tab.file ? { ...tab, file: { ...tab.file, diskState, ...(diskState === 'missing' ? { externalContent: undefined } : {}) } } : tab));
-        setNotice(res.error === 'FILE_MISSING' ? '파일이 디스크에서 삭제됐어. 저장하지 않았어.' : `저장 실패: ${res.error}`);
+        setNotice(res.error === 'FILE_MISSING' ? av.fileDeletedOnDisk : formatStr(av.saveFailed, { error: res.error }));
         return false;
       }
       setTabs((prev) =>
@@ -2011,8 +2040,13 @@ export default function App() {
     setSavingAllFiles(true);
     try {
       const { saved, failed } = await saveFilesSequentially(dirtyFiles, (tab) => saveFile(tab.id));
-      if (failed.length) setNotice(`${saved.length}개 저장, ${failed.length}개 저장하지 못했어: ${failed.slice(0, 4).map((tab) => tab.title).join(', ')}${failed.length > 4 ? ` 외 ${failed.length - 4}개` : ''}. 실패한 파일의 변경은 편집기에 남아 있어.`);
-      else setNotice(`${saved.length}개 파일을 모두 저장했어.`);
+      if (failed.length) setNotice(formatStr(av.saveAllPartial, {
+        saved: saved.length,
+        failed: failed.length,
+        names: failed.slice(0, 4).map((tab) => tab.title).join(', '),
+        more: failed.length > 4 ? formatStr(av.saveAllMore, { n: failed.length - 4 }) : '',
+      }));
+      else setNotice(formatStr(av.saveAllOk, { n: saved.length }));
     } finally {
       savingAllFilesRef.current = false;
       setSavingAllFiles(false);
@@ -2024,19 +2058,19 @@ export default function App() {
     const target = tabs.find((t) => t.id === tabId && t.kind === 'file' && t.file);
     if (!target?.file || !hasBridge()) return;
     const file = target.file;
-    if (file.dirty && await requestConfirm({ title: '디스크에서 다시 불러오기', message: `${file.name}의 저장하지 않은 변경 사항을 버리고 디스크의 최신 내용으로 바꿀까?`, confirmLabel: '변경 사항 버리고 불러오기', destructive: true }) !== 'confirm') return;
+    if (file.dirty && await requestConfirm({ title: av.reloadTitle, message: formatStr(av.reloadMsg, { name: file.name }), confirmLabel: av.reloadBtn, destructive: true }) !== 'confirm') return;
     try {
       const result = await api().readFile(file.path);
       if (!result.ok || result.content === undefined) {
-        setNotice(result.error === 'TOO_LARGE' ? '파일이 너무 커서 다시 불러올 수 없어.' : `다시 불러오기 실패: ${result.error || '알 수 없는 오류'}`);
+        setNotice(result.error === 'TOO_LARGE' ? av.reloadTooLarge : formatStr(av.reloadFailed, { error: result.error || common.unknownError }));
         return;
       }
       setTabs((prev) => prev.map((tab) => tab.id === tabId && tab.file
         ? { ...tab, file: { ...tab.file, original: result.content!, content: result.content!, dirty: false, showDiff: false, diskState: undefined, externalContent: undefined } }
         : tab));
-      setNotice('디스크에서 최신 내용을 불러왔어.');
+      setNotice(av.reloadedOk);
     } catch (error) {
-      setNotice(`다시 불러오기 실패: ${error instanceof Error ? error.message : String(error)}`);
+      setNotice(formatStr(av.reloadFailed, { error: error instanceof Error ? error.message : String(error) }));
     }
   };
 
@@ -2044,16 +2078,16 @@ export default function App() {
     if (!hasBridge()) return;
     try {
       const result = await api().openFileDefault(filePath);
-      setNotice(result.ok ? `${basename(filePath)}을(를) 기본 앱에서 열었어.` : `기본 앱으로 열지 못했어: ${result.error || '알 수 없는 오류'}`);
+      setNotice(result.ok ? formatStr(av.openedExternal, { name: basename(filePath) }) : formatStr(av.openExternalFailed, { error: result.error || common.unknownError }));
     } catch (error) {
-      setNotice(`기본 앱으로 열지 못했어: ${error instanceof Error ? error.message : String(error)}`);
+      setNotice(formatStr(av.openExternalFailed, { error: error instanceof Error ? error.message : String(error) }));
     }
   };
 
   const closeTab = async (tabId: string) => {
     const target = tabs.find((tab) => tab.id === tabId);
     if (target?.kind === 'file' && target.file?.dirty && !target.file.readOnly) {
-      const choice = await requestConfirm({ title: '저장하지 않은 변경', message: `${target.title}에 저장하지 않은 변경이 있어.`, confirmLabel: '저장하지 않고 닫기', alternateLabel: '저장 후 닫기', destructive: true });
+      const choice = await requestConfirm({ title: av.unsavedTitle, message: formatStr(av.unsavedMsgOne, { title: target.title }), confirmLabel: av.unsavedDiscardOne, alternateLabel: av.unsavedSaveClose, destructive: true });
       if (choice === 'cancel') return;
       if (choice === 'alternate' && !await saveFile(tabId)) return;
     }
@@ -2083,8 +2117,8 @@ export default function App() {
     const dirty = closing.filter((tab) => tab.kind === 'file' && tab.file?.dirty && !tab.file.readOnly);
     if (dirty.length) {
       const names = dirty.slice(0, 4).map((tab) => `• ${tab.title}`).join('\n');
-      const rest = dirty.length > 4 ? `\n외 ${dirty.length - 4}개` : '';
-      const choice = await requestConfirm({ title: '저장하지 않은 변경', message: `저장하지 않은 변경이 있는 탭 ${dirty.length}개가 있어.\n\n${names}${rest}`, confirmLabel: `${dirty.length}개 탭 저장하지 않고 닫기`, alternateLabel: '저장 후 모두 닫기', destructive: true });
+      const rest = dirty.length > 4 ? formatStr(av.listMore, { n: dirty.length - 4 }) : '';
+      const choice = await requestConfirm({ title: av.unsavedTitle, message: formatStr(av.unsavedMsgMany, { n: dirty.length, names, rest }), confirmLabel: formatStr(av.unsavedDiscardMany, { n: dirty.length }), alternateLabel: av.unsavedSaveCloseAll, destructive: true });
       if (choice === 'cancel') return;
       if (choice === 'alternate') {
         for (const tab of dirty) {
@@ -2150,7 +2184,7 @@ export default function App() {
     const tab: PaneTab = {
       id: uid('tab'),
       kind,
-      title: kind === 'browser' ? '새 탭' : kind === 'terminal' ? (cwd ? `터미널 · ${basename(cwd)}` : '터미널') : '파일',
+      title: kind === 'browser' ? av.newBrowserTab : kind === 'terminal' ? (cwd ? formatStr(av.termIn, { name: basename(cwd) }) : av.termTab) : av.filesTab,
       ...(kind === 'terminal' ? { shell: 'powershell' as const, cwd: cwd || folder || undefined } : {}),
       ...(kind === 'browser' && url ? { url } : {}),
     };
@@ -2180,7 +2214,7 @@ export default function App() {
 
   const pickFileTab = async () => {
     if (!hasBridge()) {
-      setNotice('Electron 앱에서 실행해야 파일을 열 수 있습니다.');
+      setNotice(av.openFileNeedApp);
       return;
     }
     try {
@@ -2204,7 +2238,7 @@ export default function App() {
     const active = latestTabsRef.current.find((t) => t.id === latestActiveTabRef.current);
     if (active?.kind === 'browser') {
       setEditorVisible(true);
-      if (hasBridge()) void api().browserNavigate(active.id, url).catch(() => setNotice('북마크를 열 수 없어.'));
+      if (hasBridge()) void api().browserNavigate(active.id, url).catch(() => setNotice(av.bookmarkOpenFailed));
     } else {
       newPaneTab('browser', undefined, url);
     }
@@ -2212,14 +2246,14 @@ export default function App() {
 
   const toggleBookmark = (tabId: string, url: string) => {
     if (!normalizeBookmarkUrl(url)) {
-      setNotice('북마크할 수 없는 주소야.');
+      setNotice(av.bookmarkBadUrl);
       return;
     }
     const live = latestTabsRef.current.find((t) => t.id === tabId);
     const title = live?.kind === 'browser' ? live.title : '';
     const was = isBrowserBookmarked(bookmarksRef.current, url);
     setBookmarks((prev) => toggleBrowserBookmark(prev, url, title));
-    setNotice(was ? '북마크를 해제했어.' : '북마크에 저장했어.');
+    setNotice(was ? av.bookmarkRemoved : av.bookmarkSaved);
   };
 
   const termShell = (tabId: string, shell: 'powershell' | 'cmd') =>
@@ -2227,7 +2261,7 @@ export default function App() {
 
   const openGitDiff = async (file: string, cwd: string) => {
     if (!hasBridge() || !cwd) {
-      setNotice('git diff를 열 수 없습니다.');
+      setNotice(av.gitDiffFailed);
       return;
     }
     const abs = `${cwd}${cwd.endsWith('\\') || cwd.endsWith('/') ? '' : '\\'}${file.replace(/\//g, '\\')}`;
@@ -2235,7 +2269,7 @@ export default function App() {
       const head = await api().gitShow(cwd, file);
       const disk = await api().readFile(abs);
       if (!disk.ok) {
-        setNotice(`파일 읽기 실패: ${disk.error}`);
+        setNotice(formatStr(av.readFileFailed, { error: disk.error }));
         return;
       }
       const key = `git:${cwd}:${file}`;
@@ -2268,7 +2302,7 @@ export default function App() {
     const target = tabs.find((t) => t.id === activeTabId && t.kind === 'file' && t.file && !t.file.readOnly)
       || tabs.find((t) => t.kind === 'file' && t.file && !t.file.readOnly);
     if (!target) {
-      setNotice('먼저 파일을 여세요. 삽입할 에디터가 없습니다.');
+      setNotice(av.noEditorForInsert);
       return;
     }
     const request = { path: target.file!.path, code, attempts: 0, wasActive: false };
@@ -2323,9 +2357,9 @@ export default function App() {
 
   const duplicateSessionById = (id: string) => {
     const source = sessionsRef.current.find((s) => s.id === id);
-    const copy = source ? duplicateSession(source) : null;
+    const copy = source ? duplicateSession(source, { lang }) : null;
     if (!copy) {
-      setNotice('세션을 복제할 수 없어.');
+      setNotice(av.dupFailed);
       return;
     }
     setSessions((prev) => {
@@ -2334,7 +2368,7 @@ export default function App() {
       next.splice(at < 0 ? next.length : at + 1, 0, copy);
       return next;
     });
-    setNotice(`세션을 복제했어: ${copy.title}`);
+    setNotice(formatStr(av.dupOk, { title: copy.title }));
     scheduleAfterPaint(() => gotoThreadRef.current(copy.id));
   };
   useEffect(() => {
@@ -2345,7 +2379,7 @@ export default function App() {
   const switchRecentSession = (direction: 1 | -1) => {
     const availableIds = recentSessionIdsRef.current.filter((id) => sessions.some((session) => session.id === id && !session.archived));
     if (availableIds.length < 2) {
-      setNotice('전환할 다른 최근 세션이 없어.');
+      setNotice(av.noOtherRecent);
       return;
     }
     const currentIndex = availableIds.indexOf(activeId);
@@ -2410,7 +2444,7 @@ export default function App() {
     const modified = tab.kind === 'file' && tab.file?.dirty && !tab.file.readOnly;
     return {
       id: `switch-tab-${tab.id}`,
-      title: `${tab.id === activeTabId ? '현재 탭 · ' : ''}${tab.title}${modified ? ' · 수정됨' : ''} 탭으로 이동`,
+      title: formatStr(av.palGotoTab, { prefix: tab.id === activeTabId ? av.palCurrentPrefix : '', title: tab.title, modified: modified ? av.palModified : '' }),
       hint: [shortcut, location].filter(Boolean).join(' · ') || undefined,
       keywords: ['switch tab', 'open tab', tab.kind, tab.title, ...(tab.file ? [tab.file.name, tab.file.path] : []), tab.cwd || '', tab.url || '', ...(modified ? ['수정됨', 'dirty'] : [])],
       run: () => {
@@ -2431,28 +2465,28 @@ export default function App() {
     return [
       {
         id: `open-project-${projectKey}`,
-        title: `작업 폴더로 전환 · ${name}`,
+        title: formatStr(av.palSwitchProject, { name }),
         hint: project,
         keywords: ['open project', 'switch workspace', '프로젝트 전환', '작업 폴더', project],
         run: () => { switchProjectFolder(project); setPaletteOpen(false); },
       },
       {
         id: `new-project-session-${projectKey}`,
-        title: `새 세션 시작 · ${name}`,
+        title: formatStr(av.palNewSession, { name }),
         hint: project,
         keywords: ['new session in project', 'new thread in folder', '프로젝트 새 세션', project],
         run: () => { newChatInFolder(project); setPaletteOpen(false); },
       },
       {
         id: `open-project-terminal-${projectKey}`,
-        title: `터미널 열기 · ${name}`,
+        title: formatStr(av.palProjectTerm, { name }),
         hint: project,
         keywords: ['open terminal in project', 'terminal here', '프로젝트 터미널', project],
         run: () => { openTerminalAt(project); setPaletteOpen(false); },
       },
       {
         id: `toggle-pin-project-${projectKey}`,
-        title: `${isPinned ? '프로젝트 고정 해제' : '프로젝트 고정'} · ${name}`,
+        title: formatStr(isPinned ? av.palUnpinProject : av.palPinProject, { name }),
         hint: project,
         keywords: ['pin project', 'unpin project', 'favorite workspace', '프로젝트 고정', '프로젝트 즐겨찾기', project],
         run: () => {
@@ -2471,29 +2505,29 @@ export default function App() {
     return [
       {
         id: `toggle-pin-session-${session.id}`,
-        title: `${session.pinned ? '고정 해제' : '세션 고정'} · ${session.title}`,
+        title: formatStr(session.pinned ? av.palUnpinSession : av.palPinSession, { title: session.title }),
         hint: location.trim(),
         keywords: ['pin session', 'unpin session', '고정', '즐겨찾기', session.title, session.cwd || ''],
         run: run(() => toggleSessionPinned(session.id)),
       },
       {
         id: `toggle-archive-session-${session.id}`,
-        title: `${session.archived ? '보관 해제' : '세션 보관'} · ${session.title}`,
+        title: formatStr(session.archived ? av.palUnarchive : av.palArchive, { title: session.title }),
         hint: location.trim(),
         keywords: ['archive session', 'unarchive session', '보관', '보관 해제', session.title, session.cwd || ''],
         run: run(() => toggleSessionArchived(session.id)),
       },
       {
         id: `copy-transcript-session-${session.id}`,
-        title: `대화 내용 복사 · ${session.title}`,
-        hint: session.messages.length ? `${session.messages.length}개 메시지` : '대화 없음',
+        title: formatStr(av.palCopyTranscript, { title: session.title }),
+        hint: session.messages.length ? formatStr(av.palMsgCount, { n: session.messages.length }) : av.palNoMessages,
         keywords: ['copy transcript', 'export conversation', '대화 복사', '대화 내보내기', session.title, session.cwd || ''],
         run: run(() => { void copySessionTranscript(session); }),
       },
       {
         id: `duplicate-session-${session.id}`,
-        title: `세션 복제 · ${session.title}`,
-        hint: session.messages.length ? `${session.messages.length}개 메시지` : '대화 없음',
+        title: formatStr(av.palDupSession, { title: session.title }),
+        hint: session.messages.length ? formatStr(av.palMsgCount, { n: session.messages.length }) : av.palNoMessages,
         // NOTE: no '스레드 복제' keyword — it startsWith-matches the '스레드'
         // token and would outrank the '새 스레드' new-thread action.
         keywords: ['duplicate session', 'clone session', 'copy session', '세션 복제', '복제', '사본', session.title, session.cwd || ''],
@@ -2504,7 +2538,7 @@ export default function App() {
   const closedPaneTabName = (tab: ClosedPaneTab) => tab.kind === 'file'
     ? tab.path.split(/[\\/]/).pop() || tab.path
     : tab.title;
-  const closedPaneTabKind = (tab: ClosedPaneTab) => tab.kind === 'file' ? '파일' : tab.kind === 'files' ? '탐색기' : tab.kind === 'terminal' ? '터미널' : '브라우저';
+  const closedPaneTabKind = (tab: ClosedPaneTab) => tab.kind === 'file' ? av.palKindFile : tab.kind === 'files' ? av.palKindFiles : tab.kind === 'terminal' ? av.palKindTerm : av.palKindBrowser;
   const latestClosedPaneTab = closedPaneTabsRef.current[closedPaneTabsRef.current.length - 1];
   const recentlyClosedTabActions: PaletteAction[] = closedPaneTabsRef.current
     .slice(0, -1)
@@ -2512,7 +2546,7 @@ export default function App() {
     .reverse()
     .map((tab, order) => ({
       id: `reopen-recent-tab-${tab.kind}-${order}-${encodeURIComponent(closedPaneTabName(tab))}`,
-      title: `최근 닫은 탭 다시 열기 · ${closedPaneTabName(tab)}`,
+      title: formatStr(av.palReopenRecent, { name: closedPaneTabName(tab) }),
       hint: tab.kind === 'file' ? tab.path : closedPaneTabKind(tab),
       keywords: ['reopen closed tab', 'recently closed tab', 'restore tab', '닫은 탭 복구', '최근 닫은 탭', closedPaneTabName(tab), tab.kind === 'file' ? tab.path : ''],
       run: () => { setPaletteOpen(false); void reopenClosedTab(tab); },
@@ -2560,83 +2594,83 @@ export default function App() {
   const pendingScheduledCount = scheduled.filter((item) => item.status === 'pending').length;
   const bookmarkActions: PaletteAction[] = bookmarks.map((mark) => ({
     id: `open-bookmark-${encodeURIComponent(mark.url)}`,
-    title: `북마크 열기 · ${mark.title}`,
+    title: formatStr(av.palOpenBookmark, { title: mark.title }),
     hint: bookmarkHost(mark.url),
     keywords: ['bookmark', 'open bookmark', '북마크', '즐겨찾기', mark.title, mark.url],
     run: () => { openBookmark(mark.url); setPaletteOpen(false); },
   }));
   const paletteActions: PaletteAction[] = [
-    { id: 'new', title: '새 스레드', hint: 'Ctrl+N', keywords: ['new chat', 'new thread'], run: () => { newChat(); setView('thread'); setPaletteOpen(false); } },
-    { id: 'scheduled-prompts', title: '예약된 프롬프트 관리', hint: pendingScheduledCount > 0 ? `${pendingScheduledCount}개 예약` : 'Ctrl+Alt+R', keywords: ['scheduled prompt', 'reservation', 'timer', 'schedule', '예약', '스케줄', '타이머'], run: () => { setScheduleListOpen(true); setPaletteOpen(false); } },
-    { id: 'tune-model', title: '모델·권한·추론 설정', keywords: ['tune model', 'model settings', 'reasoning', 'approval', '모델 변경', '추론', '권한'], run: () => { setView('thread'); setTuneSignal((signal) => signal + 1); setPaletteOpen(false); } },
-    { id: 'export-active-transcript', title: '현재 대화 내보내기', keywords: ['export transcript', 'export conversation', 'markdown', '대화 내보내기', '내보내기'], run: () => { setPaletteOpen(false); void exportSessionTranscripts([activeId]); } },
-    { id: 'focus-composer', title: '메시지 입력창으로 이동', keywords: ['focus composer', 'focus prompt', 'chat input', '메시지 입력', '프롬프트 입력'], run: () => {
+    { id: 'new', title: common.newThread, hint: 'Ctrl+N', keywords: ['new chat', 'new thread'], run: () => { newChat(); setView('thread'); setPaletteOpen(false); } },
+    { id: 'scheduled-prompts', title: STRINGS[lang].shortcuts.nl06, hint: pendingScheduledCount > 0 ? formatStr(av.palSchedCount, { n: pendingScheduledCount }) : 'Ctrl+Alt+R', keywords: ['scheduled prompt', 'reservation', 'timer', 'schedule', '예약', '스케줄', '타이머'], run: () => { setScheduleListOpen(true); setPaletteOpen(false); } },
+    { id: 'tune-model', title: av.palTune, keywords: ['tune model', 'model settings', 'reasoning', 'approval', '모델 변경', '추론', '권한'], run: () => { setView('thread'); setTuneSignal((signal) => signal + 1); setPaletteOpen(false); } },
+    { id: 'export-active-transcript', title: av.palExportActive, keywords: ['export transcript', 'export conversation', 'markdown', '대화 내보내기', '내보내기'], run: () => { setPaletteOpen(false); void exportSessionTranscripts([activeId]); } },
+    { id: 'focus-composer', title: av.palFocusComposer, keywords: ['focus composer', 'focus prompt', 'chat input', '메시지 입력', '프롬프트 입력'], run: () => {
       setView('thread');
       setPaletteOpen(false);
       scheduleAfterPaint(() => document.querySelector<HTMLTextAreaElement>('.composer-input')?.focus());
     } },
-    { id: 'reset-panel-sizes', title: '패널 너비 기본값 복원', keywords: ['reset panel sizes', 'default panel width', 'reset layout', '패널 크기 초기화', '패널 너비 복원'], run: () => { setSideW(284); setChatRatio(0.45); setPaletteOpen(false); } },
-    { id: 'search-sessions', title: '세션 검색…', hint: 'Ctrl+Alt+S', keywords: ['search sessions', 'find thread', '대화 검색', '스레드 검색'], run: () => { setSidebarVisible(true); setSessionSearchFocusRequest((request) => request + 1); setView('thread'); setPaletteOpen(false); } },
+    { id: 'reset-panel-sizes', title: av.palResetPanels, keywords: ['reset panel sizes', 'default panel width', 'reset layout', '패널 크기 초기화', '패널 너비 복원'], run: () => { setSideW(284); setChatRatio(0.45); setPaletteOpen(false); } },
+    { id: 'search-sessions', title: av.palSearchSessions, hint: 'Ctrl+Alt+S', keywords: ['search sessions', 'find thread', '대화 검색', '스레드 검색'], run: () => { setSidebarVisible(true); setSessionSearchFocusRequest((request) => request + 1); setView('thread'); setPaletteOpen(false); } },
     ...(sessions.filter((session) => !session.archived).length > 1 ? [
-      { id: 'previous-session', title: '이전 사용 대화 세션으로 이동', keywords: ['previous session', 'recent chat', '이전 스레드', '최근 대화'], run: () => { switchRecentSession(-1); setPaletteOpen(false); } },
-      { id: 'next-session', title: '다음 사용 대화 세션으로 이동', keywords: ['next session', 'recent chat', '다음 스레드', '최근 대화'], run: () => { switchRecentSession(1); setPaletteOpen(false); } },
+      { id: 'previous-session', title: av.palPrevSession, keywords: ['previous session', 'recent chat', '이전 스레드', '최근 대화'], run: () => { switchRecentSession(-1); setPaletteOpen(false); } },
+      { id: 'next-session', title: av.palNextSession, keywords: ['next session', 'recent chat', '다음 스레드', '최근 대화'], run: () => { switchRecentSession(1); setPaletteOpen(false); } },
     ] : []),
     ...sessionActions,
     ...projectActions,
     ...(closableUnpinnedTabIds.length ? [{
       id: 'close-unpinned-tabs',
-      title: '고정하지 않은 탭 닫기',
-      hint: `${closableUnpinnedTabIds.length}개 탭`,
+      title: av.palCloseUnpinned,
+      hint: formatStr(av.palTabsCount, { n: closableUnpinnedTabIds.length }),
       keywords: ['close unpinned tabs', 'close tabs', '고정하지 않은 탭 닫기', '탭 정리'],
       run: () => { setPaletteOpen(false); void closeTabs(closableUnpinnedTabIds); },
     }] : []),
-    { id: 'quick-open', title: '파일 빠르게 열기…', hint: 'Ctrl+P', keywords: ['quick open', 'recent files', '파일 검색'], run: () => { setQuickOpen(true); setPaletteOpen(false); } },
+    { id: 'quick-open', title: av.palQuickOpen, hint: 'Ctrl+P', keywords: ['quick open', 'recent files', '파일 검색'], run: () => { setQuickOpen(true); setPaletteOpen(false); } },
     ...bookmarkActions,
     ...recentlyClosedTabActions,
-    { id: 'keyboard-shortcuts', title: '키보드 단축키 보기', hint: 'Ctrl+Shift+/', keywords: ['keyboard shortcuts', 'shortcut reference', '단축키 도움말'], run: () => { setShortcutsOpen(true); setPaletteOpen(false); } },
+    { id: 'keyboard-shortcuts', title: av.palShortcuts, hint: 'Ctrl+Shift+/', keywords: ['keyboard shortcuts', 'shortcut reference', '단축키 도움말'], run: () => { setShortcutsOpen(true); setPaletteOpen(false); } },
     {
       id: 'reopen-closed-file',
-      title: latestClosedPaneTab ? `닫은 탭 다시 열기 · ${closedPaneTabName(latestClosedPaneTab)}` : '닫은 탭 다시 열기',
+      title: latestClosedPaneTab ? formatStr(av.palReopenClosed, { name: closedPaneTabName(latestClosedPaneTab) }) : av.palReopenClosedBare,
       hint: `Ctrl+Shift+T${latestClosedPaneTab ? ` · ${closedPaneTabKind(latestClosedPaneTab)}` : ''}`,
       keywords: ['reopen closed tab', 'undo close tab', '탭 복구', '최근 닫은 탭', latestClosedPaneTab ? closedPaneTabName(latestClosedPaneTab) : '', latestClosedPaneTab?.kind === 'file' ? latestClosedPaneTab.path : ''],
       run: () => { setPaletteOpen(false); reopenClosedFileRef.current(); },
     },
-    { id: 'files', title: '파일 탐색기 열기', hint: 'Ctrl+Shift+E', keywords: ['explorer', 'file tree', '파일 목록'], run: () => { openFilesViewer(); setPaletteOpen(false); } },
-    { id: 'find-in-files', title: '파일 내용 검색', hint: 'Ctrl+Shift+F', keywords: ['find in files', 'search in files', '코드 검색'], run: () => { openWorkspaceSearch(); setPaletteOpen(false); } },
-    ...(activeEditableFileTab ? [{ id: 'go-to-line', title: '현재 파일에서 줄로 이동', hint: 'Ctrl+G', keywords: ['go to line', 'navigate line', '줄 이동', '라인 이동'], run: () => { setGoToLineRequest((request) => request + 1); setPaletteOpen(false); setEditorVisible(true); } }] : []),
-    ...(editorNavigation.index > 0 ? [{ id: 'editor-location-back', title: '이전 코드 위치로 이동', hint: 'Alt+←', keywords: ['back', 'previous location', 'navigation history', '이전 코드 위치', '뒤로 이동'], run: () => { setPaletteOpen(false); navigateEditorLocation(-1); } }] : []),
-    ...(editorNavigation.index >= 0 && editorNavigation.index < editorNavigation.entries.length - 1 ? [{ id: 'editor-location-forward', title: '다음 코드 위치로 이동', hint: 'Alt+→', keywords: ['forward', 'next location', 'navigation history', '다음 코드 위치', '앞으로 이동'], run: () => { setPaletteOpen(false); navigateEditorLocation(1); } }] : []),
-    ...(activeEditableFileTab ? [{ id: 'go-to-symbol', title: '현재 파일에서 기호로 이동', hint: 'Ctrl+Shift+O', keywords: ['go to symbol', 'outline', 'symbol navigation', '기호 찾기', '함수로 이동', '클래스로 이동'], run: () => { setPaletteOpen(false); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.openSymbolPicker()); } }] : []),
+    { id: 'files', title: av.palExplorer, hint: 'Ctrl+Shift+E', keywords: ['explorer', 'file tree', '파일 목록'], run: () => { openFilesViewer(); setPaletteOpen(false); } },
+    { id: 'find-in-files', title: av.palFindInFiles, hint: 'Ctrl+Shift+F', keywords: ['find in files', 'search in files', '코드 검색'], run: () => { openWorkspaceSearch(); setPaletteOpen(false); } },
+    ...(activeEditableFileTab ? [{ id: 'go-to-line', title: av.palGotoLine, hint: 'Ctrl+G', keywords: ['go to line', 'navigate line', '줄 이동', '라인 이동'], run: () => { setGoToLineRequest((request) => request + 1); setPaletteOpen(false); setEditorVisible(true); } }] : []),
+    ...(editorNavigation.index > 0 ? [{ id: 'editor-location-back', title: av.palLocBack, hint: 'Alt+←', keywords: ['back', 'previous location', 'navigation history', '이전 코드 위치', '뒤로 이동'], run: () => { setPaletteOpen(false); navigateEditorLocation(-1); } }] : []),
+    ...(editorNavigation.index >= 0 && editorNavigation.index < editorNavigation.entries.length - 1 ? [{ id: 'editor-location-forward', title: av.palLocFwd, hint: 'Alt+→', keywords: ['forward', 'next location', 'navigation history', '다음 코드 위치', '앞으로 이동'], run: () => { setPaletteOpen(false); navigateEditorLocation(1); } }] : []),
+    ...(activeEditableFileTab ? [{ id: 'go-to-symbol', title: av.palGotoSymbol, hint: 'Ctrl+Shift+O', keywords: ['go to symbol', 'outline', 'symbol navigation', '기호 찾기', '함수로 이동', '클래스로 이동'], run: () => { setPaletteOpen(false); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.openSymbolPicker()); } }] : []),
     ...(activeEditableFileTab ? [
-      { id: 'go-to-definition', title: '정의로 이동', hint: 'F12', keywords: ['go to definition', 'navigate to definition', '정의로 이동', '선언으로 이동'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.revealDefinition')); } },
-      { id: 'peek-definition', title: '정의 미리보기', hint: 'Alt+F12', keywords: ['peek definition', 'inline definition', '정의 미리보기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.peekDefinition')); } },
-      { id: 'find-references', title: '참조 찾기', hint: 'Shift+F12', keywords: ['find references', 'go to references', '참조 찾기', '사용 위치 찾기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.goToReferences')); } },
-      { id: 'go-to-type-definition', title: '형식 정의로 이동', hint: 'Ctrl+F12', keywords: ['go to type definition', 'type definition', '형식 정의로 이동'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.goToTypeDefinition')); } },
-      { id: 'format-document', title: '현재 파일 서식 정리', hint: 'Shift+Alt+F', keywords: ['format document', 'format code', '코드 정렬', '서식 정리'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.formatDocument')); } },
-      { id: 'format-selection', title: '선택 영역 서식 정리', hint: 'Ctrl+K Ctrl+F', keywords: ['format selection', 'format selected code', '선택 코드 정렬'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.formatSelection')); } },
-      { id: 'fold-all', title: '현재 파일 코드 모두 접기', hint: 'Ctrl+K Ctrl+0', keywords: ['fold all', 'collapse all', '코드 접기', '모두 접기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.foldAll')); } },
-      { id: 'unfold-all', title: '현재 파일 코드 모두 펼치기', hint: 'Ctrl+K Ctrl+J', keywords: ['unfold all', 'expand all', '코드 펼치기', '모두 펼치기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.unfoldAll')); } },
+      { id: 'go-to-definition', title: av.palGotoDef, hint: 'F12', keywords: ['go to definition', 'navigate to definition', '정의로 이동', '선언으로 이동'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.revealDefinition')); } },
+      { id: 'peek-definition', title: av.palPeekDef, hint: 'Alt+F12', keywords: ['peek definition', 'inline definition', '정의 미리보기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.peekDefinition')); } },
+      { id: 'find-references', title: av.palFindRefs, hint: 'Shift+F12', keywords: ['find references', 'go to references', '참조 찾기', '사용 위치 찾기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.goToReferences')); } },
+      { id: 'go-to-type-definition', title: av.palGotoTypeDef, hint: 'Ctrl+F12', keywords: ['go to type definition', 'type definition', '형식 정의로 이동'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.goToTypeDefinition')); } },
+      { id: 'format-document', title: av.palFormatDoc, hint: 'Shift+Alt+F', keywords: ['format document', 'format code', '코드 정렬', '서식 정리'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.formatDocument')); } },
+      { id: 'format-selection', title: av.palFormatSel, hint: 'Ctrl+K Ctrl+F', keywords: ['format selection', 'format selected code', '선택 코드 정렬'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.action.formatSelection')); } },
+      { id: 'fold-all', title: av.palFoldAll, hint: 'Ctrl+K Ctrl+0', keywords: ['fold all', 'collapse all', '코드 접기', '모두 접기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.foldAll')); } },
+      { id: 'unfold-all', title: av.palUnfoldAll, hint: 'Ctrl+K Ctrl+J', keywords: ['unfold all', 'expand all', '코드 펼치기', '모두 펼치기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.unfoldAll')); } },
     ] : []),
-    ...(activeEditableFileTab ? [{ id: 'toggle-word-wrap', title: `현재 파일 줄바꿈 ${wordWrap ? '끄기' : '켜기'}`, hint: 'Alt+Z', keywords: ['word wrap', 'toggle wrap', '줄바꿈', '긴 줄'], run: () => { setWordWrap((enabled) => !enabled); setPaletteOpen(false); setEditorVisible(true); } }] : []),
-    ...(activeEditableFileTab ? [{ id: 'editor-font-increase', title: '편집기 글자 크게', hint: 'Ctrl+=', keywords: ['font size', 'zoom in', '글자 크기 키우기'], run: () => { setEditorFontSize((size) => clamp(size + 1, 10, 24)); setPaletteOpen(false); } }] : []),
-    ...(activeEditableFileTab ? [{ id: 'editor-font-decrease', title: '편집기 글자 작게', hint: 'Ctrl+-', keywords: ['font size', 'zoom out', '글자 크기 줄이기'], run: () => { setEditorFontSize((size) => clamp(size - 1, 10, 24)); setPaletteOpen(false); } }] : []),
-    ...(activeEditableFileTab && editorFontSize !== 13 ? [{ id: 'editor-font-reset', title: '편집기 글자 크기 초기화', hint: 'Ctrl+0', keywords: ['font size', 'reset zoom', '글자 크기 초기화'], run: () => { setEditorFontSize(13); setPaletteOpen(false); } }] : []),
+    ...(activeEditableFileTab ? [{ id: 'toggle-word-wrap', title: wordWrap ? av.palWrapOff : av.palWrapOn, hint: 'Alt+Z', keywords: ['word wrap', 'toggle wrap', '줄바꿈', '긴 줄'], run: () => { setWordWrap((enabled) => !enabled); setPaletteOpen(false); setEditorVisible(true); } }] : []),
+    ...(activeEditableFileTab ? [{ id: 'editor-font-increase', title: av.palFontBigger, hint: 'Ctrl+=', keywords: ['font size', 'zoom in', '글자 크기 키우기'], run: () => { setEditorFontSize((size) => clamp(size + 1, 10, 24)); setPaletteOpen(false); } }] : []),
+    ...(activeEditableFileTab ? [{ id: 'editor-font-decrease', title: av.palFontSmaller, hint: 'Ctrl+-', keywords: ['font size', 'zoom out', '글자 크기 줄이기'], run: () => { setEditorFontSize((size) => clamp(size - 1, 10, 24)); setPaletteOpen(false); } }] : []),
+    ...(activeEditableFileTab && editorFontSize !== 13 ? [{ id: 'editor-font-reset', title: av.palFontReset, hint: 'Ctrl+0', keywords: ['font size', 'reset zoom', '글자 크기 초기화'], run: () => { setEditorFontSize(13); setPaletteOpen(false); } }] : []),
     ...tabSelectionActions,
-    ...(activeEditableFileTab ? [{ id: 'save-current-file', title: '현재 파일 저장', hint: 'Ctrl+S', keywords: ['save file', 'save current file', '파일 저장'], run: () => { setPaletteOpen(false); void saveFile(activeEditableFileTab.id); } }] : []),
-    { id: 'save-all-files', title: '변경 파일 모두 저장', hint: 'Ctrl+Shift+S', keywords: ['save all', 'save files', '모두 저장'], run: () => { setPaletteOpen(false); void saveAllFiles(); } },
-    ...(savedFileTabIds.length > 0 ? [{ id: 'close-saved-file-tabs', title: `저장된 파일 탭 닫기 (${savedFileTabIds.length})`, keywords: ['close saved files', 'close clean tabs', '저장된 탭 정리'], run: () => { setPaletteOpen(false); void closeTabs(savedFileTabIds); } }] : []),
-    { id: 'close-all-tabs', title: '모든 탭 닫기', hint: 'Ctrl+Shift+W', keywords: ['close all tabs', 'close editors', '탭 모두 닫기'], run: () => { setPaletteOpen(false); void closeTabs(tabs.map((tab) => tab.id)); } },
-    { id: 'next-tab', title: '다음 탭', hint: 'Ctrl+PageDown', keywords: ['next tab', 'switch tab', '다음 편집기'], run: () => { switchPaneTab(1); setPaletteOpen(false); } },
-    { id: 'previous-tab', title: '이전 탭', hint: 'Ctrl+PageUp', keywords: ['previous tab', 'switch tab', '이전 편집기'], run: () => { switchPaneTab(-1); setPaletteOpen(false); } },
-    { id: 'move-tab-left', title: '현재 탭을 왼쪽으로 이동', hint: 'Ctrl+Shift+PageUp', keywords: ['move tab left', 'reorder tab', '탭 순서'], run: () => { movePaneTab(-1); setPaletteOpen(false); } },
-    { id: 'move-tab-right', title: '현재 탭을 오른쪽으로 이동', hint: 'Ctrl+Shift+PageDown', keywords: ['move tab right', 'reorder tab', '탭 순서'], run: () => { movePaneTab(1); setPaletteOpen(false); } },
-    { id: 'folder', title: '폴더 열기', keywords: ['open folder', '프로젝트 열기'], run: () => { setPaletteOpen(false); void pickFolder(); } },
-    { id: 'editor', title: editorVisible ? '에디터 숨기기' : '에디터 보이기', hint: 'Ctrl+Alt+E', keywords: ['editor', 'toggle editor'], run: () => { setView('thread'); setEditorVisible((v) => !v); setPaletteOpen(false); } },
-    { id: 'browser', title: '브라우저 열기', keywords: ['open browser'], run: () => { openBrowser(); setPaletteOpen(false); } },
-    { id: 'terminal', title: '새 터미널 열기', hint: 'Ctrl+Shift+`', keywords: ['open terminal', 'new terminal', '터미널 열기'], run: () => { openTerminal(); setPaletteOpen(false); } },
-    { id: 'usage', title: '사용량 보기', keywords: ['usage', 'token usage'], run: () => { setView('usage'); setPaletteOpen(false); } },
-    { id: 'settings', title: '설정 열기', hint: 'Ctrl+,', keywords: ['settings', 'preferences'], run: () => { setView('settings'); setPaletteOpen(false); } },
-    { id: 'sidebar', title: sidebarVisible ? '사이드바 숨기기' : '사이드바 보이기', hint: 'Ctrl+B', keywords: ['toggle sidebar'], run: () => { setSidebarVisible((v) => !v); setPaletteOpen(false); } },
+    ...(activeEditableFileTab ? [{ id: 'save-current-file', title: av.palSaveFile, hint: 'Ctrl+S', keywords: ['save file', 'save current file', '파일 저장'], run: () => { setPaletteOpen(false); void saveFile(activeEditableFileTab.id); } }] : []),
+    { id: 'save-all-files', title: av.palSaveAll, hint: 'Ctrl+Shift+S', keywords: ['save all', 'save files', '모두 저장'], run: () => { setPaletteOpen(false); void saveAllFiles(); } },
+    ...(savedFileTabIds.length > 0 ? [{ id: 'close-saved-file-tabs', title: formatStr(av.palCloseSaved, { n: savedFileTabIds.length }), keywords: ['close saved files', 'close clean tabs', '저장된 탭 정리'], run: () => { setPaletteOpen(false); void closeTabs(savedFileTabIds); } }] : []),
+    { id: 'close-all-tabs', title: av.palCloseAll, hint: 'Ctrl+Shift+W', keywords: ['close all tabs', 'close editors', '탭 모두 닫기'], run: () => { setPaletteOpen(false); void closeTabs(tabs.map((tab) => tab.id)); } },
+    { id: 'next-tab', title: av.palNextTab, hint: 'Ctrl+PageDown', keywords: ['next tab', 'switch tab', '다음 편집기'], run: () => { switchPaneTab(1); setPaletteOpen(false); } },
+    { id: 'previous-tab', title: av.palPrevTab, hint: 'Ctrl+PageUp', keywords: ['previous tab', 'switch tab', '이전 편집기'], run: () => { switchPaneTab(-1); setPaletteOpen(false); } },
+    { id: 'move-tab-left', title: av.palMoveLeft, hint: 'Ctrl+Shift+PageUp', keywords: ['move tab left', 'reorder tab', '탭 순서'], run: () => { movePaneTab(-1); setPaletteOpen(false); } },
+    { id: 'move-tab-right', title: av.palMoveRight, hint: 'Ctrl+Shift+PageDown', keywords: ['move tab right', 'reorder tab', '탭 순서'], run: () => { movePaneTab(1); setPaletteOpen(false); } },
+    { id: 'folder', title: av.palOpenFolder, keywords: ['open folder', '프로젝트 열기'], run: () => { setPaletteOpen(false); void pickFolder(); } },
+    { id: 'editor', title: editorVisible ? av.palHideEditor : av.palShowEditor, hint: 'Ctrl+Alt+E', keywords: ['editor', 'toggle editor'], run: () => { setView('thread'); setEditorVisible((v) => !v); setPaletteOpen(false); } },
+    { id: 'browser', title: av.palOpenBrowser, keywords: ['open browser'], run: () => { openBrowser(); setPaletteOpen(false); } },
+    { id: 'terminal', title: av.palNewTerm, hint: 'Ctrl+Shift+`', keywords: ['open terminal', 'new terminal', '터미널 열기'], run: () => { openTerminal(); setPaletteOpen(false); } },
+    { id: 'usage', title: av.palUsage, keywords: ['usage', 'token usage'], run: () => { setView('usage'); setPaletteOpen(false); } },
+    { id: 'settings', title: STRINGS[lang].shortcuts.nl16, hint: 'Ctrl+,', keywords: ['settings', 'preferences'], run: () => { setView('settings'); setPaletteOpen(false); } },
+    { id: 'sidebar', title: sidebarVisible ? av.palHideSidebar : av.palShowSidebar, hint: 'Ctrl+B', keywords: ['toggle sidebar'], run: () => { setSidebarVisible((v) => !v); setPaletteOpen(false); } },
   ];
   // The native browser view paints above React UI — park it under overlays.
   const parkBrowser = shouldParkBrowserForOverlays({
@@ -2650,6 +2684,7 @@ export default function App() {
   });
 
   return (
+    <LangContext.Provider value={lang}>
     <div className="app">
       {sidebarVisible && (
         <>
@@ -2693,14 +2728,14 @@ export default function App() {
         />
         <div
           className="drag-v"
-          title="사이드바 너비 조절 · 두 번 클릭하면 기본값 복원"
+          title={av.dragSidebarTitle}
           role="separator"
           aria-orientation="vertical"
-          aria-label="사이드바 너비 조절"
+          aria-label={av.dragSidebarLabel}
           aria-valuemin={200}
           aria-valuemax={480}
           aria-valuenow={sideW}
-          aria-valuetext={`${sideW}픽셀`}
+          aria-valuetext={formatStr(av.dragPx, { w: sideW })}
           tabIndex={0}
           onMouseDown={(e) => {
             const s = sideW;
@@ -2721,7 +2756,7 @@ export default function App() {
       )}
       <main className="main">
         {!sidebarVisible && (
-          <button className="expand-btn" onClick={() => setSidebarVisible(true)} title="사이드바 보이기 (Ctrl+B)">
+          <button className="expand-btn" onClick={() => setSidebarVisible(true)} title={av.expandSidebarTitle}>
             <SidebarIcon size={16} />
           </button>
         )}
@@ -2793,14 +2828,14 @@ export default function App() {
           <>
           <div
             className="drag-v"
-            title="채팅/오른쪽 패널 너비 조절 · 두 번 클릭하면 기본값 복원"
+            title={av.dragChatTitle}
             role="separator"
             aria-orientation="vertical"
-            aria-label="채팅과 파일 패널 너비 조절"
+            aria-label={av.dragChatLabel}
             aria-valuemin={Math.round(getChatRatioBounds().min * 100)}
             aria-valuemax={Math.round(getChatRatioBounds().max * 100)}
             aria-valuenow={Math.round(chatRatio * 100)}
-            aria-valuetext={`채팅 영역 ${Math.round(chatRatio * 100)}퍼센트`}
+            aria-valuetext={formatStr(av.dragPct, { p: Math.round(chatRatio * 100) })}
             tabIndex={0}
             onMouseDown={(e) => {
               const s = chatRatio;
@@ -2947,21 +2982,24 @@ export default function App() {
       {scheduleDraft && (
         <SchedulePromptDialog
           draft={scheduleDraft.text.trim()}
-          sessionTitle={sessions.find((session) => session.id === scheduleDraft.sessionId)?.title || '스레드'}
+          sessionTitle={sessions.find((session) => session.id === scheduleDraft.sessionId)?.title || av.threadFallback}
           onSchedule={(fireAt, repeat) => {
             const item = createScheduledPrompt({ sessionId: scheduleDraft.sessionId, text: scheduleDraft.text, fireAt, repeat });
             if (!item) {
-              setNotice('예약할 수 없어. 시간을 다시 골라줘.');
+              setNotice(av.schedInvalid);
               return;
             }
             const next = addScheduledPrompt(scheduledRef.current, item);
             if (next.every((row) => row.id !== item.id)) {
-              setNotice('예약이 가득 찼어 (최대 20개). 먼저 정리해줘.');
+              setNotice(av.schedFull);
               return;
             }
             setScheduled(next);
             setScheduleDraft(null);
-            setNotice(`예약했어: ${formatScheduledFireTime(item.fireAt)}에 실행돼${item.repeat === 'once' ? '.' : ` (${formatRepeat(item.repeat)} 반복).`}`);
+            setNotice(formatStr(av.schedCreated, {
+              time: formatScheduledFireTime(item.fireAt, Date.now(), lang),
+              suffix: item.repeat === 'once' ? av.schedOnceSuffix : formatStr(av.schedRepeatSuffix, { repeat: formatRepeat(item.repeat, lang) }),
+            }));
           }}
           onClose={() => setScheduleDraft(null)}
         />
@@ -2969,7 +3007,7 @@ export default function App() {
       {scheduleListOpen && (
         <ScheduledPromptListDialog
           items={scheduled}
-          sessionTitleOf={(id) => sessions.find((session) => session.id === id)?.title || '삭제된 스레드'}
+          sessionTitleOf={(id) => sessions.find((session) => session.id === id)?.title || av.schedDeletedThread}
           onCancel={(id) => setScheduled((prev) => cancelScheduledPrompt(prev, id))}
           onFireNow={fireScheduledNow}
           onEdit={(id) => {
@@ -2983,7 +3021,7 @@ export default function App() {
         <SchedulePromptDialog
           mode="edit"
           draft={editingSchedule.text}
-          sessionTitle={sessions.find((session) => session.id === editingSchedule.sessionId)?.title || '스레드'}
+          sessionTitle={sessions.find((session) => session.id === editingSchedule.sessionId)?.title || av.threadFallback}
           initialFireAt={editingSchedule.fireAt}
           initialRepeat={editingSchedule.repeat}
           onSchedule={(fireAt, repeat, text) => {
@@ -2991,12 +3029,15 @@ export default function App() {
             const live = scheduledRef.current.find((row) => row.id === target.id && row.status === 'pending');
             if (!live) {
               setEditingSchedule(null);
-              setNotice('이미 실행됐거나 취소된 예약이야.');
+              setNotice(av.schedGone);
               return;
             }
             setScheduled(rescheduleScheduledPrompt(scheduledRef.current, target.id, { fireAt, repeat, text }));
             setEditingSchedule(null);
-            setNotice(`예약 바꿨어: ${formatScheduledFireTime(fireAt)}에 실행돼${repeat === 'once' ? '.' : ` (${formatRepeat(repeat)} 반복).`}`);
+            setNotice(formatStr(av.schedUpdated, {
+              time: formatScheduledFireTime(fireAt, Date.now(), lang),
+              suffix: repeat === 'once' ? av.schedOnceSuffix : formatStr(av.schedRepeatSuffix, { repeat: formatRepeat(repeat, lang) }),
+            }));
           }}
           onClose={() => setEditingSchedule(null)}
         />
@@ -3004,11 +3045,12 @@ export default function App() {
       {notice && (
         <div className="toast" role="alert">
           <span>{notice}</span>
-          <button className="icon-btn" onClick={() => setNotice('')} title="닫기">
+          <button className="icon-btn" onClick={() => setNotice('')} title={common.close}>
             <XIcon size={14} />
           </button>
         </div>
       )}
     </div>
+    </LangContext.Provider>
   );
 }

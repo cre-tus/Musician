@@ -4,4 +4,4 @@ export function formatEditorSelectionPrompt(selection: {
   endLine: number;
   language: string;
   text: string;
-}): string;
+}, uiLang?: 'ko' | 'en'): string;

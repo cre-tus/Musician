@@ -128,27 +128,27 @@ export function saveSessions(sessions: Session[]): boolean {
   }
 }
 
-export function newSession(cwd?: string): Session {
-  return { id: uid('s'), title: '새 스레드', createdAt: Date.now(), messages: [], cwd: cwd || undefined };
+export function newSession(cwd?: string, lang: 'ko' | 'en' = 'ko'): Session {
+  return { id: uid('s'), title: lang === 'en' ? 'New thread' : '새 스레드', createdAt: Date.now(), messages: [], cwd: cwd || undefined };
 }
 
-export function sessionTitle(firstPrompt: string): string {
+export function sessionTitle(firstPrompt: string, lang: 'ko' | 'en' = 'ko'): string {
   const line = String(firstPrompt || '').split('\n')[0].trim();
-  return line.length > 40 ? line.slice(0, 40) + '…' : line || '새 스레드';
+  return line.length > 40 ? line.slice(0, 40) + '…' : line || (lang === 'en' ? 'New thread' : '새 스레드');
 }
 
-export function timeAgo(ts: number, now = Date.now()): string {
+export function timeAgo(ts: number, now = Date.now(), lang: 'ko' | 'en' = 'ko'): string {
   const s = Math.max(0, Math.floor((now - ts) / 1000));
-  if (s < 60) return '방금';
+  if (s < 60) return lang === 'en' ? 'just now' : '방금';
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}분`;
+  if (m < 60) return lang === 'en' ? `${m}m` : `${m}분`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}시간`;
+  if (h < 24) return lang === 'en' ? `${h}h` : `${h}시간`;
   const d = Math.floor(h / 24);
-  if (d < 30) return `${d}일`;
+  if (d < 30) return lang === 'en' ? `${d}d` : `${d}일`;
   const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}달`;
-  return `${Math.floor(mo / 12)}년`;
+  if (mo < 12) return lang === 'en' ? `${mo}mo` : `${mo}달`;
+  return lang === 'en' ? `${Math.floor(mo / 12)}y` : `${Math.floor(mo / 12)}년`;
 }
 
 export function loadFolder(): string {

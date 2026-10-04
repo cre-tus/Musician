@@ -3,6 +3,8 @@ import { api, hasBridge } from '../lib/mudex';
 import { normalizePathForComparison } from '../lib/path-utils.mjs';
 import { normalizePinnedFilePath, readPinnedFilePaths } from '../lib/pinned-file-paths.mjs';
 import { FileTypeIcon, SearchIcon, StarIcon, XIcon } from './icons';
+import { useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 interface Result {
   path: string;
@@ -63,6 +65,7 @@ function highlightMatches(value: string, query: string) {
 }
 
 export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, onOpen, onClose }: Props) {
+  const s = useStrings();
   const [query, setQuery] = useState('');
   const { searchQuery, line, column } = parseLocationQuery(query);
   const [results, setResults] = useState<Result[]>([]);
@@ -79,19 +82,19 @@ export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, on
   );
   const getOpenFile = (filePath: string) => openFileByPath.get(normalizePathForComparison(filePath));
   const openFileLabel = (file: NonNullable<ReturnType<typeof getOpenFile>>) => file.diskState === 'unavailable'
-    ? '복원 대기'
+    ? s.quickopen.pendingRestore
     : file.diskState === 'missing'
-      ? '삭제됨'
+      ? s.quickopen.deleted
       : file.diskState === 'changed'
-        ? '외부 변경'
-        : file.dirty ? '수정됨' : file.active ? '현재' : '열림';
+        ? s.quickopen.changedOnDisk
+        : file.dirty ? s.quickopen.modified : file.active ? s.quickopen.current : s.quickopen.open;
   const resultStatus = loading
-    ? '파일을 검색하는 중'
+    ? s.quickopen.searching
     : error
       ? error
       : searchQuery.trim()
-        ? `${results.length}${truncated ? '개 이상' : '개'} 파일 검색 결과`
-        : `${results.filter((result) => pinnedPaths.has(normalizePinnedFilePath(result.path))).length}개 즐겨찾기 · ${results.length}개 파일`;
+        ? formatStr(truncated ? s.quickopen.resultsTruncated : s.quickopen.resultsExact, { n: results.length })
+        : formatStr(s.quickopen.favSummary, { fav: results.filter((result) => pinnedPaths.has(normalizePinnedFilePath(result.path))).length, total: results.length });
 
   useEffect(() => {
     setPinnedFiles(readPinnedFilePaths(cwd));
@@ -144,7 +147,7 @@ export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, on
           if (cancelled || res.error === 'CANCELLED') return;
           setResults(res.ok ? (res.files || []) : []);
           setTruncated(!!res.truncated);
-          setError(res.ok ? '' : (res.error || '파일 검색 실패'));
+          setError(res.ok ? '' : (res.error || s.quickopen.searchFailed));
           setSelected(0);
         })
         .catch((e: unknown) => {
@@ -206,15 +209,15 @@ export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, on
 
   return (
     <div className="quick-open-backdrop" onMouseDown={onClose}>
-      <section className="quick-open" role="dialog" aria-modal="true" aria-label="파일 빠르게 열기" onMouseDown={(e) => e.stopPropagation()} onKeyDown={onKeyDown}>
+      <section className="quick-open" role="dialog" aria-modal="true" aria-label={s.quickopen.dialogLabel} onMouseDown={(e) => e.stopPropagation()} onKeyDown={onKeyDown}>
         <div className="quick-open-input-wrap">
           <SearchIcon size={17} />
           <input
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="파일 이름, 경로 또는 파일:줄 검색…"
-            aria-label="파일 검색"
+            placeholder={s.quickopen.placeholder}
+            aria-label={s.quickopen.searchLabel}
             role="combobox"
             aria-autocomplete="list"
             aria-expanded={true}
@@ -224,17 +227,17 @@ export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, on
             spellCheck={false}
           />
           <kbd>ESC</kbd>
-          <button className="icon-btn" onClick={onClose} title="닫기" aria-label="닫기"><XIcon size={15} /></button>
+          <button className="icon-btn" onClick={onClose} title={s.common.close} aria-label={s.common.close}><XIcon size={15} /></button>
         </div>
-        <div id="quick-open-results" className="quick-open-results" role="listbox" aria-label="파일 검색 결과" aria-busy={loading}>
+        <div id="quick-open-results" className="quick-open-results" role="listbox" aria-label={s.quickopen.resultsLabel} aria-busy={loading}>
           {!cwd && query.trim() ? (
-            <div className="quick-open-empty">먼저 프로젝트 폴더를 선택해줘.</div>
+            <div className="quick-open-empty">{s.quickopen.noFolder}</div>
           ) : !query.trim() ? (
             results.length === 0 ? (
-              <div className="quick-open-empty">즐겨찾기나 최근 파일이 없어. 파일 이름을 입력해 찾아 열어줘.</div>
+              <div className="quick-open-empty">{s.quickopen.noFavRecent}</div>
             ) : (
               <>
-                <div className="quick-open-section">{pinnedFiles.length ? '즐겨찾기 · 최근 파일' : '최근 파일'}</div>
+                <div className="quick-open-section">{pinnedFiles.length ? s.quickopen.favRecent : s.quickopen.recentOnly}</div>
                 {results.map((result, index) => {
                   const name = result.relativePath.split('/').pop() || result.relativePath;
                   const opened = getOpenFile(result.path);
@@ -252,7 +255,7 @@ export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, on
                     >
                       <FileTypeIcon name={name} size={17} />
                       <span className="quick-open-file-name">{highlightMatches(name, searchQuery)}</span>
-                      {pinnedPaths.has(normalizePinnedFilePath(result.path)) && <span className="quick-open-favorite" title="즐겨찾기"><StarIcon size={13} /></span>}
+                      {pinnedPaths.has(normalizePinnedFilePath(result.path)) && <span className="quick-open-favorite" title={s.quickopen.favorite}><StarIcon size={13} /></span>}
                       <span className="quick-open-path">{highlightMatches(result.relativePath, searchQuery)}</span>
                       {opened && <span className={`quick-open-state${opened.diskState ? ` ${opened.diskState}` : opened.dirty ? ' dirty' : opened.active ? ' current' : ''}`}>{openFileLabel(opened)}</span>}
                       <span className="quick-open-enter">↵</span>
@@ -262,11 +265,11 @@ export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, on
               </>
             )
           ) : loading && results.length === 0 ? (
-            <div className="quick-open-empty">파일을 찾는 중…</div>
+            <div className="quick-open-empty">{s.quickopen.finding}</div>
           ) : error ? (
             <div className="quick-open-empty">{error}</div>
           ) : results.length === 0 ? (
-            <div className="quick-open-empty">일치하는 파일이 없어.</div>
+            <div className="quick-open-empty">{s.quickopen.noMatch}</div>
           ) : (
             results.map((result, index) => {
               const name = result.relativePath.split('/').pop() || result.relativePath;
@@ -285,7 +288,7 @@ export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, on
                 >
                   <FileTypeIcon name={name} size={17} />
                   <span className="quick-open-file-name">{highlightMatches(name, searchQuery)}</span>
-                  {pinnedPaths.has(normalizePinnedFilePath(result.path)) && <span className="quick-open-favorite" title="즐겨찾기"><StarIcon size={13} /></span>}
+                  {pinnedPaths.has(normalizePinnedFilePath(result.path)) && <span className="quick-open-favorite" title={s.quickopen.favorite}><StarIcon size={13} /></span>}
                   <span className="quick-open-path">{highlightMatches(result.relativePath, searchQuery)}</span>
                   {opened && <span className={`quick-open-state${opened.diskState ? ` ${opened.diskState}` : opened.dirty ? ' dirty' : opened.active ? ' current' : ''}`}>{openFileLabel(opened)}</span>}
                   <span className="quick-open-enter">↵</span>
@@ -294,12 +297,12 @@ export default function QuickOpen({ cwd, treeVersion, recentFiles, openFiles, on
             })
           )}
         </div>
-        {truncated && <div className="quick-open-foot">결과가 많아 일부만 표시했어. 경로를 더 입력해줘.</div>}
+        {truncated && <div className="quick-open-foot">{s.quickopen.truncatedFoot}</div>}
         <div className="quick-open-hint">
           <span className="quick-open-status" role="status" aria-live="polite">
-            {resultStatus}{line ? ` · ${line}행${column ? ` ${column}열` : ''}로 열기` : ''}
+            {resultStatus}{line ? formatStr(column ? s.quickopen.openAtLineCol : s.quickopen.openAtLine, { line, column }) : ''}
           </span>
-          <span>↑↓ 이동</span><span>Enter 열기</span><span>Ctrl+Enter 고정 탭으로 열기</span><span>파일:줄[:열] 위치 이동</span><span>Esc 닫기</span>
+          <span>{s.quickopen.hintMove}</span><span>{s.quickopen.hintOpen}</span><span>{s.quickopen.hintPin}</span><span>{s.quickopen.hintJump}</span><span>{s.quickopen.hintClose}</span>
         </div>
       </section>
     </div>

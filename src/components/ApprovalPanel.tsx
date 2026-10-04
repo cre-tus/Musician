@@ -1,28 +1,33 @@
 import React, { useState } from 'react';
 import type { MspApproval } from '../types';
 import { AlertIcon } from './icons';
+import { useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
-function subjectSummary(a: MspApproval['approval']): string {
-  const s = a.subject || {};
-  switch (s.kind) {
+type Strings = Record<string, Record<string, string>>;
+
+function subjectSummary(a: MspApproval['approval'], s: Strings): string {
+  const subj = a.subject || {};
+  switch (subj.kind) {
     case 'shell':
-      return s.command || a.toolName;
+      return subj.command || a.toolName;
     case 'fileAccess':
-      return `${s.access || '파일'}: ${s.path || s.target || ''}`.trim();
+      return `${subj.access || s.approval.fileAccessFallback}: ${subj.path || subj.target || ''}`.trim();
     case 'network':
-      return `${s.protocol || 'net'}: ${s.host || s.target || ''}`.trim();
+      return `${subj.protocol || 'net'}: ${subj.host || subj.target || ''}`.trim();
     default:
-      return s.target || s.path || s.command || a.toolName || s.kind || '승인 요청';
+      return subj.target || subj.path || subj.command || a.toolName || subj.kind || s.approval.requestDefault;
   }
 }
 
-function scopeLabel(scope: string): string {
-  if (scope === 'session') return '세션';
-  if (scope === 'localPersistent') return '계속';
-  return '한 번';
+function scopeLabel(scope: string, s: Strings): string {
+  if (scope === 'session') return s.approval.scopeSession;
+  if (scope === 'localPersistent') return s.approval.scopePersistent;
+  return s.approval.scopeOnce;
 }
 
 function Card({ item, onDecide }: { item: MspApproval; onDecide: (key: string, choiceId: string, feedback?: string) => void }) {
+  const s = useStrings();
   const [feedback, setFeedback] = useState('');
   const [busy, setBusy] = useState(false);
   const showFeedback = item.approval.choices.some((c) => c.acceptsFeedback);
@@ -36,13 +41,13 @@ function Card({ item, onDecide }: { item: MspApproval; onDecide: (key: string, c
       <div className="approval-head">
         <AlertIcon size={15} />
         <div>
-          <b>{item.approval.toolName || '도구'} 승인 요청</b>
-          <div className="approval-sub">{subjectSummary(item.approval)}</div>
+          <b>{formatStr(s.approval.approvalRequest, { tool: item.approval.toolName || s.approval.tool })}</b>
+          <div className="approval-sub">{subjectSummary(item.approval, s)}</div>
         </div>
       </div>
       {item.approval.rawArgs && (
         <details>
-          <summary>인자 보기</summary>
+          <summary>{s.approval.showArgs}</summary>
           <pre className="stderr">{item.approval.rawArgs}</pre>
         </details>
       )}
@@ -51,14 +56,14 @@ function Card({ item, onDecide }: { item: MspApproval; onDecide: (key: string, c
           className="approval-feedback"
           value={feedback}
           onChange={(e) => setFeedback(e.target.value)}
-          placeholder="모델에게 전달할 말 (선택)"
+          placeholder={s.approval.feedbackPlaceholder}
           disabled={busy}
         />
       )}
       <div className="approval-choices">
         {item.approval.choices.map((c) => (
           <button key={c.choiceId} className="btn" onClick={() => decide(c.choiceId)} disabled={busy} title={c.rulePreview || c.decision}>
-            {c.label} <span className="src-tag">{scopeLabel(c.scope)}</span>
+            {c.label} <span className="src-tag">{scopeLabel(c.scope, s)}</span>
           </button>
         ))}
       </div>

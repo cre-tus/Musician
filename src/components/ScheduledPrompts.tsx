@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ScheduledPrompt, ScheduledRepeat } from '../lib/scheduled-prompts.mjs';
 import { MAX_SCHEDULED_PROMPTS, formatRepeat, formatScheduledFireTime } from '../lib/scheduled-prompts.mjs';
+import { useLang, useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 function toInputValue(ms: number): string {
   const date = new Date(ms);
@@ -25,26 +27,27 @@ interface SchedulePromptDialogProps {
   onClose: () => void;
 }
 
-const REPEAT_OPTIONS: { value: ScheduledRepeat; label: string }[] = [
-  { value: 'once', label: '1회만' },
-  { value: 'daily', label: '매일' },
-  { value: 'weekly', label: '매주' },
-  { value: 'monthly', label: '매월' },
-];
-
 export function SchedulePromptDialog({ draft, sessionTitle, mode, initialFireAt, initialRepeat, onSchedule, onClose }: SchedulePromptDialogProps) {
+  const s = useStrings();
+  const lang = useLang();
   const edit = mode === 'edit';
   const titleId = edit ? 'schedule-edit-title' : 'schedule-dialog-title';
+  const repeatOptions: { value: ScheduledRepeat; label: string }[] = [
+    { value: 'once', label: s.schedule.repeatOnce },
+    { value: 'daily', label: s.schedule.repeatDaily },
+    { value: 'weekly', label: s.schedule.repeatWeekly },
+    { value: 'monthly', label: s.schedule.repeatMonthly },
+  ];
   const presets = useMemo(() => {
     const now = Date.now();
     return [
-      { label: '10분 후', fireAt: now + 10 * 60000 },
-      { label: '30분 후', fireAt: now + 30 * 60000 },
-      { label: '1시간 후', fireAt: now + 3600000 },
-      { label: '3시간 후', fireAt: now + 3 * 3600000 },
-      { label: '내일 아침 9시', fireAt: nextMorningNine(now) },
+      { label: s.schedule.presetMin10, fireAt: now + 10 * 60000 },
+      { label: s.schedule.presetMin30, fireAt: now + 30 * 60000 },
+      { label: s.schedule.presetHour1, fireAt: now + 3600000 },
+      { label: s.schedule.presetHour3, fireAt: now + 3 * 3600000 },
+      { label: s.schedule.presetTomorrow9, fireAt: nextMorningNine(now) },
     ];
-  }, []);
+  }, [s]);
   const [custom, setCustom] = useState(() => toInputValue(Number.isFinite(initialFireAt) ? (initialFireAt as number) : Date.now() + 3600000));
   const [picked, setPicked] = useState<number>(Number.isFinite(initialFireAt) ? (initialFireAt as number) : presets[2].fireAt);
   const [repeat, setRepeat] = useState<ScheduledRepeat>(initialRepeat || 'once');
@@ -84,13 +87,13 @@ export function SchedulePromptDialog({ draft, sessionTitle, mode, initialFireAt,
           }
         }}
       >
-        <div className="modal-header"><h3 id={titleId}>{edit ? '예약 변경' : '프롬프트 예약'}</h3></div>
+        <div className="modal-header"><h3 id={titleId}>{edit ? s.schedule.editTitle : s.schedule.createTitle}</h3></div>
         <div className="modal-body">
-          <p className="modal-note">{edit ? '바꾼 시간' : '시간'}이 되면 <code>{sessionTitle}</code> 스레드에서 자동 실행돼. 실행 중이면 끝난 뒤 순서대로 실행돼.</p>
+          <p className="modal-note">{formatStr(s.schedule.noteWhen, { when: edit ? s.schedule.whenEdit : s.schedule.whenCreate })} <code>{sessionTitle}</code> {s.schedule.noteRest}</p>
           {edit ? (
             <textarea
               className="schedule-edit-text"
-              aria-label="예약 프롬프트 내용"
+              aria-label={s.schedule.editTextLabel}
               rows={3}
               value={text}
               onChange={(event) => setText(event.target.value)}
@@ -98,7 +101,7 @@ export function SchedulePromptDialog({ draft, sessionTitle, mode, initialFireAt,
           ) : (
             <p className="schedule-text">{draft}</p>
           )}
-          <div className="schedule-presets" role="group" aria-label="예약 시간 선택">
+          <div className="schedule-presets" role="group" aria-label={s.schedule.timeGroup}>
             {presets.map((preset) => (
               <button
                 key={preset.label}
@@ -116,11 +119,11 @@ export function SchedulePromptDialog({ draft, sessionTitle, mode, initialFireAt,
               aria-pressed={Number.isFinite(customMs) && picked === customMs}
               onClick={() => { if (Number.isFinite(customMs)) setPicked(customMs); }}
             >
-              직접 입력
+              {s.schedule.customPick}
             </button>
           </div>
-          <div className="schedule-presets" role="group" aria-label="반복 선택">
-            {REPEAT_OPTIONS.map((option) => (
+          <div className="schedule-presets" role="group" aria-label={s.schedule.repeatGroup}>
+            {repeatOptions.map((option) => (
               <button
                 key={option.value}
                 type="button"
@@ -133,7 +136,7 @@ export function SchedulePromptDialog({ draft, sessionTitle, mode, initialFireAt,
             ))}
           </div>
           <label className="field">
-            날짜와 시간
+            {s.schedule.dateLabel}
             <input
               type="datetime-local"
               value={custom}
@@ -145,12 +148,12 @@ export function SchedulePromptDialog({ draft, sessionTitle, mode, initialFireAt,
               }}
             />
           </label>
-          {!valid && <p className="modal-note test-err">{!textValid ? '내용을 비워둘 수 없어 (최대 8000자).' : '지금보다 이후 시간을 골라줘.'}</p>}
+          {!valid && <p className="modal-note test-err">{!textValid ? s.schedule.errText : s.schedule.errTime}</p>}
         </div>
         <div className="modal-footer">
-          <button className="btn" type="button" onClick={onClose}>취소</button>
+          <button className="btn" type="button" onClick={onClose}>{s.common.cancel}</button>
           <button ref={confirmRef} className="btn-primary" type="button" disabled={!valid} onClick={() => onSchedule(picked, repeat, edit ? text : undefined)}>
-            {valid ? `${formatScheduledFireTime(picked)}에 ${edit ? '변경' : '예약'}${repeat === 'once' ? '' : ` (${formatRepeat(repeat)})`}` : (edit ? '변경하기' : '예약하기')}
+            {valid ? formatStr(edit ? s.schedule.confirmEdit : s.schedule.confirmCreate, { time: formatScheduledFireTime(picked, undefined, lang) }) + (repeat === 'once' ? '' : formatStr(s.schedule.confirmRepeat, { repeat: formatRepeat(repeat, lang) })) : (edit ? s.schedule.applyEdit : s.schedule.applyCreate)}
           </button>
         </div>
       </section>
@@ -168,6 +171,8 @@ interface ScheduledPromptListDialogProps {
 }
 
 export function ScheduledPromptListDialog({ items, sessionTitleOf, onCancel, onEdit, onFireNow, onClose }: ScheduledPromptListDialogProps) {
+  const s = useStrings();
+  const lang = useLang();
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -195,31 +200,31 @@ export function ScheduledPromptListDialog({ items, sessionTitleOf, onCancel, onE
           if (event.key === 'Escape') { event.preventDefault(); onClose(); }
         }}
       >
-        <div className="modal-header"><h3 id="schedule-list-title">예약된 프롬프트</h3></div>
+        <div className="modal-header"><h3 id="schedule-list-title">{s.schedule.listTitle}</h3></div>
         <div className="modal-body">
-          {items.length === 0 && <p className="modal-note">예약이 없어. 입력창에 쓰고 시계 버튼을 눌러 예약해줘 (최대 {MAX_SCHEDULED_PROMPTS}개).</p>}
+          {items.length === 0 && <p className="modal-note">{formatStr(s.schedule.emptyNote, { max: MAX_SCHEDULED_PROMPTS })}</p>}
           {pending.length > 0 && (
-            <div className="schedule-list" role="list" aria-label="대기 중인 예약">
+            <div className="schedule-list" role="list" aria-label={s.schedule.pendingGroup}>
               {pending.map((item) => (
                 <div className="schedule-row" role="listitem" key={item.id}>
                   <div className="schedule-row-main">
                     <span className="schedule-row-text" title={item.text}>{item.text}</span>
-                    <span className="schedule-row-meta">{sessionTitleOf(item.sessionId)} · {formatScheduledFireTime(item.fireAt, now)}{item.repeat !== 'once' ? ` · ${formatRepeat(item.repeat)} 반복` : ''}</span>
+                    <span className="schedule-row-meta">{sessionTitleOf(item.sessionId)} · {formatScheduledFireTime(item.fireAt, now, lang)}{item.repeat !== 'once' ? formatStr(s.schedule.rowRepeat, { repeat: formatRepeat(item.repeat, lang) }) : ''}</span>
                   </div>
-                  <button className="btn" type="button" onClick={() => onFireNow(item.id)}>지금 실행</button>
-                  <button className="btn" type="button" onClick={() => onEdit(item.id)}>편집</button>
-                  <button className="btn" type="button" onClick={() => onCancel(item.id)}>취소</button>
+                  <button className="btn" type="button" onClick={() => onFireNow(item.id)}>{s.schedule.fireNow}</button>
+                  <button className="btn" type="button" onClick={() => onEdit(item.id)}>{s.schedule.editBtn}</button>
+                  <button className="btn" type="button" onClick={() => onCancel(item.id)}>{s.common.cancel}</button>
                 </div>
               ))}
             </div>
           )}
           {history.length > 0 && (
-            <div className="schedule-list" role="list" aria-label="지난 예약">
+            <div className="schedule-list" role="list" aria-label={s.schedule.historyGroup}>
               {history.map((item) => (
                 <div className="schedule-row schedule-row-fired" role="listitem" key={item.id}>
                   <div className="schedule-row-main">
                     <span className="schedule-row-text" title={item.text}>{item.text}</span>
-                    <span className="schedule-row-meta">{sessionTitleOf(item.sessionId)} · {item.status === 'fired' ? '실행됨' : '실행 못함'}</span>
+                    <span className="schedule-row-meta">{sessionTitleOf(item.sessionId)} · {item.status === 'fired' ? s.schedule.fired : s.schedule.missed}</span>
                   </div>
                 </div>
               ))}
@@ -227,7 +232,7 @@ export function ScheduledPromptListDialog({ items, sessionTitleOf, onCancel, onE
           )}
         </div>
         <div className="modal-footer">
-          <button ref={closeRef} className="btn-primary" type="button" onClick={onClose}>닫기</button>
+          <button ref={closeRef} className="btn-primary" type="button" onClick={onClose}>{s.common.close}</button>
         </div>
       </section>
     </div>

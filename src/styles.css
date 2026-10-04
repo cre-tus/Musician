@@ -2203,6 +2203,7 @@ pre.worklog {
    Toasts and code blocks intentionally stay dark (floating dark chrome). */
 [data-theme='light'] .sidebar {
   background: linear-gradient(180deg, #f1f1f4 0%, #e8e8ec 100%);
+  border-right-color: var(--border-soft);
 }
 [data-theme='light'] .thread-row.active {
   background: #dcdce1;
@@ -2236,6 +2237,64 @@ pre.worklog {
 [data-theme='light'] .mini-btn:hover {
   background: #e6e6eb;
   border-color: rgba(0, 0, 0, 0.16);
+}
+
+/* Light fixes, round 2 (bug screenshot 2026-10-04): the Apple-dark section
+   below re-declares these controls with hardcoded dark fills AFTER the
+   variable-based rules, so without these overrides they stay dark (and
+   dark-on-dark unreadable) in light mode. */
+[data-theme='light'] .btn:not(.btn-primary):not(.btn-danger),
+[data-theme='light'] .mini-btn {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.14);
+  color: var(--fg);
+}
+[data-theme='light'] .side-action {
+  color: var(--fg);
+}
+[data-theme='light'] .tree-row {
+  color: var(--fg);
+}
+[data-theme='light'] .side-action:hover,
+[data-theme='light'] .thread-row:hover,
+[data-theme='light'] .group-head:hover,
+[data-theme='light'] .tree-row:hover,
+[data-theme='light'] .changed-item:hover,
+[data-theme='light'] .favorite-open:hover,
+[data-theme='light'] .icon-btn:hover,
+[data-theme='light'] .strip-menu button:hover,
+[data-theme='light'] .quick-open-row.active,
+[data-theme='light'] .quick-open-row:hover,
+[data-theme='light'] .explorer-search-result:hover,
+[data-theme='light'] .explorer-search-result:focus-visible,
+[data-theme='light'] .explorer-search-result.active,
+[data-theme='light'] .explorer-search-history button:hover,
+[data-theme='light'] .explorer-search-history button:focus-visible {
+  background: rgba(0, 0, 0, 0.06);
+}
+[data-theme='light'] .group-head.active {
+  background: rgba(0, 0, 0, 0.08);
+}
+[data-theme='light'] .side-search {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+[data-theme='light'] .brand-mark.guitar,
+[data-theme='light'] .brand-mark.lg.guitar {
+  background: #ececf0;
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+[data-theme='light'] .guitar-pictogram {
+  filter: invert(1);
+}
+[data-theme='light'] .strip {
+  background: var(--bg-sunken);
+  border-bottom-color: var(--border-soft);
+}
+[data-theme='light'] .ptab-shell.active {
+  background: #ffffff;
+  border-color: var(--border-soft);
 }
 
 /* MSP: approvals, sessions, usage */

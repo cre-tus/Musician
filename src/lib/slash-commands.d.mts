@@ -6,5 +6,6 @@ export interface SlashCommand {
   keywords: string[];
 }
 export const SLASH_COMMANDS: SlashCommand[];
+export function getSlashCommands(lang?: 'ko' | 'en'): SlashCommand[];
 export function findSlashCommand(input: string | null | undefined, caret?: number): { query: string } | null;
-export function matchSlashCommands(query: string | null | undefined, limit?: number): SlashCommand[];
+export function matchSlashCommands(query: string | null | undefined, limit?: number, lang?: 'ko' | 'en'): SlashCommand[];

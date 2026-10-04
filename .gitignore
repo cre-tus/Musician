@@ -32,6 +32,9 @@ bug/
 # ---- local-only asset sources (build uses public/fonts) ----
 font/
 
+# ---- local-only test suite (stays on this machine) ----
+tests/
+
 # ---- logs & OS noise ----
 *.log
 .DS_Store

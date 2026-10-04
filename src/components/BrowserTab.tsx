@@ -6,6 +6,8 @@ import { isBrowserBookmarked } from '../lib/browser-bookmarks.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import type { BrowserShortcut } from '../types';
 import { BackIcon, ChevronDownIcon, CopyIcon, ForwardIcon, GlobeIcon, HomeIcon, RefreshIcon, SearchIcon, StarIcon, StopIcon, XIcon } from './icons';
+import { useLang, useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 interface Props {
   tabId: string;
@@ -26,12 +28,12 @@ interface Props {
   onToggleBookmark: (tabId: string, url: string) => void;
 }
 
-function hostOf(url: string): string {
+function hostOf(url: string, fallback: string): string {
   try {
     const h = new URL(url).host;
     return h || url;
   } catch {
-    return url || '새 탭';
+    return url || fallback;
   }
 }
 
@@ -41,6 +43,8 @@ function hostOf(url: string): string {
 // view paints above all React UI, so it parks whenever `obscured` (the
 // [+] menu drops over its area) or the tab is not visible.
 export default function BrowserTab(props: Props) {
+  const s = useStrings();
+  const lang = useLang();
   const { tabId } = props;
   const [addr, setAddr] = useState('');
   const [loading, setLoading] = useState(false);
@@ -107,14 +111,14 @@ export default function BrowserTab(props: Props) {
     }
     api()
       .browserState(tabId)
-      .then((s) => {
-        if (s.ok) {
-          setAddr(s.url || '');
-          setLoading(s.loading);
-          setCanBack(s.canGoBack);
-          setCanFwd(s.canGoForward);
-          if (s.url && s.url !== 'about:blank') urlRef.current(tabId, s.url);
-          if (s.title || s.url) titleRef.current(tabId, s.title || hostOf(s.url || ''));
+      .then((st) => {
+        if (st.ok) {
+          setAddr(st.url || '');
+          setLoading(st.loading);
+          setCanBack(st.canGoBack);
+          setCanFwd(st.canGoForward);
+          if (st.url && st.url !== 'about:blank') urlRef.current(tabId, st.url);
+          if (st.title || st.url) titleRef.current(tabId, st.title || hostOf(st.url || '', s.browser.newTab));
         }
       })
       .catch(() => {});
@@ -127,24 +131,24 @@ export default function BrowserTab(props: Props) {
       if (ev.type === 'url') {
         if (!editingRef.current) setAddr(ev.url);
         if (ev.url) urlRef.current(tabId, ev.url);
-        titleRef.current(tabId, hostOf(ev.url));
+        titleRef.current(tabId, hostOf(ev.url, s.browser.newTab));
         api()
           .browserState(tabId)
-          .then((s) => {
-            if (s.ok) {
-              setCanBack(s.canGoBack);
-              setCanFwd(s.canGoForward);
+          .then((st) => {
+            if (st.ok) {
+              setCanBack(st.canGoBack);
+              setCanFwd(st.canGoForward);
             }
           })
           .catch(() => {});
       } else if (ev.type === 'title') {
-        titleRef.current(tabId, ev.title || hostOf(ev.url));
+        titleRef.current(tabId, ev.title || hostOf(ev.url, s.browser.newTab));
       } else if (ev.type === 'loading') {
         setLoading(ev.loading);
         if (!editingRef.current && ev.url) setAddr(ev.url);
       } else if (ev.type === 'failed') {
         setLoading(false);
-        props.onNotice(`페이지 열기 실패: ${ev.desc || ev.code}`);
+        props.onNotice(formatStr(s.browser.openFailed, { detail: ev.desc || ev.code }));
       } else if (ev.type === 'agent') {
         setAgentAt(Date.now());
         setAgentMethod(ev.method);
@@ -247,7 +251,7 @@ export default function BrowserTab(props: Props) {
     health,
     agentActive,
     method: agentMethod,
-  });
+  }, lang);
   const badgeCls = badge.mode === 'off' ? 'agent-badge off' : badge.mode === 'down' ? 'agent-badge down' : 'agent-badge';
 
   const navigateTo = (target: string) => {
@@ -263,7 +267,7 @@ export default function BrowserTab(props: Props) {
         if (!r.ok) {
           setLoading(false);
           // Aborted loads (superseded/stopped) are benign — stay silent.
-          if (!r.aborted) props.onNotice(`이동 실패: ${r.error || r.desc || (r.code != null ? String(r.code) : '') || '알 수 없는 오류'}`);
+          if (!r.aborted) props.onNotice(formatStr(s.browser.navFailed, { detail: r.error || r.desc || (r.code != null ? String(r.code) : '') || s.common.unknownError }));
         }
       })
       .catch((e) => {
@@ -280,9 +284,9 @@ export default function BrowserTab(props: Props) {
     if (!value) return;
     try {
       await navigator.clipboard.writeText(value);
-      props.onNotice('브라우저 주소를 복사했어.');
+      props.onNotice(s.browser.copiedAddr);
     } catch {
-      props.onNotice('브라우저 주소를 복사하지 못했어.');
+      props.onNotice(s.browser.copyAddrFailed);
     }
   };
 
@@ -304,22 +308,22 @@ export default function BrowserTab(props: Props) {
   return (
     <section className="browser-tab">
       <div className="browser-bar">
-        <button type="button" className="icon-btn" title="뒤로" aria-label="브라우저 뒤로" disabled={!canBack} onClick={() => hasBridge() && api().browserBack(tabId).catch(() => {})}>
+        <button type="button" className="icon-btn" title={s.browser.back} aria-label={s.browser.backLabel} disabled={!canBack} onClick={() => hasBridge() && api().browserBack(tabId).catch(() => {})}>
           <BackIcon size={15} />
         </button>
-        <button type="button" className="icon-btn" title="앞으로" aria-label="브라우저 앞으로" disabled={!canFwd} onClick={() => hasBridge() && api().browserForward(tabId).catch(() => {})}>
+        <button type="button" className="icon-btn" title={s.browser.fwd} aria-label={s.browser.fwdLabel} disabled={!canFwd} onClick={() => hasBridge() && api().browserForward(tabId).catch(() => {})}>
           <ForwardIcon size={15} />
         </button>
         {loading ? (
-          <button type="button" className="icon-btn" title="중지" aria-label="브라우저 탐색 중지" onClick={() => hasBridge() && api().browserStop(tabId).catch(() => {})}>
+          <button type="button" className="icon-btn" title={s.browser.stop} aria-label={s.browser.stopLabel} onClick={() => hasBridge() && api().browserStop(tabId).catch(() => {})}>
             <StopIcon size={15} />
           </button>
         ) : (
-          <button type="button" className="icon-btn" title="새로고침" aria-label="브라우저 새로고침" onClick={() => hasBridge() && api().browserReload(tabId).catch(() => {})}>
+          <button type="button" className="icon-btn" title={s.browser.reload} aria-label={s.browser.reloadLabel} onClick={() => hasBridge() && api().browserReload(tabId).catch(() => {})}>
             <RefreshIcon size={15} />
           </button>
         )}
-        <button type="button" className="icon-btn" title="홈으로 이동" aria-label="브라우저 홈" onClick={goHome}>
+        <button type="button" className="icon-btn" title={s.browser.homeTitle} aria-label={s.browser.homeLabel} onClick={goHome}>
           <HomeIcon size={15} />
         </button>
         <div className="addr-wrap">
@@ -340,31 +344,31 @@ export default function BrowserTab(props: Props) {
               }
             }}
             onBlur={() => { editingRef.current = false; }}
-            placeholder="주소 또는 검색어 입력 후 Enter"
-            title="주소 또는 검색어 입력 · Ctrl+L로 주소창 선택"
+            placeholder={s.browser.addrPlaceholder}
+            title={s.browser.addrTitle}
             spellCheck={false}
-            aria-label="주소"
+            aria-label={s.browser.addrLabel}
           />
           {loading && <span className="addr-spin" aria-hidden />}
         </div>
-        <button type="button" className="icon-btn" title={bookmarked ? '북마크에서 제거' : '북마크에 추가'} aria-label={bookmarked ? '브라우저 북마크에서 제거' : '브라우저 북마크에 추가'} disabled={!addr.trim()} onClick={() => props.onToggleBookmark(tabId, addr)}>
+        <button type="button" className="icon-btn" title={bookmarked ? s.browser.unbookmark : s.browser.bookmark} aria-label={bookmarked ? s.browser.unbookmarkLabel : s.browser.bookmarkLabel} disabled={!addr.trim()} onClick={() => props.onToggleBookmark(tabId, addr)}>
           <StarIcon size={14} filled={bookmarked} />
         </button>
-        <button type="button" className="icon-btn" title="주소 복사" aria-label="브라우저 주소 복사" disabled={!addr.trim()} onClick={() => void copyAddress()}>
+        <button type="button" className="icon-btn" title={s.browser.copyAddrTitle} aria-label={s.browser.copyAddrLabel} disabled={!addr.trim()} onClick={() => void copyAddress()}>
           <CopyIcon size={14} />
         </button>
-        <button type="button" className="icon-btn" title="페이지에서 찾기 (Ctrl+F)" aria-label="페이지에서 찾기" onClick={() => setFindOpen(true)}>
+        <button type="button" className="icon-btn" title={s.browser.findTitle} aria-label={s.browser.findLabel} onClick={() => setFindOpen(true)}>
           <SearchIcon size={14} />
         </button>
         <button className="btn" onClick={go}>
-          이동
+          {s.browser.goBtn}
         </button>
         {badge.mode === 'active' ? (
           <span className="agent-badge on" title={badge.title}>
             <span className="pulse" /> {badge.label}
           </span>
         ) : badge.clickable ? (
-          <button type="button" className={badgeCls} title={badge.title} onClick={refreshHealth} aria-label={`${badge.label} - 다시 연결`}>
+          <button type="button" className={badgeCls} title={badge.title} onClick={refreshHealth} aria-label={formatStr(s.browser.badgeRetry, { label: badge.label })}>
             {badge.label}
           </button>
         ) : (
@@ -374,7 +378,7 @@ export default function BrowserTab(props: Props) {
         )}
       </div>
       {findOpen && (
-        <div className="browser-find-bar" role="search" aria-label="페이지에서 찾기" onKeyDown={(event) => {
+        <div className="browser-find-bar" role="search" aria-label={s.browser.findLabel} onKeyDown={(event) => {
           if (event.key === 'Escape') { event.preventDefault(); closeFind(); }
           else if (event.key === 'Enter') { event.preventDefault(); moveFindMatch(!event.shiftKey); }
         }}>
@@ -383,21 +387,21 @@ export default function BrowserTab(props: Props) {
             ref={findInputRef}
             value={findQuery}
             onChange={(event) => setFindQuery(event.target.value)}
-            aria-label="웹페이지에서 찾을 텍스트"
-            placeholder="페이지에서 찾기"
+            aria-label={s.browser.findTextLabel}
+            placeholder={s.browser.findLabel}
             autoComplete="off"
           />
           <span className="browser-find-count" role="status" aria-live="polite">
-            {findQuery ? (findMatches ? `${activeMatchOrdinal}/${findMatches}` : '일치 없음') : ''}
+            {findQuery ? (findMatches ? `${activeMatchOrdinal}/${findMatches}` : s.browser.noMatch) : ''}
           </span>
-          <button type="button" className="icon-btn" title="이전 결과 (Shift+Enter)" aria-label="이전 검색 결과" disabled={!findMatches} onClick={() => moveFindMatch(false)}><ChevronDownIcon size={13} className="message-find-prev" /></button>
-          <button type="button" className="icon-btn" title="다음 결과 (Enter)" aria-label="다음 검색 결과" disabled={!findMatches} onClick={() => moveFindMatch(true)}><ChevronDownIcon size={13} /></button>
-          <button type="button" className="icon-btn" title="검색 닫기 (Esc)" aria-label="페이지 검색 닫기" onClick={closeFind}><XIcon size={13} /></button>
+          <button type="button" className="icon-btn" title={s.browser.prevTitle} aria-label={s.browser.prevLabel} disabled={!findMatches} onClick={() => moveFindMatch(false)}><ChevronDownIcon size={13} className="message-find-prev" /></button>
+          <button type="button" className="icon-btn" title={s.browser.nextTitle} aria-label={s.browser.nextLabel} disabled={!findMatches} onClick={() => moveFindMatch(true)}><ChevronDownIcon size={13} /></button>
+          <button type="button" className="icon-btn" title={s.browser.findCloseTitle} aria-label={s.browser.findCloseLabel} onClick={closeFind}><XIcon size={13} /></button>
         </div>
       )}
       <div ref={boxRef} className="browser-viewport">
         {!hasBridge() && (
-          <div className="empty-note">Electron 앱에서 실행해야 브라우저를 사용할 수 있습니다.</div>
+          <div className="empty-note">{s.browser.needElectron}</div>
         )}
       </div>
     </section>

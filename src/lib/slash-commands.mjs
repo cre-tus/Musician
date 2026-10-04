@@ -36,10 +36,27 @@ function slashScore(cmd, q) {
   return -1;
 }
 
-export function matchSlashCommands(query, limit = 16) {
+const SLASH_TEXT_EN = {
+  new: { title: 'New thread', hint: 'Start a fresh conversation' },
+  model: { title: 'Model, permissions & reasoning settings', hint: 'Open the tuning popover' },
+  usage: { title: 'Show usage', hint: 'Subscription quota and tokens' },
+  settings: { title: 'Open settings', hint: 'CLI, theme, shortcuts' },
+  shortcuts: { title: 'Shortcut help', hint: 'Show keyboard shortcuts' },
+  schedule: { title: 'Manage scheduled prompts', hint: 'Schedule list and cancel' },
+  export: { title: 'Export conversation', hint: 'Save as Markdown' },
+  diff: { title: 'Show changes', hint: 'Open the file explorer' },
+  terminal: { title: 'Open terminal', hint: 'New terminal tab' },
+};
+
+export function getSlashCommands(lang = 'ko') {
+  if (lang !== 'en') return SLASH_COMMANDS;
+  return SLASH_COMMANDS.map((cmd) => ({ ...cmd, ...(SLASH_TEXT_EN[cmd.id] || {}) }));
+}
+
+export function matchSlashCommands(query, limit = 16, lang = 'ko') {
   const q = String(query || '').trim().toLowerCase();
   const cap = Number.isInteger(limit) && limit > 0 ? limit : 16;
-  return SLASH_COMMANDS.map((cmd, order) => ({ cmd, order, score: slashScore(cmd, q) }))
+  return getSlashCommands(lang).map((cmd, order) => ({ cmd, order, score: slashScore(cmd, q) }))
     .filter((item) => item.score >= 0)
     .sort((a, b) => b.score - a.score || a.order - b.order)
     .slice(0, cap)

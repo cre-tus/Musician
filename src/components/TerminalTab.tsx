@@ -7,6 +7,8 @@ import { rankTerminalHistory } from '../lib/terminal-history-search.mjs';
 import { findTerminalLinks } from '../lib/terminal-links.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { CopyIcon, RefreshIcon, StopIcon } from './icons';
+import { useStrings } from '../lib/lang';
+import { formatStr } from '../lib/i18n.mjs';
 
 interface Props {
   tabId: string;
@@ -53,6 +55,7 @@ function saveTerminalHistory(scope: string, history: string[]) {
 // Terminal tab: xterm rendering over a piped shell (line mode — type a
 // line, Enter to run). Full-screen TUI apps don't work without a PTY.
 export default function TerminalTab(props: Props) {
+  const s = useStrings();
   const { tabId, shell, cwd, dark, active } = props;
   const boxRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -112,7 +115,7 @@ export default function TerminalTab(props: Props) {
       .then((r) => {
         if (!r.ok) {
           setRunning(false);
-          props.onNotice(`터미널 시작 실패: ${r.error || '알 수 없는 오류'}`);
+          props.onNotice(formatStr(s.terminal.startFailed, { error: r.error || s.common.unknownError }));
         } else if (typeof r.seq === 'number') {
           shellSeqRef.current = r.seq;
         }
@@ -197,9 +200,9 @@ export default function TerminalTab(props: Props) {
       }
       if (event.key.toLowerCase() === 'c' && term.hasSelection()) {
         try {
-          void navigator.clipboard.writeText(term.getSelection()).catch(() => props.onNotice('터미널 선택 내용을 복사하지 못했습니다.'));
+          void navigator.clipboard.writeText(term.getSelection()).catch(() => props.onNotice(s.terminal.copySelFailed));
         } catch {
-          props.onNotice('터미널 선택 내용을 복사하지 못했습니다.');
+          props.onNotice(s.terminal.copySelFailed);
         }
         return false;
       }
@@ -207,9 +210,9 @@ export default function TerminalTab(props: Props) {
         try {
           void navigator.clipboard.readText()
             .then((text) => term.paste(text.replace(/\r?\n/g, ' ')))
-            .catch(() => props.onNotice('클립보드 내용을 붙여넣지 못했습니다.'));
+            .catch(() => props.onNotice(s.terminal.pasteFailed));
         } catch {
-          props.onNotice('클립보드 내용을 붙여넣지 못했습니다.');
+          props.onNotice(s.terminal.pasteFailed);
         }
         return false;
       }
@@ -231,8 +234,8 @@ export default function TerminalTab(props: Props) {
         term.write(ev.text.replace(/\r?\n/g, '\r\n'));
       } else {
         setRunning(false);
-        const msg = ev.error ? `종료됨: ${ev.error}` : `종료됨 (코드 ${ev.code})`;
-        term.write(`\r\n\x1b[90m${msg} — 다시 시작으로 새 셸\x1b[0m\r\n`);
+        const msg = ev.error ? formatStr(s.terminal.exitedErr, { error: ev.error }) : formatStr(s.terminal.exitedCode, { code: ev.code });
+        term.write(`\r\n\x1b[90m${msg}${s.terminal.restartHint}\x1b[0m\r\n`);
       }
     });
 
@@ -445,48 +448,48 @@ export default function TerminalTab(props: Props) {
                 });
             }
           }}
-          aria-label="셸"
+          aria-label={s.terminal.shellLabel}
         >
           <option value="powershell">PowerShell</option>
           <option value="cmd">cmd</option>
         </select>
-        <span className="term-meta" title={cwd || '기본 폴더'}>
-          {running ? '실행 중' : '중지됨'} · {cwd ? cwd.split(/[\\/]/).pop() : '기본 폴더'}
+        <span className="term-meta" title={cwd || s.terminal.defaultFolder}>
+          {running ? s.terminal.running : s.terminal.stopped} · {cwd ? cwd.split(/[\\/]/).pop() : s.terminal.defaultFolder}
         </span>
         <button
           className="mini-btn"
-          title={cwd ? `작업 폴더 경로 복사: ${cwd}` : '작업 폴더가 없습니다'}
-          aria-label="터미널 작업 폴더 경로 복사"
+          title={cwd ? formatStr(s.terminal.copyCwdTitle, { cwd }) : s.terminal.noCwd}
+          aria-label={s.terminal.copyCwdLabel}
           disabled={!cwd}
           onClick={async () => {
             if (!cwd) return;
-            try { await navigator.clipboard.writeText(cwd); props.onNotice('터미널 작업 폴더 경로를 복사했어.'); }
-            catch { props.onNotice('터미널 작업 폴더 경로를 복사하지 못했어.'); }
+            try { await navigator.clipboard.writeText(cwd); props.onNotice(s.terminal.copiedCwd); }
+            catch { props.onNotice(s.terminal.copyCwdFailed); }
           }}
         >
-          <CopyIcon size={13} /> 경로
+          <CopyIcon size={13} /> {s.terminal.pathBtn}
         </button>
         <button
           className="mini-btn"
-          title="선택한 터미널 출력 복사 (Ctrl+C)"
+          title={s.terminal.copyOutTitle}
           onClick={async () => {
             const term = termRef.current;
             if (!term?.hasSelection()) return;
             try { await navigator.clipboard.writeText(term.getSelection()); }
-            catch { props.onNotice('터미널 선택 내용을 복사하지 못했습니다.'); }
+            catch { props.onNotice(s.terminal.copySelFailed); }
           }}
           disabled={!hasSelection}
         >
-          <CopyIcon size={13} /> 복사
+          <CopyIcon size={13} /> {s.terminal.copyBtn}
         </button>
-        <button className="mini-btn" title="셸 다시 시작" onClick={restart}>
-          <RefreshIcon size={13} /> 다시 시작
+        <button className="mini-btn" title={s.terminal.restartTitle} onClick={restart}>
+          <RefreshIcon size={13} /> {s.terminal.restartBtn}
         </button>
-        <button className="mini-btn" title="셸 종료" onClick={kill} disabled={!running}>
-          <StopIcon size={13} /> 중지
+        <button className="mini-btn" title={s.terminal.killTitle} onClick={kill} disabled={!running}>
+          <StopIcon size={13} /> {s.terminal.killBtn}
         </button>
       </div>
-      {historySearchOpen && <div className="term-history-search" role="dialog" aria-label="터미널 명령 기록 검색">
+      {historySearchOpen && <div className="term-history-search" role="dialog" aria-label={s.terminal.historyDialog}>
         <div className="term-history-search-head">
           <input
             ref={historySearchInputRef}
@@ -499,14 +502,14 @@ export default function TerminalTab(props: Props) {
               else if (event.key === 'ArrowUp' && historyMatches.length) { event.preventDefault(); setHistorySearchIndex((index) => (index - 1 + historyMatches.length) % historyMatches.length); }
               else if (event.key === 'Enter') { event.preventDefault(); acceptHistorySearch(); }
             }}
-            placeholder="명령 기록 검색…"
-            aria-label="명령 기록 검색"
+            placeholder={s.terminal.historyPlaceholder}
+            aria-label={s.terminal.historyPlaceholder}
             autoComplete="off"
             spellCheck={false}
           />
-          <span className="term-history-search-hint">↑↓ 선택 · Enter 입력 · Esc 취소</span>
+          <span className="term-history-search-hint">{s.terminal.historyHint}</span>
         </div>
-        <div ref={historyResultsRef} className="term-history-search-list" role="listbox" aria-label="명령 기록">
+        <div ref={historyResultsRef} className="term-history-search-list" role="listbox" aria-label={s.terminal.historyList}>
           {historyMatches.length ? historyMatches.map((match, index) => <button
             key={`${match.index}:${match.command}`}
             type="button"
@@ -516,11 +519,11 @@ export default function TerminalTab(props: Props) {
             onMouseEnter={() => setHistorySearchIndex(index)}
             onClick={acceptHistorySearch}
             title={match.command}
-          >{match.command}</button>) : <div className="term-history-empty">일치하는 명령이 없어.</div>}
+          >{match.command}</button>) : <div className="term-history-empty">{s.terminal.historyEmpty}</div>}
         </div>
       </div>}
       <div ref={boxRef} className="term-body" />
-      {!hasBridge() && <div className="empty-note">Electron 앱에서 실행해야 터미널을 사용할 수 있습니다.</div>}
+      {!hasBridge() && <div className="empty-note">{s.terminal.needElectron}</div>}
     </div>
   );
 }

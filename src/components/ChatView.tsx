@@ -12,6 +12,8 @@ import { formatSessionTranscript } from '../lib/session-transcript.mjs';
 import { findPromptFileMention, insertPromptFileMention } from '../lib/prompt-file-mention.mjs';
 import { findSlashCommand, matchSlashCommands } from '../lib/slash-commands.mjs';
 import { mcpChatNotice } from '../lib/mcp-chat-notice.mjs';
+import { formatStr, STRINGS } from '../lib/i18n.mjs';
+import { useLang, useStrings } from '../lib/lang';
 import {
   AlertIcon,
   CheckIcon,
@@ -75,15 +77,16 @@ interface Props {
   quota: SubscriptionUsage | null;
 }
 
-function friendlyError(err: string): string {
+function friendlyError(err: string, lang: 'ko' | 'en' = 'ko'): string {
+  const cv = STRINGS[lang].chat;
   if (err === 'CLI_NOT_FOUND')
-    return 'muse CLI를 찾을 수 없습니다. CLI를 설치·로그인한 뒤 설정에서 경로를 확인하세요.';
+    return cv.errCliNotFound;
   if (err.includes('EINVAL'))
-    return 'CLI를 직접 실행할 수 없습니다 (spawn EINVAL). 설정의 CLI 경로를 확인하세요.';
-  if (err === 'CANCELLED') return '(취소됨)';
-  if (err.startsWith('TIMEOUT:')) return `시간 초과 (${err.slice('TIMEOUT:'.length)}ms). 설정에서 타임아웃을 늘려보세요.`;
-  if (err === 'TIMEOUT') return '시간 초과. 설정에서 타임아웃을 늘려보세요.';
-  return `실행 실패: ${err}`;
+    return cv.errEinval;
+  if (err === 'CANCELLED') return cv.errCancelled;
+  if (err.startsWith('TIMEOUT:')) return formatStr(cv.errTimeoutMs, { ms: err.slice('TIMEOUT:'.length) });
+  if (err === 'TIMEOUT') return cv.errTimeout;
+  return formatStr(cv.errExecFailed, { err });
 }
 
 async function gitSnapshot(cwd: string): Promise<string[]> {
@@ -105,7 +108,7 @@ function diffPaths(before: string[], after: string[]): string[] {
     .slice(0, 20);
 }
 
-function foldMspItems(items: Map<string, MspItem>): { text: string; activity: string } {
+function foldMspItems(items: Map<string, MspItem>, lang: 'ko' | 'en' = 'ko'): { text: string; activity: string } {
   const texts: string[] = [];
   const acts: string[] = [];
   for (const it of items.values()) {
@@ -115,7 +118,7 @@ function foldMspItems(items: Map<string, MspItem>): { text: string; activity: st
       const name = it.tool || it.kind;
       acts.push(`${name} — ${it.status}${it.failureReason ? `: ${it.failureReason}` : ''}`);
     } else if (it.kind === 'agentError' || it.kind === 'turnError') {
-      if (it.message || it.fallbackText) acts.push(`실패: ${it.message || it.fallbackText}`);
+      if (it.message || it.fallbackText) acts.push(formatStr(STRINGS[lang].chat.foldFailed, { msg: it.message || it.fallbackText }));
     }
   }
   return { text: texts.join('\n\n'), activity: acts.join('\n') };
@@ -127,28 +130,30 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-function fmtReset(ms: number): string {
+function fmtReset(ms: number, lang: 'ko' | 'en' = 'ko'): string {
+  const cv = STRINGS[lang].chat;
   const d = ms - Date.now();
-  if (!ms || d <= 0) return '곧 초기화';
+  if (!ms || d <= 0) return cv.resetSoon;
   const days = Math.floor(d / 86400000);
   const h = Math.floor((d % 86400000) / 3600000);
   const m = Math.floor((d % 3600000) / 60000);
-  if (days > 0) return `${days}일 ${h}시간 후 초기화`;
-  if (h > 0) return `${h}시간 ${m}분 후 초기화`;
-  if (m > 0) return `${m}분 후 초기화`;
-  return '곧 초기화';
+  if (days > 0) return formatStr(cv.resetDays, { days, h });
+  if (h > 0) return formatStr(cv.resetHours, { h, m });
+  if (m > 0) return formatStr(cv.resetMins, { m });
+  return cv.resetSoon;
 }
 
-function fmtDur(ms: number): string {
+function fmtDur(ms: number, lang: 'ko' | 'en' = 'ko'): string {
+  const cv = STRINGS[lang].chat;
   const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}초 동안 작업`;
-  return `${Math.floor(s / 60)}분 ${s % 60}초 동안 작업`;
+  if (s < 60) return formatStr(cv.durSecs, { s });
+  return formatStr(cv.durMinSec, { m: Math.floor(s / 60), s: s % 60 });
 }
 
-function fmtMsgTime(ts?: number): string {
+function fmtMsgTime(ts?: number, lang: 'ko' | 'en' = 'ko'): string {
   if (!ts) return '';
   try {
-    return new Date(ts).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+    return new Date(ts).toLocaleTimeString(lang === 'en' ? 'en-US' : 'ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
   } catch {
     return '';
   }
@@ -184,21 +189,21 @@ function linkifyFiles(md: string): string {
 interface MspAct {
   key: string;
   tool: string;
-  toolKo: string;
+  toolLabel: string;
   target: string;
-  statusKo: string;
+  statusLabel: string;
   live: boolean;
 }
 
-const TOOL_KO: Record<string, string> = {
-  read: '파일 읽기',
-  edit: '파일 수정',
-  write: '파일 쓰기',
-  shell: '명령 실행',
-  bash: '명령 실행',
-  glob: '파일 찾기',
-  grep: '내용 검색',
-  list: '목록 조회',
+const TOOL_LABEL_KEY: Record<string, string> = {
+  read: 'toolRead',
+  edit: 'toolEdit',
+  write: 'toolWrite',
+  shell: 'toolShell',
+  bash: 'toolShell',
+  glob: 'toolGlob',
+  grep: 'toolGrep',
+  list: 'toolList',
 };
 
 function mspTarget(it: MspItem): string {
@@ -217,7 +222,8 @@ function mspTarget(it: MspItem): string {
   return it.displayText || it.fallbackText || '';
 }
 
-function foldMspActs(items: Map<string, MspItem>): MspAct[] {
+function foldMspActs(items: Map<string, MspItem>, lang: 'ko' | 'en' = 'ko'): MspAct[] {
+  const cv = STRINGS[lang].chat;
   const out: MspAct[] = [];
   for (const it of items.values()) {
     if (it.kind !== 'toolCall' && it.kind !== 'userShell' && it.kind !== 'subagent') continue;
@@ -226,15 +232,15 @@ function foldMspActs(items: Map<string, MspItem>): MspAct[] {
     out.push({
       key: it.itemId,
       tool,
-      toolKo: TOOL_KO[tool] || tool,
+      toolLabel: (TOOL_LABEL_KEY[tool] && cv[TOOL_LABEL_KEY[tool]]) || tool,
       target: mspTarget(it),
-      statusKo:
+      statusLabel:
         live
-          ? '진행 중'
+          ? cv.actRunning
           : it.status === 'failed'
-            ? '실패'
+            ? cv.actFailed
             : it.status === 'completed'
-              ? '완료'
+              ? cv.actDone
               : it.status || '',
       live,
     });
@@ -260,6 +266,7 @@ function CodeBlock({
   onInsert: (code: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const cv = useStrings().chat;
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(code);
@@ -279,12 +286,12 @@ function CodeBlock({
       <div className="codeblock-bar">
         <span>{lang || 'code'}</span>
         <div className="codeblock-actions">
-          <button className="mini-btn" onClick={copy} title="복사">
+          <button className="mini-btn" onClick={copy} title={cv.codeCopy}>
             {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
-            {copied ? '복사됨' : '복사'}
+            {copied ? cv.codeCopied : cv.codeCopy}
           </button>
-          <button className="mini-btn" onClick={() => onInsert(code)} title="에디터 커서 위치에 삽입">
-            에디터에 삽입
+          <button className="mini-btn" onClick={() => onInsert(code)} title={cv.codeInsertTitle}>
+            {cv.codeInsert}
           </button>
         </div>
       </div>
@@ -295,30 +302,7 @@ function CodeBlock({
   );
 }
 
-const EXAMPLES = ['이 폴더 구조를 설명해줘', '변경된 파일 diff를 요약해줘', 'README를 한국어로 작성해줘'];
-
 const CHAT_MODELS = ['muse-spark-1.3', 'muse-spark-1.2'];
-
-const APPROVAL_MODES: [string, string][] = [
-  ['', 'CLI 기본값'],
-  ['allowAll', '모두 허용'],
-  ['promptUnmatched', '모르는 것만 묻기'],
-  ['onRequest', '요청 시에만 묻기'],
-  ['denyUnmatched', '모르는 건 거부'],
-];
-
-const REASONING_EFFORTS: [string, string][] = [
-  ['', 'CLI 기본값'],
-  ['none', '없음'],
-  ['minimal', '최소'],
-  ['low', '낮음'],
-  ['medium', '보통'],
-  ['high', '높음'],
-  ['xhigh', '매우 높음'],
-  ['max', '최대'],
-  ['ultra', '울트라'],
-];
-const EFFORT_LEVELS = REASONING_EFFORTS.filter(([v]) => v !== '');
 
 interface AttachedFile {
   path: string;
@@ -342,6 +326,33 @@ interface SpeechRecog {
 
 export default function ChatView(props: Props) {
   const { session, settings, cliStatus, folder, editorVisible, onToggleEditor, tokenWin, quota } = props;
+  const lang = useLang();
+  const strings = useStrings();
+  const cv = strings.chat;
+  // The chat-event subscription below mounts once; handlers read the live
+  // language through this ref (same pattern as cbRef for props).
+  const langRef = useRef(lang);
+  langRef.current = lang;
+  const examples = [cv.ex0, cv.ex1, cv.ex2];
+  const approvalModes: [string, string][] = [
+    ['', strings.settings.cliDefault],
+    ['allowAll', strings.settings.approvalAllowAll],
+    ['promptUnmatched', strings.settings.approvalPromptUnmatched],
+    ['onRequest', strings.settings.approvalOnRequest],
+    ['denyUnmatched', strings.settings.approvalDenyUnmatched],
+  ];
+  const reasoningEfforts: [string, string][] = [
+    ['', strings.settings.cliDefault],
+    ['none', cv.effNone],
+    ['minimal', cv.effMinimal],
+    ['low', cv.effLow],
+    ['medium', cv.effMedium],
+    ['high', cv.effHigh],
+    ['xhigh', cv.effXhigh],
+    ['max', cv.effMax],
+    ['ultra', cv.effUltra],
+  ];
+  const effortLevels = reasoningEfforts.filter(([v]) => v !== '');
   const h5Total = tokenWin.h5.input + tokenWin.h5.output;
   const wkTotal = tokenWin.wk.input + tokenWin.wk.output;
   const wUsed = quota?.window.usedPercent;
@@ -364,7 +375,7 @@ export default function ChatView(props: Props) {
   const [fileMentionLoading, setFileMentionLoading] = useState(false);
   const [slash, setSlash] = useState<{ query: string } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
-  const slashResults = useMemo(() => (slash ? matchSlashCommands(slash.query) : []), [slash]);
+  const slashResults = useMemo(() => (slash ? matchSlashCommands(slash.query, 16, lang) : []), [slash, lang]);
   const [queuedPrompts, setQueuedPrompts] = useState<string[]>(() => {
     try {
       const saved: unknown = JSON.parse(localStorage.getItem(queueKey) || '[]');
@@ -512,7 +523,7 @@ export default function ChatView(props: Props) {
     setCodexPreviewError('');
     api().codexRead(codexSelected, folder).then((result) => {
       if (cancelled) return;
-      if (!result.ok) throw new Error(result.error || '대화 미리보기를 불러오지 못했습니다.');
+      if (!result.ok) throw new Error(result.error || cv.previewFailed);
       setCodexPreview({ sessionId: codexSelected, context: result.context || '' });
     }).catch((error: unknown) => {
       if (!cancelled) setCodexPreviewError(error instanceof Error ? error.message : String(error));
@@ -540,7 +551,7 @@ export default function ChatView(props: Props) {
         previousUserMessage = message;
         continue;
       }
-      const failedText = /^(실행 실패:|시간 초과|muse CLI를 찾을 수|CLI를 직접 실행할 수)/.test(message.text);
+      const failedText = /^(실행 실패:|시간 초과|muse CLI를 찾을 수|CLI를 직접 실행할 수|Exec failed|Timed out|muse CLI not found|Cannot spawn the CLI)/.test(message.text);
       const failed = !message.timeout && ((typeof message.code === 'number' && message.code !== 0) || failedText);
       const includedFiles = previousUserMessage?.text.includes('[첨부:') || previousUserMessage?.text.startsWith('[첨부:');
       if (failed && previousUserMessage && !includedFiles) prompts.set(message.id, previousUserMessage.text);
@@ -549,7 +560,7 @@ export default function ChatView(props: Props) {
   }, [session.messages]);
   const latestUserMessageId = [...session.messages].reverse().find((message) => message.role === 'user')?.id;
 
-  const restorePromptToComposer = (prompt: string, notice = '프롬프트를 입력창에 복원했어. 수정한 뒤 전송해줘.') => {
+  const restorePromptToComposer = (prompt: string, notice = cv.restoreDefault) => {
     promptHistoryIndexRef.current = null;
     setInput(prompt);
     setNotice(notice);
@@ -726,7 +737,7 @@ export default function ChatView(props: Props) {
       promptHistoryIndexRef.current = null;
       setFileMention(null);
       setInput((current) => `${current.trimEnd()}${current.trim() ? '\n\n' : ''}${text}`);
-      setNotice('선택한 코드와 파일 위치를 입력창에 추가했어. 내용을 확인한 뒤 보내줘.');
+      setNotice(cv.composerInserted);
       scheduleAfterPaint(() => {
         const textarea = composerInputRef.current;
         if (!textarea) return;
@@ -800,21 +811,21 @@ export default function ChatView(props: Props) {
       setCopiedMessageId(m.id);
       window.setTimeout(() => setCopiedMessageId((id) => id === m.id ? null : id), 1800);
     } catch {
-      setNotice('메시지를 복사하지 못했습니다.');
+      setNotice(cv.copyMsgFailed);
     }
   };
 
   const exportConversation = async () => {
     if (!hasBridge()) {
-      setNotice('대화 내보내기는 Electron 앱에서 사용할 수 있습니다.');
+      setNotice(cv.exportNeedApp);
       return;
     }
-    const title = session.title.replace(/[\r\n\t]+/g, ' ').trim() || 'Musician 대화';
-    const transcript = formatSessionTranscript(session, { projectFallback: folder, exportedAt: Date.now() });
+    const title = session.title.replace(/[\r\n\t]+/g, ' ').trim() || cv.exportTitle;
+    const transcript = formatSessionTranscript(session, { projectFallback: folder, exportedAt: Date.now(), lang });
     try {
       const result = await api().exportMarkdown(title, transcript);
-      if (!result.ok) throw new Error(result.error || '대화를 내보내지 못했습니다.');
-      if (!result.canceled) setNotice('대화를 Markdown으로 저장했습니다.');
+      if (!result.ok) throw new Error(result.error || cv.exportFailed);
+      if (!result.canceled) setNotice(cv.exportedOk);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     }
@@ -822,11 +833,11 @@ export default function ChatView(props: Props) {
 
   const openHandoff = async () => {
     if (!folder) {
-      setNotice('먼저 작업 폴더를 여세요. 같은 프로젝트의 Codex 세션만 연결할 수 있습니다.');
+      setNotice(cv.handoffNeedFolder);
       return;
     }
     if (!hasBridge()) {
-      setNotice('Codex 연동은 Electron 앱에서 사용할 수 있습니다.');
+      setNotice(cv.handoffNeedApp);
       return;
     }
     setHandoffOpen(true);
@@ -839,7 +850,7 @@ export default function ChatView(props: Props) {
     setCodexPreviewError('');
     try {
       const r = await api().codexSessions(folder);
-      if (!r.ok) throw new Error(r.error || 'Codex 세션을 찾지 못했습니다.');
+      if (!r.ok) throw new Error(r.error || cv.codexNotFound);
       const list = r.sessions || [];
       setCodexSessions(list);
       setCodexSelected((prev) => list.some((s) => s.id === prev) ? prev : list[0]?.id || '');
@@ -856,13 +867,13 @@ export default function ChatView(props: Props) {
     setHandoffError('');
     try {
       const r = await api().codexRead(codexSelected, folder);
-      if (!r.ok || !r.context) throw new Error(r.error || '가져올 대화가 없습니다.');
+      if (!r.ok || !r.context) throw new Error(r.error || cv.codexEmpty);
       promptHistoryIndexRef.current = null;
       const draft = input;
       const draftBlock = draft.trim() ? `\n\n[Musician 작성 중인 초안 — 보존됨]\n${draft}` : '';
       setInput(`[Codex 세션에서 이어받기: ${r.title || codexSelected}]\n\n${r.context}${draftBlock}\n\n위 작업을 이어서 진행해줘.`);
       setHandoffOpen(false);
-      setNotice(draft.trim() ? 'Codex 대화를 불러왔고, 기존 초안도 보존했어. 확인한 뒤 전송해줘.' : 'Codex 문맥을 입력창에 불러왔습니다. 확인한 뒤 전송하세요.');
+      setNotice(draft.trim() ? cv.codexImportedDraft : cv.codexImported);
     } catch (e) {
       setHandoffError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -888,9 +899,9 @@ export default function ChatView(props: Props) {
     setHandoffError('');
     try {
       const r = await api().codexQueue(codexSelected, folder, context);
-      if (!r.ok) throw new Error(r.error || 'Codex로 전달하지 못했습니다.');
+      if (!r.ok) throw new Error(r.error || cv.codexSendFailed);
       setHandoffOpen(false);
-      setNotice('현재 작업을 Codex 세션으로 전달하고 Codex 앱을 열었습니다.');
+      setNotice(cv.codexSent);
     } catch (e) {
       setHandoffError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -908,7 +919,7 @@ export default function ChatView(props: Props) {
   useEffect(() => {
     if (props.tuneSignal <= 0) return;
     if (runRef.current) {
-      setNotice('작업이 끝난 뒤 모델 설정을 바꿀 수 있어.');
+      setNotice(cv.tuneBusy);
       return;
     }
     setTuneOpen(true);
@@ -935,16 +946,17 @@ export default function ChatView(props: Props) {
       reqRef.current = null;
       const { text, stderr } = streamRef.current;
       const isMsp = runEngineRef.current === 'msp';
+      const liveCv = STRINGS[langRef.current].chat;
       const timedOut = !!error && error.startsWith('TIMEOUT');
-      const folded = isMsp ? foldMspItems(mspItemsRef.current) : { text: '', activity: '' };
+      const folded = isMsp ? foldMspItems(mspItemsRef.current, langRef.current) : { text: '', activity: '' };
       const bodyText = isMsp ? folded.text : text;
       const errText = [stderr, isMsp ? folded.activity : ''].filter(Boolean).join('\n');
       const durationMs = typeof serverDur === 'number' ? serverDur : Date.now() - (runStartRef.current || Date.now());
       const cmd = runRef.current?.cmd;
       const cwd = runRef.current?.cwd;
       const msgId = uid('m');
-      const acts = isMsp ? foldMspActs(mspItemsRef.current) : [];
-      const body = bodyText || (error ? friendlyError(error) : errorText ? `실행 실패: ${errorText}` : '(출력 없음)');
+      const acts = isMsp ? foldMspActs(mspItemsRef.current, langRef.current) : [];
+      const body = bodyText || (error ? friendlyError(error, langRef.current) : errorText ? formatStr(liveCv.errExecFailed, { err: errorText }) : liveCv.noOutput);
       streamRef.current = { text: '', stderr: '' };
       runRef.current = null;
       const wasCancelled = cancelRequestedRef.current;
@@ -982,7 +994,7 @@ export default function ChatView(props: Props) {
         ts: Date.now(),
         done: true,
         durationMs,
-        work: acts.length > 0 ? acts.map((a) => `${a.toolKo}${a.target ? ` ${a.target}` : ''} (${a.statusKo})`) : undefined,
+        work: acts.length > 0 ? acts.map((a) => `${a.toolLabel}${a.target ? ` ${a.target}` : ''} (${a.statusLabel})`) : undefined,
         usage:
           usage ||
           (turnUsageRef.current && turnUsageRef.current.inputTokens + turnUsageRef.current.outputTokens > 0
@@ -1017,7 +1029,7 @@ export default function ChatView(props: Props) {
         const patch: Partial<ChatMessage> = {};
         if (changed.length > 0) patch.changedFiles = changed;
         if (stats && stats.length > 0) patch.changedStats = stats;
-        if (changed.length > 0 && acts.length === 0) patch.work = [`파일 변경: ${changed.join(', ')}`];
+        if (changed.length > 0 && acts.length === 0) patch.work = [formatStr(liveCv.workChanged, { files: changed.join(', ') })];
         if (Object.keys(patch).length > 0) cbRef.current.onUpdateMessage(msgId, patch);
       })();
     });
@@ -1025,10 +1037,10 @@ export default function ChatView(props: Props) {
       if (reqId !== reqRef.current || runEngineRef.current !== 'msp') return;
       if (!item || !item.itemId) return;
       mspItemsRef.current.set(item.itemId, item);
-      const { text: full, activity } = foldMspItems(mspItemsRef.current);
+      const { text: full, activity } = foldMspItems(mspItemsRef.current, langRef.current);
       setStreamText(full);
       setStreamActivity(activity);
-      setMspActs(foldMspActs(mspItemsRef.current));
+      setMspActs(foldMspActs(mspItemsRef.current, langRef.current));
     });
     const offAppr = api().onMspApproval((a) => {
       if (a.threadKey !== cbRef.current.session.id) return;
@@ -1048,7 +1060,7 @@ export default function ChatView(props: Props) {
     const offHostDead = api().onMspHostDead(() => {
       setApprovals([]);
       setUserInputs([]);
-      setNotice('MSP 호스트가 종료되었습니다. 다음 전송 때 다시 연결합니다.');
+      setNotice(STRINGS[langRef.current].chat.hostDead);
     });
     const offTokens = api().onMspTokens((p) => {
       const run = runRef.current;
@@ -1196,28 +1208,28 @@ export default function ChatView(props: Props) {
     return ids;
   })();
   const modelLabel = (id: string) => hostModels.find((m) => m.modelId === id)?.displayLabel || id;
-  const approvalLabel = (v: string) => APPROVAL_MODES.find(([x]) => x === v)?.[1] || v || 'CLI 기본값';
-  const reasoningLabel = (v: string) => REASONING_EFFORTS.find(([x]) => x === v)?.[1] || v || 'CLI 기본값';
-  const effortIdx = EFFORT_LEVELS.findIndex(([x]) => x === settings.reasoningEffort);
+  const approvalLabel = (v: string) => approvalModes.find(([x]) => x === v)?.[1] || v || strings.settings.cliDefault;
+  const reasoningLabel = (v: string) => reasoningEfforts.find(([x]) => x === v)?.[1] || v || strings.settings.cliDefault;
+  const effortIdx = effortLevels.findIndex(([x]) => x === settings.reasoningEffort);
 
   const changeModel = (v: string) => {
     cbRef.current.onPatchSettings({ model: v });
     if (v && session.mspSessionId && hasBridge()) {
-      api().mspSetModel(session.id, v).catch(() => setNotice('실행 중인 세션의 모델 변경에 실패했습니다.'));
+      api().mspSetModel(session.id, v).catch(() => setNotice(cv.modelSetFailed));
     }
   };
 
   const changeApproval = (v: string) => {
     cbRef.current.onPatchSettings({ approvalMode: v });
     if (v && session.mspSessionId && hasBridge()) {
-      api().mspSetApprovalMode(session.id, v).catch(() => setNotice('실행 중인 세션의 권한 변경에 실패했습니다.'));
+      api().mspSetApprovalMode(session.id, v).catch(() => setNotice(cv.approvalSetFailed));
     }
   };
 
   const changeReasoning = (v: string) => {
     cbRef.current.onPatchSettings({ reasoningEffort: v });
     if (v && session.mspSessionId && hasBridge()) {
-      api().mspSetReasoning(session.id, v).catch(() => setNotice('실행 중인 세션의 추론 수준 변경에 실패했습니다.'));
+      api().mspSetReasoning(session.id, v).catch(() => setNotice(cv.reasoningSetFailed));
     }
   };
 
@@ -1234,7 +1246,7 @@ export default function ChatView(props: Props) {
           const b = await api().readFileBytes(fp);
           if (!b.ok || !b.base64) {
             setNotice(
-              b.error === 'TOO_LARGE' ? `"${name}" 이미지가 너무 큽니다 (8MB 제한).` : `읽기 실패: ${b.error}`,
+              b.error === 'TOO_LARGE' ? formatStr(cv.imgTooLarge, { name }) : formatStr(cv.readFailed, { error: b.error }),
             );
             continue;
           }
@@ -1253,14 +1265,14 @@ export default function ChatView(props: Props) {
         if (!t.ok) {
           setNotice(
             (t.error || '').startsWith('TOO_LARGE')
-              ? `"${name}" 파일이 너무 큽니다 (2MB 제한).`
-              : `읽기 실패: ${t.error}`,
+              ? formatStr(cv.fileTooLarge, { name })
+              : formatStr(cv.readFailed, { error: t.error }),
           );
           continue;
         }
         const content = t.content ?? '';
         if (total + content.length > MAX_ATTACH_CHARS) {
-          setNotice('첨부가 100,000자를 넘습니다.');
+          setNotice(cv.attachTooLong);
           continue;
         }
         seen.add(fp);
@@ -1286,24 +1298,24 @@ export default function ChatView(props: Props) {
   const attachPastedImage = async (file: File) => {
     const mime = file.type.toLowerCase();
     if (file.size > 8 * 1024 * 1024) {
-      setNotice('붙여넣은 이미지가 너무 큽니다 (8MB 제한).');
+      setNotice(cv.pasteTooLarge);
       return;
     }
     if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'].includes(mime)) {
-      setNotice('PNG, JPEG, GIF, WebP, BMP 이미지 붙여넣기를 지원합니다.');
+      setNotice(cv.pasteTypes);
       return;
     }
     try {
       const dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('이미지를 읽지 못했습니다.'));
-        reader.onerror = () => reject(new Error('이미지를 읽지 못했습니다.'));
+        reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error(cv.imgReadFailed));
+        reader.onerror = () => reject(new Error(cv.imgReadFailed));
         reader.readAsDataURL(file);
       });
       const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
       const name = file.name || `pasted-image.${mime.split('/')[1] || 'png'}`;
       const saved = await api().savePastedImage(name, base64, mime);
-      if (!saved.ok || !saved.path) throw new Error(saved.error === 'TOO_LARGE' ? '이미지가 너무 큽니다 (8MB 제한).' : saved.error || '이미지를 첨부하지 못했습니다.');
+      if (!saved.ok || !saved.path) throw new Error(saved.error === 'TOO_LARGE' ? cv.imgTooLargeShort : saved.error || cv.imgAttachFailed);
       setAttach((prev) => prev.some((item) => item.path === saved.path) ? prev : [...prev, {
         path: saved.path!,
         name,
@@ -1311,7 +1323,7 @@ export default function ChatView(props: Props) {
         image: true,
         dataUrl,
       }]);
-      setNotice('클립보드 이미지를 첨부했습니다.');
+      setNotice(cv.clipAttached);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : String(e));
     }
@@ -1331,12 +1343,12 @@ export default function ChatView(props: Props) {
     const w = window as unknown as { SpeechRecognition?: new () => SpeechRecog; webkitSpeechRecognition?: new () => SpeechRecog };
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
     if (!SR) {
-      setNotice('이 빌드에서는 음성 입력을 지원하지 않습니다.');
+      setNotice(cv.micUnsupported);
       return;
     }
     try {
       const r = new SR();
-      r.lang = 'ko-KR';
+      r.lang = lang === 'en' ? 'en-US' : 'ko-KR';
       r.interimResults = true;
       r.onresult = (e) => {
         let s = '';
@@ -1348,13 +1360,13 @@ export default function ChatView(props: Props) {
         recogRef.current = null;
         setMicOn(false);
       };
-      r.onerror = () => setNotice('음성 인식에 실패했습니다.');
+      r.onerror = () => setNotice(cv.micFailed);
       recogRef.current = r;
       setMicOn(true);
       r.start();
     } catch {
       setMicOn(false);
-      setNotice('마이크를 시작할 수 없습니다.');
+      setNotice(cv.micStartFailed);
     }
   };
 
@@ -1363,7 +1375,7 @@ export default function ChatView(props: Props) {
     const attachments = options.ignoreAttachments ? [] : attach;
     if ((!text && attachments.length === 0) || run) return;
     if (!hasBridge()) {
-      setNotice('Electron 앱에서 실행해야 CLI를 호출할 수 있습니다.');
+      setNotice(cv.needAppCli);
       return;
     }
     const names = attachments.map((a) => a.name).join(', ');
@@ -1398,7 +1410,7 @@ export default function ChatView(props: Props) {
         cbRef.current.onAppendAssistant({
           id: uid('m'),
           role: 'assistant',
-          text: friendlyError(res.error || '실행 실패'),
+          text: friendlyError(res.error || cv.errBare, lang),
           cmd: res.cmd,
           cwd: res.cwd,
           code: null,
@@ -1418,8 +1430,8 @@ export default function ChatView(props: Props) {
       setRun(runRef.current);
       cbRef.current.onRunningChange(true);
       cbRef.current.onMspSession(res.mspSessionId || '', runEngineRef.current);
-      if (res.fallback) setNotice(`MSP를 쓸 수 없어 exec로 실행합니다: ${res.fallbackReason || ''}`);
-      const mcpNotice = mcpChatNotice(res.mcpHealth);
+      if (res.fallback) setNotice(formatStr(cv.execFallback, { reason: res.fallbackReason || '' }));
+      const mcpNotice = mcpChatNotice(res.mcpHealth, lang);
       if (mcpNotice) setNotice(mcpNotice);
       setStreamText('');
       setStreamStderr('');
@@ -1440,20 +1452,20 @@ export default function ChatView(props: Props) {
     const text = input.trim();
     if (!run || !text || attach.length > 0) return;
     if (queuedPrompts.length >= MAX_QUEUED_PROMPTS) {
-      setNotice('대기열은 최대 20개까지 추가할 수 있어요.');
+      setNotice(cv.queueMax);
       return;
     }
     setQueuedPrompts((current) => enqueuePrompt(current, text));
     setInput('');
     setFileMention(null);
     promptHistoryIndexRef.current = null;
-    setNotice(queuePaused ? '대기열에 추가했어. 자동 실행은 일시중지 상태야.' : '대기열에 추가했어. 현재 작업이 정상 완료되면 순서대로 실행할게.');
+    setNotice(queuePaused ? cv.queuedPaused : cv.queuedOk);
   };
 
   const runNextQueuedPrompt = () => {
     if (run || queuedPrompts.length === 0) return;
     if (!hasBridge()) {
-      setNotice('Electron 앱에서 실행해야 CLI를 호출할 수 있습니다.');
+      setNotice(cv.needAppCli);
       return;
     }
     const { prompt, remaining } = takeNextPrompt(queuedPrompts);
@@ -1478,12 +1490,12 @@ export default function ChatView(props: Props) {
   const toggleQueuePause = () => {
     if (!queuePaused) {
       setQueuePaused(true);
-      setNotice('대기열 자동 실행을 일시중지했어. 요청은 보존돼.');
+      setNotice(cv.queuePausedMsg);
       return;
     }
     setQueuePaused(false);
     if (!run && queuedPrompts.length) runNextQueuedPrompt();
-    else setNotice('대기열 자동 실행을 다시 켰어.');
+    else setNotice(cv.queueResumed);
   };
 
   const editQueuedPrompt = (index: number) => {
@@ -1493,7 +1505,7 @@ export default function ChatView(props: Props) {
     const nextInput = input.trim() ? `${input}\n\n${prompt}` : prompt;
     setInput(nextInput);
     promptHistoryIndexRef.current = null;
-    setNotice(input.trim() ? '대기 요청을 기존 초안 뒤에 붙였어. 수정한 뒤 전송하거나 다시 대기열에 넣어줘.' : '대기 요청을 초안으로 불러왔어. 수정한 뒤 전송하거나 다시 대기열에 넣어줘.');
+    setNotice(input.trim() ? cv.queueAppendDraft : cv.queueLoadDraft);
     scheduleAfterPaint(() => {
       const textarea = composerInputRef.current;
       textarea?.focus();
@@ -1524,9 +1536,9 @@ export default function ChatView(props: Props) {
 
   const rerunPrompt = async (prompt: string) => {
     if (run || (await props.onConfirm({
-      title: '같은 요청 다시 실행',
-      message: '이 프롬프트를 새 실행으로 다시 보낼게. 파일 변경이나 명령이 중복될 수 있어.',
-      confirmLabel: '다시 실행',
+      title: cv.rerunTitle,
+      message: cv.rerunMsg,
+      confirmLabel: cv.rerunBtn,
     })) !== 'confirm') return;
     await send(prompt);
   };
@@ -1571,16 +1583,16 @@ export default function ChatView(props: Props) {
 
   const doRevert = async (m: ChatMessage) => {
     if (!m.cwd || !m.changedFiles || m.changedFiles.length === 0 || !hasBridge() || run || reverting) return;
-    if (await props.onConfirm({ title: '파일 변경 되돌리기', message: `이 턴에서 바뀐 파일 ${m.changedFiles.length}개를 되돌릴게. 새 파일은 삭제돼. 계속할까?`, confirmLabel: '변경 되돌리기', destructive: true }) !== 'confirm') return;
+    if (await props.onConfirm({ title: cv.revertTitle, message: formatStr(cv.revertMsg, { count: m.changedFiles.length }), confirmLabel: cv.revertBtn, destructive: true }) !== 'confirm') return;
     setReverting(m.id);
     try {
       const r = await api().revertFiles(m.cwd, m.changedFiles);
       const failed = (r.results || []).filter((x) => !x.ok);
       if (!r.ok || failed.length > 0) {
-        setNotice(`되돌리기 실패: ${failed.map((x) => x.file).join(', ') || r.error}`);
+        setNotice(formatStr(cv.revertFailed, { files: failed.map((x) => x.file).join(', ') || r.error }));
       } else {
         cbRef.current.onUpdateMessage(m.id, { reverted: true });
-        setNotice('되돌렸습니다. 에디터에 열린 파일은 다시 열어주세요.');
+        setNotice(cv.revertedOk);
       }
     } catch (e) {
       setNotice(e instanceof Error ? e.message : String(e));
@@ -1601,7 +1613,7 @@ export default function ChatView(props: Props) {
 
   const showEmpty = session.messages.length === 0 && !run;
   const activeCwd = session.cwd || folder;
-  const workspaceName = activeCwd.split(/[\\/]/).filter(Boolean).pop() || activeCwd || '작업 폴더 미지정';
+  const workspaceName = activeCwd.split(/[\\/]/).filter(Boolean).pop() || activeCwd || cv.noWorkspace;
   const awaitingUserInput = !!runRef.current?.mspSessionId
     && userInputs.some((prompt) => prompt.sessionId === runRef.current?.mspSessionId);
 
@@ -1613,8 +1625,8 @@ export default function ChatView(props: Props) {
           <button
             className="chat-workspace"
             type="button"
-            title={activeCwd ? `작업 폴더: ${activeCwd} (클릭하여 경로 복사)` : '작업 폴더가 지정되지 않았습니다'}
-            aria-label={activeCwd ? `작업 폴더 ${activeCwd} 경로 복사` : '작업 폴더 미지정'}
+            title={activeCwd ? formatStr(cv.wsTitle, { cwd: activeCwd }) : cv.wsNone}
+            aria-label={activeCwd ? formatStr(cv.wsCopyLabel, { cwd: activeCwd }) : cv.noWorkspace}
             disabled={!activeCwd}
             onClick={async () => {
               if (!activeCwd) return;
@@ -1627,11 +1639,11 @@ export default function ChatView(props: Props) {
           >
             <FolderIcon size={13} />
             <span>{workspaceName}</span>
-            <span className="chat-workspace-copy">{workspaceCopied ? '복사됨' : '경로 복사'}</span>
+            <span className="chat-workspace-copy">{workspaceCopied ? cv.wsCopied : cv.wsCopy}</span>
           </button>
         </div>
         <div className="chat-head-actions">
-          <button className="icon-btn" onClick={() => void exportConversation()} title="대화를 Markdown으로 내보내기" aria-label="대화 내보내기">
+          <button className="icon-btn" onClick={() => void exportConversation()} title={cv.exportConvTitle} aria-label={cv.exportConvLabel}>
             <ExportIcon size={15} />
           </button>
           <button
@@ -1640,16 +1652,16 @@ export default function ChatView(props: Props) {
               if (open) setMessageFindQuery('');
               return !open;
             })}
-            title="대화에서 찾기 (Ctrl+F)"
-            aria-label="대화에서 찾기"
+            title={cv.findTitle}
+            aria-label={cv.findLabel}
           >
             <SearchIcon size={15} />
           </button>
           <button
             className="icon-btn"
             onClick={onToggleEditor}
-            title={editorVisible ? '패널 숨기기' : '패널 보이기'}
-            aria-label={editorVisible ? '파일 패널 숨기기' : '파일 패널 보이기'}
+            title={editorVisible ? cv.hidePanelTitle : cv.showPanelTitle}
+            aria-label={editorVisible ? cv.hidePanelLabel : cv.showPanelLabel}
             aria-pressed={editorVisible}
           >
             <PanelIcon size={16} />
@@ -1658,7 +1670,7 @@ export default function ChatView(props: Props) {
       </header>
 
       {messageFindOpen && (
-        <div className="message-find" role="search" aria-label="대화에서 찾기">
+        <div className="message-find" role="search" aria-label={cv.findLabel}>
           <SearchIcon size={14} />
           <input
             ref={messageFindInputRef}
@@ -1668,14 +1680,14 @@ export default function ChatView(props: Props) {
               if (event.key === 'Enter') { event.preventDefault(); moveMessageMatch(event.shiftKey ? -1 : 1); }
               if (event.key === 'Escape') { setMessageFindOpen(false); setMessageFindQuery(''); }
             }}
-            placeholder="이 대화에서 찾기"
-            aria-label="검색어"
+            placeholder={cv.findPh}
+            aria-label={cv.findQueryLabel}
           />
-          {messageFindQuery && <button type="button" className="icon-btn" onClick={() => { setMessageFindQuery(''); setMessageFindIndex(0); messageFindInputRef.current?.focus(); }} title="검색어 지우기" aria-label="검색어 지우기"><XIcon size={12} /></button>}
-          <span className="message-find-count" role="status" aria-live="polite">{messageMatches.length ? `${Math.min(messageFindIndex + 1, messageMatches.length)} / ${messageMatches.length}개 메시지` : messageFindQuery.trim() ? '결과 없음' : ''}</span>
-          <button className="icon-btn" disabled={messageMatches.length === 0} onClick={() => moveMessageMatch(-1)} title="이전 결과 (Shift+Enter)" aria-label="이전 결과"><ChevronDownIcon size={13} className="message-find-prev" /></button>
-          <button className="icon-btn" disabled={messageMatches.length === 0} onClick={() => moveMessageMatch(1)} title="다음 결과 (Enter)" aria-label="다음 결과"><ChevronDownIcon size={13} /></button>
-          <button className="icon-btn" onClick={() => { setMessageFindOpen(false); setMessageFindQuery(''); }} title="닫기" aria-label="검색 닫기"><XIcon size={13} /></button>
+          {messageFindQuery && <button type="button" className="icon-btn" onClick={() => { setMessageFindQuery(''); setMessageFindIndex(0); messageFindInputRef.current?.focus(); }} title={cv.findClearTitle} aria-label={cv.findClearTitle}><XIcon size={12} /></button>}
+          <span className="message-find-count" role="status" aria-live="polite">{messageMatches.length ? formatStr(cv.findCount, { cur: Math.min(messageFindIndex + 1, messageMatches.length), total: messageMatches.length }) : messageFindQuery.trim() ? cv.findNone : ''}</span>
+          <button className="icon-btn" disabled={messageMatches.length === 0} onClick={() => moveMessageMatch(-1)} title={cv.findPrevTitle} aria-label={cv.findPrev}><ChevronDownIcon size={13} className="message-find-prev" /></button>
+          <button className="icon-btn" disabled={messageMatches.length === 0} onClick={() => moveMessageMatch(1)} title={cv.findNextTitle} aria-label={cv.findNext}><ChevronDownIcon size={13} /></button>
+          <button className="icon-btn" onClick={() => { setMessageFindOpen(false); setMessageFindQuery(''); }} title={strings.common.close} aria-label={cv.findClose}><XIcon size={13} /></button>
         </div>
       )}
 
@@ -1713,10 +1725,10 @@ export default function ChatView(props: Props) {
           >
             <div className="handoff-head">
               <div>
-                <h3 id="codex-handoff-title">Codex와 이어하기</h3>
-                <p>현재 작업 폴더의 최근 세션 중 선택해 대화를 이어가세요.</p>
+                <h3 id="codex-handoff-title">{cv.handoffTitle}</h3>
+                <p>{cv.handoffSub}</p>
               </div>
-              <button type="button" className="icon-btn" onClick={() => setHandoffOpen(false)} disabled={handoffBusy} title="닫기" aria-label="Codex 연동 창 닫기"><XIcon size={15} /></button>
+              <button type="button" className="icon-btn" onClick={() => setHandoffOpen(false)} disabled={handoffBusy} title={strings.common.close} aria-label={cv.handoffClose}><XIcon size={15} /></button>
             </div>
             {handoffError && <div className="handoff-error" role="alert">{handoffError}</div>}
             {codexSessions.length > 0 && <label className="handoff-search">
@@ -1725,37 +1737,37 @@ export default function ChatView(props: Props) {
                 type="search"
                 value={codexSessionQuery}
                 onChange={(event) => setCodexSessionQuery(event.target.value)}
-                placeholder="최근 100개 세션에서 제목 또는 ID 검색…"
-                aria-label="Codex 세션 검색"
+                placeholder={cv.handoffSearchPh}
+                aria-label={cv.handoffSearchLabel}
               />
               <span>{filteredCodexSessions.length}/{codexSessions.length}</span>
             </label>}
             {handoffBusy && codexSessions.length === 0 ? (
-              <div className="handoff-empty">Codex 세션을 찾는 중…</div>
+              <div className="handoff-empty">{cv.handoffLoading}</div>
             ) : codexSessions.length === 0 ? (
               <div className="handoff-empty">
-                {handoffError ? <button type="button" className="btn" onClick={() => void openHandoff()}>다시 시도</button> : '이 프로젝트에서 사용한 Codex 세션이 없습니다.'}
+                {handoffError ? <button type="button" className="btn" onClick={() => void openHandoff()}>{strings.common.retry}</button> : cv.handoffEmpty}
               </div>
             ) : (
-              <div className="handoff-list" aria-label="Codex 세션 목록">
-                {filteredCodexSessions.length === 0 ? <div className="handoff-empty">검색과 일치하는 세션이 없습니다.</div> : filteredCodexSessions.map((s) => (
+              <div className="handoff-list" aria-label={cv.handoffListLabel}>
+                {filteredCodexSessions.length === 0 ? <div className="handoff-empty">{cv.handoffNoMatch}</div> : filteredCodexSessions.map((s) => (
                   <label key={s.id} className={codexSelected === s.id ? 'handoff-session active' : 'handoff-session'}>
                     <input type="radio" name="codex-session" checked={codexSelected === s.id} onChange={() => setCodexSelected(s.id)} />
-                    <span><b>{s.title}</b><small>{new Date(s.updatedAt).toLocaleString()} · {s.id.slice(0, 8)}</small></span>
+                    <span><b>{s.title}</b><small>{new Date(s.updatedAt).toLocaleString(lang === 'en' ? 'en-US' : 'ko-KR')} · {s.id.slice(0, 8)}</small></span>
                   </label>
                 ))}
               </div>
             )}
-            {codexSessions.length > 0 && <section className="handoff-preview" aria-label="선택한 Codex 세션 대화 미리보기">
+            {codexSessions.length > 0 && <section className="handoff-preview" aria-label={cv.handoffPreviewLabel}>
               <div className="handoff-preview-head">
-                <b>선택한 세션의 최근 대화</b>
-                <span role="status">{codexPreviewLoading ? '불러오는 중…' : codexPreviewError ? '미리보기 오류' : ''}</span>
+                <b>{cv.handoffPreviewTitle}</b>
+                <span role="status">{codexPreviewLoading ? cv.handoffPreviewLoading : codexPreviewError ? cv.handoffPreviewErr : ''}</span>
               </div>
-              <pre>{codexPreviewLoading ? '최근 대화를 불러오는 중…' : codexPreviewError || (codexPreview?.sessionId === codexSelected ? (codexPreview.context.slice(-1800) || '대화 내용이 없습니다.') : '세션을 선택해 미리보기를 확인하세요.')}</pre>
+              <pre>{codexPreviewLoading ? cv.handoffPreviewBody : codexPreviewError || (codexPreview?.sessionId === codexSelected ? (codexPreview.context.slice(-1800) || cv.handoffPreviewEmpty) : cv.handoffPreviewPick)}</pre>
             </section>}
             <div className="handoff-actions">
-              <button type="button" className="btn" disabled={!selectedCodexSessionVisible || handoffBusy} onClick={() => void importFromCodex()}>Codex에서 가져오기</button>
-              <button type="button" className="btn btn-primary" disabled={!selectedCodexSessionVisible || handoffBusy || !!run} onClick={() => void sendToCodex()}>Codex로 넘기기</button>
+              <button type="button" className="btn" disabled={!selectedCodexSessionVisible || handoffBusy} onClick={() => void importFromCodex()}>{cv.handoffImport}</button>
+              <button type="button" className="btn btn-primary" disabled={!selectedCodexSessionVisible || handoffBusy || !!run} onClick={() => void sendToCodex()}>{cv.handoffSend}</button>
             </div>
           </section>
         </div>
@@ -1791,19 +1803,19 @@ export default function ChatView(props: Props) {
             }}
           >
             <div className="tune-head">
-              <b id="tune-dialog-title">모델 · 권한 · 추론</b>
-              <button type="button" className="icon-btn" onClick={() => setTuneOpen(false)} title="닫기" aria-label="설정 창 닫기">
+              <b id="tune-dialog-title">{cv.tuneTitle}</b>
+              <button type="button" className="icon-btn" onClick={() => setTuneOpen(false)} title={strings.common.close} aria-label={cv.tuneClose}>
                 <XIcon size={15} />
               </button>
             </div>
             <div className="tune-group">
-              <div className="tune-title">모델</div>
-              {[['', 'CLI 기본값'], ...modelOptions.map((m): [string, string] => [m, modelLabel(m)])].map(
+              <div className="tune-title">{cv.tuneModel}</div>
+              {[['', strings.settings.cliDefault], ...modelOptions.map((m): [string, string] => [m, modelLabel(m)])].map(
                 ([v, text]) => (
                   <button
                     key={v || '(cli)'}
                     className={v === settings.model ? 'tune-row active' : 'tune-row'}
-                    title={v || 'CLI 기본값. 새 턴부터 적용'}
+                    title={v || cv.tuneModelDefaultTitle}
                     onClick={() => {
                       if (v !== settings.model) changeModel(v);
                     }}
@@ -1815,12 +1827,12 @@ export default function ChatView(props: Props) {
               )}
             </div>
             <div className="tune-group">
-              <div className="tune-title">권한</div>
-              {APPROVAL_MODES.map(([v, text]) => (
+              <div className="tune-title">{cv.tunePerm}</div>
+              {approvalModes.map(([v, text]) => (
                 <button
                   key={v || '(cli)'}
                   className={v === settings.approvalMode ? 'tune-row active' : 'tune-row'}
-                  title="도구 실행 승인 방식"
+                  title={cv.tunePermTitle}
                   onClick={() => {
                     if (v !== settings.approvalMode) changeApproval(v);
                   }}
@@ -1831,16 +1843,16 @@ export default function ChatView(props: Props) {
               ))}
             </div>
             <div className="tune-group">
-              <div className="tune-title">추론<span className="tune-meter-value">{reasoningLabel(settings.reasoningEffort)}</span></div>
-              <div className="tune-meter" role="radiogroup" aria-label="추론 수준">
-                {EFFORT_LEVELS.map(([v, text], i) => (
+              <div className="tune-title">{cv.tuneReasoning}<span className="tune-meter-value">{reasoningLabel(settings.reasoningEffort)}</span></div>
+              <div className="tune-meter" role="radiogroup" aria-label={cv.tuneReasoningLabel}>
+                {effortLevels.map(([v, text], i) => (
                   <button
                     key={v}
                     type="button"
                     role="radio"
                     aria-checked={v === settings.reasoningEffort}
                     aria-label={text}
-                    title={`${text}. 다음 턴부터 적용`}
+                    title={formatStr(cv.tuneEffortTitle, { text })}
                     className={v === settings.reasoningEffort ? 'tune-bar on' : effortIdx >= 0 && i < effortIdx ? 'tune-bar lit' : 'tune-bar'}
                     style={{ height: 8 + i * 3 }}
                     onClick={() => {
@@ -1849,22 +1861,22 @@ export default function ChatView(props: Props) {
                   />
                 ))}
               </div>
-              <div className="tune-meter-scale" aria-hidden="true"><span>없음</span><span>울트라</span></div>
+              <div className="tune-meter-scale" aria-hidden="true"><span>{cv.effNone}</span><span>{cv.effUltra}</span></div>
               <button
                 type="button"
                 className={settings.reasoningEffort === '' ? 'tune-meter-reset active' : 'tune-meter-reset'}
-                aria-label="추론 CLI 기본값"
-                title="CLI 기본값으로 되돌리기"
+                aria-label={cv.tuneResetLabel}
+                title={cv.tuneResetTitle}
                 onClick={() => {
                   if (settings.reasoningEffort !== '') changeReasoning('');
                 }}
               >
-                CLI 기본값
+                {strings.settings.cliDefault}
               </button>
             </div>
             <div className="tune-foot">
               <button className="btn btn-primary" onClick={() => setTuneOpen(false)}>
-                완료
+                {cv.tuneDone}
               </button>
             </div>
           </section>
@@ -1875,17 +1887,17 @@ export default function ChatView(props: Props) {
         <div className="banner banner-bad">
           <AlertIcon size={15} />
           <span>
-            muse CLI를 찾을 수 없습니다. CLI를 설치·로그인하거나 설정에서 경로를 지정하세요.
+            {cv.cliMissingBanner}
           </span>
           <button className="mini-btn" onClick={props.onOpenSettings}>
-            설정 열기
+            {strings.shortcuts.nl16}
           </button>
         </div>
       )}
       {!hasBridge() && (
         <div className="banner banner-bad">
           <AlertIcon size={15} />
-          <span>브라우저 미리보기 모드입니다. CLI 호출·파일 접근은 Electron 앱에서만 됩니다.</span>
+          <span>{cv.previewModeBanner}</span>
         </div>
       )}
       {notice && (
@@ -1915,13 +1927,13 @@ export default function ChatView(props: Props) {
             <span className="brand-mark lg guitar" aria-hidden>
               <GuitarIcon size={40} />
             </span>
-            <h2>Musician에서 Muse에게 물어보세요</h2>
+            <h2>{cv.welcomeTitle}</h2>
             <p>
-              입력하면 Muse가 실행되고 결과가 여기로 스트리밍됩니다.
-              {folder ? '' : ' 오른쪽 패널의 파일 탭에서 작업 폴더를 열면 그 폴더 기준으로 동작합니다.'}
+              {cv.welcomeSub}
+              {folder ? '' : cv.welcomeNoFolder}
             </p>
             <div className="example-row">
-              {EXAMPLES.map((ex) => (
+              {examples.map((ex) => (
                 <button key={ex} className="example-btn" onClick={() => send(ex)}>
                   {ex}
                 </button>
@@ -1934,15 +1946,15 @@ export default function ChatView(props: Props) {
           m.role === 'user' ? (
             <div key={m.id} data-message-id={m.id} className={`msg-row right${messageMatchSet.has(m.id) ? ' msg-find-match' : ''}${messageMatches[messageFindIndex] === m.id ? ' msg-find-active' : ''}`}>
               <div className="bubble-user">{m.text}</div>
-              {m.ts != null && fmtMsgTime(m.ts) && (
-                <span className="msg-time" title={new Date(m.ts).toLocaleString()}>{fmtMsgTime(m.ts)}</span>
+              {m.ts != null && fmtMsgTime(m.ts, lang) && (
+                <span className="msg-time" title={new Date(m.ts).toLocaleString(lang === 'en' ? 'en-US' : 'ko-KR')}>{fmtMsgTime(m.ts, lang)}</span>
               )}
               {!m.text.includes('[첨부:') && (
                 <button
                   className="icon-btn msg-copy msg-reuse"
-                  onClick={() => restorePromptToComposer(m.text, '메시지를 입력창에 복원했어. 수정한 뒤 전송해줘.')}
-                  title="메시지를 입력창에 복원"
-                  aria-label="메시지를 입력창에 복원"
+                  onClick={() => restorePromptToComposer(m.text, cv.restoreMsg)}
+                  title={cv.restoreTitle}
+                  aria-label={cv.restoreTitle}
                 >
                   <PencilIcon size={14} />
                 </button>
@@ -1951,20 +1963,20 @@ export default function ChatView(props: Props) {
                 <button
                   className="icon-btn msg-copy msg-rerun"
                   onClick={() => void rerunPrompt(m.text)}
-                  title="같은 프롬프트 다시 실행"
-                  aria-label="같은 프롬프트 다시 실행"
+                  title={cv.rerunSameTitle}
+                  aria-label={cv.rerunSameTitle}
                 >
                   <RefreshIcon size={14} />
                 </button>
               )}
-              <button className="icon-btn msg-copy" onClick={() => void copyMessage(m)} title={copiedMessageId === m.id ? '복사됨' : '메시지 복사'} aria-label="사용자 메시지 복사">
+              <button className="icon-btn msg-copy" onClick={() => void copyMessage(m)} title={copiedMessageId === m.id ? cv.msgCopied : cv.copyMsgTitle} aria-label={cv.copyUserLabel}>
                 {copiedMessageId === m.id ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
               </button>
             </div>
           ) : (
             <div key={m.id} data-message-id={m.id} className={`msg-row left${messageMatchSet.has(m.id) ? ' msg-find-match' : ''}${messageMatches[messageFindIndex] === m.id ? ' msg-find-active' : ''}`}>
               <div className="bubble-ai">
-                {m.durationMs != null && m.durationMs > 0 && <div className="work-dur">{fmtDur(m.durationMs)}</div>}
+                {m.durationMs != null && m.durationMs > 0 && <div className="work-dur">{fmtDur(m.durationMs, lang)}</div>}
                 <div className="md">
                   <React.Suspense fallback={<div className="md-pending">{linkifyFiles(m.text)}</div>}>
                     <ReactMarkdown
@@ -1977,11 +1989,11 @@ export default function ChatView(props: Props) {
                         }> | null;
                         if (codeEl && codeEl.type === 'code') {
                           const cls = codeEl.props.className || '';
-                          const lang = (cls.match(/language-([\w-]+)/) || [])[1] || '';
+                          const codeLang = (cls.match(/language-([\w-]+)/) || [])[1] || '';
                           const code = extractText(codeEl.props.children).replace(/\n$/, '');
                           return (
                             <CodeBlock
-                              lang={lang}
+                              lang={codeLang}
                               code={code}
                               onInsert={cbRef.current.onInsertToEditor}
                             />
@@ -1998,7 +2010,7 @@ export default function ChatView(props: Props) {
                           return (
                             <button
                               className="file-link"
-                              title={`${rel}:${line} 열기`}
+                              title={formatStr(cv.openFileTitle, { rel, line })}
                               onClick={() => {
                                 const cwd = m.cwd || folder;
                                 const abs = cwd
@@ -2027,28 +2039,28 @@ export default function ChatView(props: Props) {
                   <div className="change-card">
                     <div className="change-head">
                       <DiffIcon size={14} />
-                      <b>파일 {m.changedStats.length}개 편집</b>
+                      <b>{formatStr(cv.editedFiles, { count: m.changedStats.length })}</b>
                       <span className="code-ok">+{m.changedStats.reduce((n, f) => n + f.added, 0)}</span>
                       <span className="code-bad">-{m.changedStats.reduce((n, f) => n + f.deleted, 0)}</span>
                       <span className="head-spacer" />
                       {m.reverted ? (
-                        <span className="timeout-tag">되돌림</span>
+                        <span className="timeout-tag">{cv.revertedTag}</span>
                       ) : (
                         <>
                           <button
                             className="mini-btn"
                             disabled={!!run || reverting === m.id}
                             onClick={() => void doRevert(m)}
-                            title="이 턴의 파일 변경을 되돌립니다"
+                            title={cv.revertHint}
                           >
-                            {reverting === m.id ? '되돌리는 중…' : '실행 취소'}
+                            {reverting === m.id ? cv.reverting : cv.undoRun}
                           </button>
                           <button
                             className="mini-btn"
                             onClick={() => cbRef.current.onOpenGitDiff(m.changedStats![0].file, m.cwd || folder)}
-                            title="첫 번째 파일 diff 열기"
+                            title={cv.reviewFirst}
                           >
-                            리뷰
+                            {cv.reviewBtn}
                           </button>
                         </>
                       )}
@@ -2057,7 +2069,7 @@ export default function ChatView(props: Props) {
                       <button
                         key={f.file}
                         className="change-row"
-                        title={`${f.file} diff 보기`}
+                        title={formatStr(strings.files.diffTitle, { file: f.file })}
                         onClick={() => cbRef.current.onOpenGitDiff(f.file, m.cwd || folder)}
                       >
                         <span className="change-file">{f.file}</span>
@@ -2069,7 +2081,7 @@ export default function ChatView(props: Props) {
                 )}
                 {m.cwd && verifyScripts.length > 0 && (
                   <div className="verify-row">
-                    <span className="verify-label">검증</span>
+                    <span className="verify-label">{cv.verifyLabel}</span>
                     {verifyScripts.map((s) => {
                       const r = m.verify?.find((x) => x.script === s);
                       const busy = verifyRunning?.msgId === m.id && verifyRunning?.script === s;
@@ -2079,7 +2091,7 @@ export default function ChatView(props: Props) {
                           className={r ? (r.ok ? 'vchip ok' : 'vchip bad') : 'vchip'}
                           disabled={!!run || !!verifyRunning}
                           onClick={() => void runVerify(m, s)}
-                          title={r ? `exit ${r.code} · ${new Date(r.ts).toLocaleTimeString()}` : `${s} 실행`}
+                          title={r ? `exit ${r.code} · ${new Date(r.ts).toLocaleTimeString(lang === 'en' ? 'en-US' : 'ko-KR')}` : formatStr(cv.verifyRunTitle, { script: s })}
                         >
                           {busy ? '…' : r ? (r.ok ? <CheckIcon size={12} /> : <XIcon size={12} />) : null}
                           {s}
@@ -2090,7 +2102,7 @@ export default function ChatView(props: Props) {
                 )}
                 {m.verify && m.verify.length > 0 && m.verify[m.verify.length - 1].tail && (
                   <details className="verify-out">
-                    <summary>검증 출력 보기</summary>
+                    <summary>{cv.verifyOut}</summary>
                     <pre>{m.verify[m.verify.length - 1].tail}</pre>
                   </details>
                 )}
@@ -2103,47 +2115,52 @@ export default function ChatView(props: Props) {
                   <div className="msg-meta">
                     {m.usage && (
                       <span
-                        title={`입력 ${(m.usage.inputTokens || 0).toLocaleString()} · 출력 ${(m.usage.outputTokens || 0).toLocaleString()}${m.usage.cachedTokens ? ` · 캐시 ${m.usage.cachedTokens.toLocaleString()}` : ''}${m.usage.reasoningTokens ? ` · 추론 ${m.usage.reasoningTokens.toLocaleString()}` : ''}`}
+                        title={formatStr(cv.tokensTitle, {
+                          in: (m.usage.inputTokens || 0).toLocaleString(),
+                          out: (m.usage.outputTokens || 0).toLocaleString(),
+                          cached: m.usage.cachedTokens ? formatStr(cv.tokensCached, { n: m.usage.cachedTokens.toLocaleString() }) : '',
+                          reasoning: m.usage.reasoningTokens ? formatStr(cv.tokensReasoning, { n: m.usage.reasoningTokens.toLocaleString() }) : '',
+                        })}
                       >
-                        토큰 {fmtTokens((m.usage.inputTokens || 0) + (m.usage.outputTokens || 0))}
+                        {formatStr(cv.tokensLabel, { n: fmtTokens((m.usage.inputTokens || 0) + (m.usage.outputTokens || 0)) })}
                       </span>
                     )}
                     {m.code !== null && m.code !== undefined && (
                       <span className={m.code === 0 ? 'code-ok' : 'code-bad'}>
-                        종료 코드 {m.code}
+                        {formatStr(cv.exitCode, { code: m.code })}
                       </span>
                     )}
-                    {m.cwd && <span title={m.cwd}>실행 위치: {m.cwd}</span>}
+                    {m.cwd && <span title={m.cwd}>{formatStr(cv.runAt, { cwd: m.cwd })}</span>}
                     {m.work && m.work.length > 0 && (
                       <details>
-                        <summary>작업 내역 {m.work.length}</summary>
+                        <summary>{formatStr(cv.workLog, { n: m.work.length })}</summary>
                         <pre className="worklog">{m.work.join('\n')}</pre>
                       </details>
                     )}
                     {m.stderr && (
                       <details>
-                        <summary>stderr 보기</summary>
+                        <summary>{cv.stderrView}</summary>
                         <pre className="stderr">{m.stderr}</pre>
                       </details>
                     )}
-                    {m.timeout && <span className="timeout-tag">시간 초과됨</span>}
+                    {m.timeout && <span className="timeout-tag">{cv.timedOut}</span>}
                     {m.timeout && !run && (
                       <button className="mini-btn" onClick={() => continueRun(m)}>
-                        이어서 계속
+                        {cv.continueBtn}
                       </button>
                     )}
                     {retryPrompts.has(m.id) && !run && (
-                      <button className="mini-btn" title="실패한 프롬프트를 입력창에 복원" onClick={() => restorePromptToComposer(retryPrompts.get(m.id) || '', '실패한 프롬프트를 입력창에 복원했어. 내용을 확인한 뒤 전송해줘.')}>
-                        다시 시도
+                      <button className="mini-btn" title={cv.retryRestoreTitle} onClick={() => restorePromptToComposer(retryPrompts.get(m.id) || '', cv.retryRestored)}>
+                        {strings.common.retry}
                       </button>
                     )}
                   </div>
                 ) : null}
               </div>
-              {m.ts != null && fmtMsgTime(m.ts) && (
-                <span className="msg-time" title={new Date(m.ts).toLocaleString()}>{fmtMsgTime(m.ts)}</span>
+              {m.ts != null && fmtMsgTime(m.ts, lang) && (
+                <span className="msg-time" title={new Date(m.ts).toLocaleString(lang === 'en' ? 'en-US' : 'ko-KR')}>{fmtMsgTime(m.ts, lang)}</span>
               )}
-              <button className="icon-btn msg-copy" onClick={() => void copyMessage(m)} title={copiedMessageId === m.id ? '복사됨' : '메시지 복사'} aria-label="답변 복사">
+              <button className="icon-btn msg-copy" onClick={() => void copyMessage(m)} title={copiedMessageId === m.id ? cv.msgCopied : cv.copyMsgTitle} aria-label={cv.copyAiLabel}>
                 {copiedMessageId === m.id ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
               </button>
             </div>
@@ -2170,7 +2187,7 @@ export default function ChatView(props: Props) {
                 </div>
               ) : (
                 awaitingUserInput
-                  ? <div className="waiting-input-status"><span aria-hidden="true" />Muse가 답변을 기다리고 있어</div>
+                  ? <div className="waiting-input-status"><span aria-hidden="true" />{cv.waitingInput}</div>
                   : <div className="typing">
                     <span />
                     <span />
@@ -2182,21 +2199,21 @@ export default function ChatView(props: Props) {
                   {mspActs.slice(-5).map((a) => (
                     <div key={a.key} className="act-row" title={a.target || a.tool}>
                       <span className={a.live ? 't-dot running' : 't-dot done'} />
-                      <span className="act-tool">{a.toolKo}</span>
+                      <span className="act-tool">{a.toolLabel}</span>
                       {a.target && <span className="act-target">{a.target}</span>}
-                      <span className="act-status">{a.statusKo}</span>
+                      <span className="act-status">{a.statusLabel}</span>
                     </div>
                   ))}
                 </div>
               )}
               <div className="msg-meta">
                 <span>
-                  {awaitingUserInput ? `답변 대기 중 · ${elapsed}초` : `작업 중… ${elapsed}초`} · 수신{' '}
-                  {(streamText.length + streamStderr.length + streamActivity.length).toLocaleString()}자
+                  {awaitingUserInput ? formatStr(cv.waitSecs, { s: elapsed }) : formatStr(cv.workSecs, { s: elapsed })}
+                  {formatStr(cv.receivedChars, { n: (streamText.length + streamStderr.length + streamActivity.length).toLocaleString() })}
                 </span>
                 {(streamStderr || streamActivity) && (
                   <details>
-                    <summary>진행 로그</summary>
+                    <summary>{cv.progressLog}</summary>
                     <pre className="stderr">
                       {(() => {
                         const all = [streamStderr, streamActivity].filter(Boolean).join('\n');
@@ -2221,7 +2238,7 @@ export default function ChatView(props: Props) {
             setShowScrollBottom(false);
           }}
         >
-          <ChevronDownIcon size={15} /> 맨 아래로
+          <ChevronDownIcon size={15} /> {cv.scrollBottom}
         </button>
       )}
 
@@ -2237,16 +2254,16 @@ export default function ChatView(props: Props) {
       <footer className="composer">
         <details className="cmd-preview">
           <summary>
-            <TerminalIcon size={13} /> 실행 명령 미리보기
+            <TerminalIcon size={13} /> {cv.cmdPreview}
           </summary>
           <code>
             {buildCmdPreview(
               settings,
-              input.trim() || '(프롬프트)',
+              input.trim() || cv.cmdPromptPh,
               props.cliResolved || settings.cliPath || 'muse',
             )}
           </code>
-          <div className="cmd-cwd">작업 폴더: {folder || '(설정/홈 폴더)'}</div>
+          <div className="cmd-cwd">{formatStr(cv.cmdCwd, { folder: folder || cv.cmdCwdDefault })}</div>
         </details>
         <div
           className={dropActive || dropPathActive ? 'composer-box composer-drop-active' : 'composer-box'}
@@ -2289,7 +2306,7 @@ export default function ChatView(props: Props) {
               const path = event.dataTransfer.getData('application/x-musician-file-path');
               if (path) {
                 insertPathAtCursor(path);
-                setNotice('프로젝트 상대 경로를 프롬프트에 넣었어.');
+                setNotice(cv.projectPathInserted);
               }
               return;
             }
@@ -2298,56 +2315,56 @@ export default function ChatView(props: Props) {
               try { const filePath = api().getPathForFile(file); return filePath ? [filePath] : []; }
               catch { return []; }
             });
-            if (files.length && paths.length === 0) setNotice('파일 경로를 가져오지 못했습니다. 앱 안으로 파일을 직접 끌어다 놓아주세요.');
+            if (files.length && paths.length === 0) setNotice(cv.dropPathFailed);
             else void attachFiles(paths);
           }}
         >
-          {(dropActive || dropPathActive) && <div className="composer-drop-overlay">{dropPathActive ? <FileIcon size={18} /> : <ClipIcon size={18} />} {dropPathActive ? '놓아서 상대 경로 삽입' : '놓아서 파일 첨부'}</div>}
-          {fileMention && <div className="composer-file-mention" id="composer-file-mention-results" role="listbox" aria-label="프로젝트 파일 경로 자동완성" aria-busy={fileMentionLoading}>
-            <div className="composer-file-mention-heading">파일 경로 삽입 <span>↑↓ 선택 · Enter 삽입 · Esc 닫기</span></div>
-            {!props.folder ? <div className="composer-file-mention-empty">프로젝트 폴더를 먼저 열어주세요.</div>
-              : !hasBridge() ? <div className="composer-file-mention-empty">파일 자동완성은 Musician 데스크톱 앱에서 사용할 수 있어요.</div>
-                : !fileMention.query ? <div className="composer-file-mention-empty">파일 이름을 계속 입력하세요.</div>
-                  : fileMentionLoading ? <div className="composer-file-mention-empty">파일을 검색하는 중…</div>
+          {(dropActive || dropPathActive) && <div className="composer-drop-overlay">{dropPathActive ? <FileIcon size={18} /> : <ClipIcon size={18} />} {dropPathActive ? cv.dropInsert : cv.dropAttach}</div>}
+          {fileMention && <div className="composer-file-mention" id="composer-file-mention-results" role="listbox" aria-label={cv.mentionLabel} aria-busy={fileMentionLoading}>
+            <div className="composer-file-mention-heading">{cv.mentionHead} <span>{cv.mentionKeys}</span></div>
+            {!props.folder ? <div className="composer-file-mention-empty">{cv.mentionNoFolder}</div>
+              : !hasBridge() ? <div className="composer-file-mention-empty">{cv.mentionNoApp}</div>
+                : !fileMention.query ? <div className="composer-file-mention-empty">{cv.mentionKeepTyping}</div>
+                  : fileMentionLoading ? <div className="composer-file-mention-empty">{cv.mentionSearching}</div>
                     : fileMentionResults.length ? fileMentionResults.map((result, index) => (
                       <button type="button" role="option" aria-selected={index === fileMentionIndex} id={`composer-file-mention-${index}`} key={result.path} className={index === fileMentionIndex ? 'composer-file-mention-option active' : 'composer-file-mention-option'} title={result.relativePath} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setFileMentionIndex(index)} onClick={() => acceptFileMention(result)}>
                         <FileTypeIcon size={15} name={result.relativePath} />
                         <span>{result.relativePath.split('/').pop() || result.relativePath}</span>
                         <small>{result.relativePath}</small>
                       </button>
-                    )) : <div className="composer-file-mention-empty">일치하는 프로젝트 파일이 없어요.</div>}
+                    )) : <div className="composer-file-mention-empty">{cv.mentionNone}</div>}
           </div>}
-          {slash && <div className="composer-slash" id="composer-slash-results" role="listbox" aria-label="슬래시 명령">
-            <div className="composer-slash-heading">슬래시 명령 <span>↑↓ 선택 · Enter 실행 · Esc 닫기</span></div>
+          {slash && <div className="composer-slash" id="composer-slash-results" role="listbox" aria-label={cv.slashLabel}>
+            <div className="composer-slash-heading">{cv.slashHead} <span>{cv.slashKeys}</span></div>
             {slashResults.length ? slashResults.map((cmd, index) => (
               <button type="button" role="option" aria-selected={index === slashIndex} id={`composer-slash-${index}`} key={cmd.id} className={index === slashIndex ? 'composer-slash-option active' : 'composer-slash-option'} title={cmd.hint} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSlashIndex(index)} onClick={() => acceptSlashCommand(index)}>
                 <code>{cmd.name}</code>
                 <span>{cmd.title}</span>
                 <small>{cmd.hint}</small>
               </button>
-            )) : <div className="composer-file-mention-empty">일치하는 명령이 없어요. Enter를 누르면 그대로 전송돼요.</div>}
+            )) : <div className="composer-file-mention-empty">{cv.slashNone}</div>}
           </div>}
           {(queuedPrompts.length > 0 || queuePaused) && (
-            <div className="queued-prompts" aria-label="전송 대기열">
+            <div className="queued-prompts" aria-label={cv.queueLabel}>
               <div className="queued-prompts-head">
-                <span>전송 대기열</span>
+                <span>{cv.queueHead}</span>
                 <span className="queued-prompts-count">{queuedPrompts.length}</span>
-                <span className="queued-prompts-info">{queuePaused ? '자동 실행 일시중지 · 요청 보존 중' : run && props.isActiveSession ? '현재 대화 완료 시 자동 실행' : run ? '이 대화로 돌아오면 이어서 실행' : '직접 실행 대기 중'}</span>
+                <span className="queued-prompts-info">{queuePaused ? cv.queuePausedInfo : run && props.isActiveSession ? cv.queueAutoActive : run ? cv.queueAutoAway : cv.queueManual}</span>
                 <span className="queued-prompts-actions">
-                  <button type="button" className="queue-pause-toggle" onClick={toggleQueuePause} title={queuePaused ? '대기열 자동 실행 다시 켜기' : '현재 작업 뒤 자동 실행을 멈추고 요청을 보존'}>{queuePaused ? '자동 실행 재개' : '자동 실행 일시중지'}</button>
-                  {!run && queuedPrompts.length > 0 && <button type="button" className="queued-run-next" onClick={runNextQueuedPrompt} title="대기열의 다음 요청 실행"><SendIcon size={12} /> 다음 실행</button>}
+                  <button type="button" className="queue-pause-toggle" onClick={toggleQueuePause} title={queuePaused ? cv.queueResumeTitle : cv.queuePauseTitle}>{queuePaused ? cv.queueResume : cv.queuePause}</button>
+                  {!run && queuedPrompts.length > 0 && <button type="button" className="queued-run-next" onClick={runNextQueuedPrompt} title={cv.queueRunNextTitle}><SendIcon size={12} /> {cv.queueRunNext}</button>}
                 </span>
               </div>
-              {queuedPrompts.length === 0 && <div className="queued-empty">대기 중인 요청은 없어. 다음 실행부터 자동으로 이어져.</div>}
+              {queuedPrompts.length === 0 && <div className="queued-empty">{cv.queueEmpty}</div>}
               {queuedPrompts.map((prompt, index) => (
                 <div className="queued-prompt" key={`${index}:${prompt.slice(0, 24)}`} title={prompt}>
                   <span className="queued-prompt-index">{index + 1}</span>
                   <span className="queued-prompt-text">{prompt}</span>
                   <span className="queued-prompt-actions">
-                    <button type="button" className="queue-order-btn" onClick={() => editQueuedPrompt(index)} title="입력창에서 수정" aria-label={`${index + 1}번째 요청 입력창에서 수정`}><PencilIcon size={12} /></button>
-                    <button type="button" className="queue-order-btn" disabled={index === 0} onClick={() => setQueuedPrompts((current) => moveQueuedPrompt(current, index, -1))} title="앞으로 이동" aria-label={`${index + 1}번째 요청 앞으로 이동`}>↑</button>
-                    <button type="button" className="queue-order-btn" disabled={index === queuedPrompts.length - 1} onClick={() => setQueuedPrompts((current) => moveQueuedPrompt(current, index, 1))} title="뒤로 이동" aria-label={`${index + 1}번째 요청 뒤로 이동`}>↓</button>
-                    <button type="button" className="icon-btn" onClick={() => setQueuedPrompts((current) => removeQueuedPrompt(current, index))} title="대기열에서 제거" aria-label={`${index + 1}번째 대기 요청 제거`}><XIcon size={12} /></button>
+                    <button type="button" className="queue-order-btn" onClick={() => editQueuedPrompt(index)} title={cv.queueEditTitle} aria-label={formatStr(cv.queueEditLabel, { n: index + 1 })}><PencilIcon size={12} /></button>
+                    <button type="button" className="queue-order-btn" disabled={index === 0} onClick={() => setQueuedPrompts((current) => moveQueuedPrompt(current, index, -1))} title={cv.queueFwdTitle} aria-label={formatStr(cv.queueFwdLabel, { n: index + 1 })}>↑</button>
+                    <button type="button" className="queue-order-btn" disabled={index === queuedPrompts.length - 1} onClick={() => setQueuedPrompts((current) => moveQueuedPrompt(current, index, 1))} title={cv.queueBackTitle} aria-label={formatStr(cv.queueBackLabel, { n: index + 1 })}>↓</button>
+                    <button type="button" className="icon-btn" onClick={() => setQueuedPrompts((current) => removeQueuedPrompt(current, index))} title={cv.queueRemoveTitle} aria-label={formatStr(cv.queueRemoveLabel, { n: index + 1 })}><XIcon size={12} /></button>
                   </span>
                 </div>
               ))}
@@ -2360,7 +2377,7 @@ export default function ChatView(props: Props) {
                 .map((a) => (
                   <span key={a.path} className="attach-img" title={a.path}>
                     {a.dataUrl ? <img src={a.dataUrl} alt={a.name} /> : <FileTypeIcon size={24} name={a.name} />}
-                    <button type="button" className="icon-btn attach-x" onClick={() => removeAttach(a.path)} title="제거" aria-label={`${a.name} 첨부 제거`}>
+                    <button type="button" className="icon-btn attach-x" onClick={() => removeAttach(a.path)} title={cv.attachRemove} aria-label={formatStr(cv.attachRemoveLabel, { name: a.name })}>
                       <XIcon size={12} />
                     </button>
                     <span className="attach-img-name">{a.name}</span>
@@ -2371,7 +2388,7 @@ export default function ChatView(props: Props) {
                 .map((a) => (
                   <span key={a.path} className="attach-chip" title={`${a.path}\n\n${a.content.slice(0, 500)}`}>
                     <FileTypeIcon size={14} name={a.name} /> {a.name}
-                    <button type="button" className="icon-btn" onClick={() => removeAttach(a.path)} title="제거" aria-label={`${a.name} 첨부 제거`}>
+                    <button type="button" className="icon-btn" onClick={() => removeAttach(a.path)} title={cv.attachRemove} aria-label={formatStr(cv.attachRemoveLabel, { name: a.name })}>
                       <XIcon size={12} />
                     </button>
                   </span>
@@ -2394,9 +2411,7 @@ export default function ChatView(props: Props) {
             aria-controls={fileMention ? 'composer-file-mention-results' : slash ? 'composer-slash-results' : undefined}
             aria-activedescendant={slash && slashResults[slashIndex] ? `composer-slash-${slashIndex}` : fileMention && fileMentionResults[fileMentionIndex] ? `composer-file-mention-${fileMentionIndex}` : undefined}
             aria-keyshortcuts="ArrowUp ArrowDown Enter Shift+Enter Control+Enter Meta+Enter"
-            title={run
-              ? 'Ctrl+Enter로 현재 작업 뒤에 실행할 대기열에 추가할 수 있습니다.'
-              : '입력창이 비어 있을 때 ↑를 눌러 이전 프롬프트를 불러올 수 있어요.'}
+            title={run ? cv.composerQueueHint : cv.composerHistoryHint}
             onKeyDown={(e) => {
               const atPromptStart = e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0;
               const composing = e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
@@ -2460,12 +2475,12 @@ export default function ChatView(props: Props) {
               if (!file) return;
               event.preventDefault();
               if (run) {
-                setNotice('실행 중에는 첨부 파일을 대기열에 넣을 수 없어요. 텍스트 요청만 대기열에 추가할 수 있습니다.');
+                setNotice(cv.pasteWhileRun);
                 return;
               }
               void attachPastedImage(file);
             }}
-            placeholder={run ? (awaitingUserInput ? 'Muse가 답변을 기다리는 중… 다음 요청을 미리 작성할 수 있어요.' : '작업 중… 다음 요청을 미리 작성할 수 있어요.') : 'Muse에게 보내기 (Enter 전송, / 명령, 시계 예약)'}
+            placeholder={run ? (awaitingUserInput ? cv.composerPhWait : cv.composerPhRun) : cv.composerPh}
             rows={3}
           />
           <div className="composer-bar">
@@ -2473,8 +2488,8 @@ export default function ChatView(props: Props) {
               type="button"
               className="icon-btn tool-btn"
               onClick={() => void pickFiles()}
-              title="파일 첨부"
-              aria-label="파일 첨부"
+              title={cv.attachBtn}
+              aria-label={cv.attachBtn}
               disabled={!!run}
             >
               <ClipIcon size={17} />
@@ -2483,8 +2498,8 @@ export default function ChatView(props: Props) {
               type="button"
               className={micOn ? 'icon-btn tool-btn mic on' : 'icon-btn tool-btn mic'}
               onClick={toggleMic}
-              title={micOn ? '음성 입력 중지' : '음성 입력'}
-              aria-label={micOn ? '음성 입력 중지' : '음성 입력'}
+              title={micOn ? cv.micStop : cv.micBtn}
+              aria-label={micOn ? cv.micStop : cv.micBtn}
               disabled={!!run}
             >
               <MicIcon size={17} />
@@ -2493,23 +2508,23 @@ export default function ChatView(props: Props) {
               type="button"
               className="icon-btn tool-btn"
               onClick={() => props.onSchedulePrompt(input)}
-              title={attach.length > 0 ? '첨부가 있으면 예약할 수 없어 (텍스트만 예약돼)' : '입력 내용을 나중에 자동 실행되도록 예약'}
-              aria-label="프롬프트 예약"
+              title={attach.length > 0 ? cv.schedBlockedTitle : cv.schedTitle}
+              aria-label={cv.schedLabel}
               disabled={!!run || !input.trim() || attach.length > 0}
             >
               <ClockIcon size={17} />
             </button>
-            {run && input.trim() && <span className="composer-draft-hint" role="status">다음 요청 초안 · + 버튼 또는 Ctrl+Enter로 대기열 추가</span>}
+            {run && input.trim() && <span className="composer-draft-hint" role="status">{cv.draftHint}</span>}
             <span className="bar-spacer" />
             <button
               className="tune-btn"
               onClick={() => setTuneOpen(true)}
               disabled={!!run}
-              title="모델 · 권한 · 추론 설정"
+              title={cv.tuneBtnTitle}
             >
               <SlidersIcon size={14} />
               <span className="tune-btn-text">
-                {settings.model ? modelLabel(settings.model) : 'CLI 기본값'}
+                {settings.model ? modelLabel(settings.model) : strings.settings.cliDefault}
               </span>
             </button>
             {session.engine === 'msp' ? <span className="tag tag-msp">MSP</span> : <span className="tag">exec</span>}
@@ -2520,10 +2535,10 @@ export default function ChatView(props: Props) {
                   className="send-btn queue"
                   onClick={queuePrompt}
                   disabled={!input.trim() || attach.length > 0 || queuedPrompts.length >= MAX_QUEUED_PROMPTS}
-                  title={attach.length > 0 ? '첨부 파일이 포함된 요청은 대기열에 추가할 수 없습니다.' : '현재 작업이 정상 완료된 뒤 실행할 요청 추가 (Ctrl+Enter)'}
-                  aria-label="현재 작업 뒤에 요청 추가"
+                  title={attach.length > 0 ? cv.queueAddBlockedTitle : cv.queueAddTitle}
+                  aria-label={cv.queueAddLabel}
                 ><PlusIcon size={16} /></button>
-                <button type="button" className="send-btn stop" onClick={cancel} title="중지 · 남은 대기열은 보존" aria-label="응답 생성 중지">
+                <button type="button" className="send-btn stop" onClick={cancel} title={cv.stopTitle} aria-label={cv.stopLabel}>
                   <StopIcon size={15} />
                 </button>
               </>
@@ -2533,8 +2548,8 @@ export default function ChatView(props: Props) {
                 className="send-btn"
                 onClick={() => send()}
                 disabled={!input.trim() && attach.length === 0}
-                title="전송 (Enter)"
-                aria-label="메시지 전송"
+                title={cv.sendTitle}
+                aria-label={cv.sendLabel}
               >
                 <SendIcon size={17} />
               </button>
@@ -2547,13 +2562,16 @@ export default function ChatView(props: Props) {
           className="xp-row"
           title={
             wRem != null && quota
-              ? `5시간 할당량 남음 ${wRem.toFixed(1)}% · ${fmtReset(quota.window.resetsAtMs)} · 이 앱 토큰 ${h5Total.toLocaleString()} (입력 ${tokenWin.h5.input.toLocaleString()} · 출력 ${tokenWin.h5.output.toLocaleString()})`
-              : `5시간 토큰 ${h5Total.toLocaleString()} (입력 ${tokenWin.h5.input.toLocaleString()} · 출력 ${tokenWin.h5.output.toLocaleString()})${
-                  wkTotal > 0 ? ` — 주간의 ${((h5Total / wkTotal) * 100).toFixed(1)}%` : ''
-                }`
+              ? formatStr(cv.xp5Title, { pct: wRem.toFixed(1), reset: fmtReset(quota.window.resetsAtMs, lang), total: h5Total.toLocaleString(), in: tokenWin.h5.input.toLocaleString(), out: tokenWin.h5.output.toLocaleString() })
+              : formatStr(cv.xp5TitleNoQuota, {
+                  total: h5Total.toLocaleString(),
+                  in: tokenWin.h5.input.toLocaleString(),
+                  out: tokenWin.h5.output.toLocaleString(),
+                  share: wkTotal > 0 ? formatStr(cv.xp5Share, { pct: ((h5Total / wkTotal) * 100).toFixed(1) }) : '',
+                })
           }
         >
-          <span className="xp-label">5시간</span>
+          <span className="xp-label">{cv.xp5Label}</span>
           <div className="xp-track">
             <div
               className={wRem != null && wRem <= 10 ? 'xp-fill w5 crit' : 'xp-fill w5'}
@@ -2566,11 +2584,11 @@ export default function ChatView(props: Props) {
           className="xp-row"
           title={
             kRem != null && quota
-              ? `주간 할당량 남음 ${kRem.toFixed(1)}% · ${fmtReset(quota.weekly.resetsAtMs)} · 이 앱 토큰 ${wkTotal.toLocaleString()} (입력 ${tokenWin.wk.input.toLocaleString()} · 출력 ${tokenWin.wk.output.toLocaleString()})`
-              : `주간 토큰 ${wkTotal.toLocaleString()} (입력 ${tokenWin.wk.input.toLocaleString()} · 출력 ${tokenWin.wk.output.toLocaleString()})`
+              ? formatStr(cv.xpWkTitle, { pct: kRem.toFixed(1), reset: fmtReset(quota.weekly.resetsAtMs, lang), total: wkTotal.toLocaleString(), in: tokenWin.wk.input.toLocaleString(), out: tokenWin.wk.output.toLocaleString() })
+              : formatStr(cv.xpWkTitleNoQuota, { total: wkTotal.toLocaleString(), in: tokenWin.wk.input.toLocaleString(), out: tokenWin.wk.output.toLocaleString() })
           }
         >
-          <span className="xp-label">주간</span>
+          <span className="xp-label">{cv.xpWkLabel}</span>
           <div className="xp-track">
             <div
               className={kRem != null && kRem <= 10 ? 'xp-fill wk crit' : 'xp-fill wk'}
