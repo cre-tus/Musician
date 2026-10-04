@@ -339,6 +339,9 @@ export interface MudexApi {
   gitStage: (cwd: string, files: string[], staged: boolean) => Promise<{ ok: boolean; error?: string }>;
   gitCommit: (cwd: string, message: string) => Promise<{ ok: boolean; hash?: string; error?: string }>;
   gitBranch: (cwd: string) => Promise<{ ok: boolean; branch?: string; counts?: string; remote?: string; error?: string }>;
+  gitBranches: (cwd: string) => Promise<{ ok: boolean; current?: string; branches?: string[]; error?: string }>;
+  gitCheckout: (cwd: string, branch: string) => Promise<{ ok: boolean; branch?: string; error?: string }>;
+  gitCreateBranch: (cwd: string, branch: string) => Promise<{ ok: boolean; branch?: string; error?: string }>;
   gitPull: (cwd: string) => Promise<{ ok: boolean; output?: string; error?: string }>;
   gitPush: (cwd: string) => Promise<{ ok: boolean; error?: string }>;
   gitClone: (url: string, target: string) => Promise<{ ok: boolean; path?: string; error?: string }>;

@@ -289,7 +289,7 @@ function TreeNode({
         )}
         {entry.isDir ? <FolderIcon size={15} open={open} className="tree-folder-icon" /> : <FileTypeIcon size={17} name={entry.name} />}
         <span className="tree-name">{entry.name}</span>
-        {changeKind && <span className={`tree-change-indicator status-${changeKind.toLowerCase()}${entry.isDir && !directKind ? ' directory' : ''}`} title={formatStr(s.tree.gitState, { kind: changeKind })} aria-label={formatStr(s.tree.gitState, { kind: changeKind })}>{entry.isDir && !directKind ? '•' : changeKind}</span>}
+        {changeKind && <span className={`tree-change-indicator status-${changeKind.toLowerCase()}${entry.isDir && !directKind ? ' directory' : ''}`} title={formatStr(s.tree.gitState, { kind: changeKind, label: s.gitKind[changeKind.toLowerCase()] || changeKind })} aria-label={formatStr(s.tree.gitState, { kind: changeKind, label: s.gitKind[changeKind.toLowerCase()] || changeKind })}>{entry.isDir && !directKind ? '•' : changeKind}</span>}
       </div>
         <button
           type="button"

@@ -47,4 +47,17 @@ function redactRemoteUrl(value) {
   }
 }
 
-module.exports = { isSafeRepoRelativePath, isSafeCloneSource, redactRemoteUrl };
+// Branch names ride as one argv element to `git switch` / `git switch -c`
+// (no shell), but a name starting with '-' would parse as a git OPTION.
+// Allow the everyday branch charset only; git rejects the rest anyway.
+function isSafeBranchName(value) {
+  if (typeof value !== 'string') return false;
+  const s = value.trim();
+  if (!s || s.length > 250 || s.includes('\0')) return false;
+  if (s.startsWith('-') || s.startsWith('/')) return false;
+  if (!/^[A-Za-z0-9._/\-]+$/.test(s)) return false;
+  if (s.includes('..') || s.includes('//') || s.endsWith('/') || s.endsWith('.lock')) return false;
+  return true;
+}
+
+module.exports = { isSafeRepoRelativePath, isSafeCloneSource, redactRemoteUrl, isSafeBranchName };

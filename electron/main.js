@@ -26,7 +26,7 @@ const { TerminalHost } = require('./terminal');
 const { searchFiles, searchInFiles } = require('./workspace-search');
 const { WorkspaceWatcher } = require('./workspace-watcher');
 const { normalizeExternalLink } = require('./external-link');
-const { isSafeCloneSource, isSafeRepoRelativePath, redactRemoteUrl } = require('./git-safety');
+const { isSafeBranchName, isSafeCloneSource, isSafeRepoRelativePath, redactRemoteUrl } = require('./git-safety');
 const { createProjectSessionCache } = require('./codex-session-cache');
 const { createProjectPathMatcher } = require('./project-path');
 const { showWindowsToastAsync } = require('../scripts/windows-toast');
@@ -1238,6 +1238,47 @@ ipcMain.handle('mudex:git-branch', async (_e, { cwd }) => {
     counts: counts.ok ? String(counts.stdout || '') : '',
     remote: remote.ok ? redactRemoteUrl(remote.stdout) : '',
   };
+});
+
+ipcMain.handle('mudex:git-branches', async (_e, { cwd }) => {
+  if (!cwd) return { ok: false, error: 'NO_CWD' };
+  const b = await runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!b.ok) return { ok: false, error: String(b.stderr || b.error || `exit ${b.code}`).slice(0, 200) };
+  const list = await runGit(cwd, ['branch', '--format=%(refname:short)']);
+  if (!list.ok) return { ok: false, error: String(list.stderr || list.error || `exit ${list.code}`).slice(0, 200) };
+  const branches = String(list.stdout || '')
+    .split('\n')
+    .map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l).trim())
+    .filter((l) => l.length > 0 && isSafeBranchName(l))
+    .slice(0, 200);
+  return { ok: true, current: String(b.stdout || '').trim(), branches };
+});
+
+ipcMain.handle('mudex:git-checkout', async (_e, { cwd, branch }) => {
+  if (!cwd) return { ok: false, error: 'NO_CWD' };
+  const name = String(branch || '').trim();
+  if (!isSafeBranchName(name)) return { ok: false, error: 'BAD_BRANCH' };
+  const r = await runGit(cwd, ['switch', name], 60000);
+  if (!r.ok) {
+    const errText = `${r.stderr || ''} ${r.error || ''}`;
+    if (/Your local changes|would be overwritten|Please commit|stash/i.test(errText)) return { ok: false, error: 'DIRTY_TREE' };
+    return { ok: false, error: String(r.stderr || r.error || `exit ${r.code}`).slice(0, 300) };
+  }
+  return { ok: true, branch: name };
+});
+
+ipcMain.handle('mudex:git-create-branch', async (_e, { cwd, branch }) => {
+  if (!cwd) return { ok: false, error: 'NO_CWD' };
+  const name = String(branch || '').trim();
+  if (!isSafeBranchName(name)) return { ok: false, error: 'BAD_BRANCH' };
+  const r = await runGit(cwd, ['switch', '-c', name], 60000);
+  if (!r.ok) {
+    const errText = `${r.stderr || ''} ${r.error || ''}`;
+    if (/already exists/i.test(errText)) return { ok: false, error: 'BRANCH_EXISTS' };
+    if (/not a valid branch name|invalid reference/i.test(errText)) return { ok: false, error: 'BAD_BRANCH' };
+    return { ok: false, error: String(r.stderr || r.error || `exit ${r.code}`).slice(0, 300) };
+  }
+  return { ok: true, branch: name };
 });
 
 ipcMain.handle('mudex:git-pull', async (_e, { cwd }) => {

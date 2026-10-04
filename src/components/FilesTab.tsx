@@ -76,20 +76,39 @@ export default function FilesTab(props: Props) {
   const [commitMessage, setCommitMessage] = useState('');
   const [commitBusy, setCommitBusy] = useState(false);
   const [commitError, setCommitError] = useState('');
+  const [commitSelection, setCommitSelection] = useState<Record<string, boolean>>({});
   const stagedCount = changedFiles.filter((f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()]).length;
   const [gitBranch, setGitBranch] = useState<{ branch: string; ahead: number; behind: number; remote: string } | null>(null);
   const [gitSyncBusy, setGitSyncBusy] = useState<'pull' | 'push' | null>(null);
+  const [pushOpen, setPushOpen] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneUrl, setCloneUrl] = useState('');
   const [cloneTarget, setCloneTarget] = useState('');
   const [cloneBusy, setCloneBusy] = useState(false);
   const [cloneError, setCloneError] = useState('');
+  const [branchOpen, setBranchOpen] = useState(false);
+  const [branchList, setBranchList] = useState<string[] | null>(null);
+  const [branchCurrent, setBranchCurrent] = useState('');
+  const [branchBusy, setBranchBusy] = useState<string | null>(null);
+  const [branchCreateBusy, setBranchCreateBusy] = useState(false);
+  const [branchError, setBranchError] = useState('');
+  const [newBranchName, setNewBranchName] = useState('');
+
+  const absForChanged = (file: string) => `${folder}${folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\'}${file.replace(/\//g, '\\')}`;
+
+  const openCommit = () => {
+    // Default the checklist to the staged set when one exists; otherwise everything.
+    const staged = changedFiles.filter((f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()]);
+    const initial = staged.length > 0 ? staged : changedFiles;
+    setCommitSelection(Object.fromEntries(initial.map((f) => [f, true])));
+    setCommitError('');
+    setCommitOpen(true);
+  };
 
   const toggleStaged = async (file: string, staged: boolean) => {
     if (!folder || !hasBridge()) return;
-    const abs = `${folder}${folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\'}${file.replace(/\//g, '\\')}`;
     try {
-      const result = await api().gitStage(folder, [abs], staged);
+      const result = await api().gitStage(folder, [absForChanged(file)], staged);
       if (!result.ok) props.onNotice(result.error === 'OUTSIDE_WORKSPACE' ? ft.stageOutside : result.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : result.error || ft.stageFailed);
       onRefreshChanged();
     } catch (error) {
@@ -103,13 +122,39 @@ export default function FilesTab(props: Props) {
       setCommitError(checked.error === 'MESSAGE_TOO_LONG' ? ft.commitTooLong : ft.commitNeedMsg);
       return;
     }
+    const selected = changedFiles.filter((f) => commitSelection[f]);
+    if (selected.length === 0) {
+      setCommitError(ft.commitNoneSelected);
+      return;
+    }
     setCommitBusy(true);
     setCommitError('');
     try {
+      // Stage exactly the checked set, then commit through the app handler.
+      const toAdd = selected.filter((f) => !changedStaged[f.replace(/\\/g, '/').toLowerCase()]).map(absForChanged);
+      const selectedSet = new Set(selected);
+      const toRemove = changedFiles.filter((f) => !selectedSet.has(f) && changedStaged[f.replace(/\\/g, '/').toLowerCase()]).map(absForChanged);
+      if (toAdd.length > 0) {
+        const added = await api().gitStage(folder, toAdd, false);
+        if (!added.ok) {
+          setCommitError(added.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : added.error || ft.commitStageFailed);
+          onRefreshChanged();
+          return;
+        }
+      }
+      if (toRemove.length > 0) {
+        const removed = await api().gitStage(folder, toRemove, true);
+        if (!removed.ok) {
+          setCommitError(removed.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : removed.error || ft.commitStageFailed);
+          onRefreshChanged();
+          return;
+        }
+      }
       const done = await props.onCommitFiles(checked.message!);
       if (done) {
         setCommitOpen(false);
         setCommitMessage('');
+        setCommitSelection({});
       } else {
         setCommitError(ft.commitFailed);
       }
@@ -148,6 +193,73 @@ export default function FilesTab(props: Props) {
     } finally {
       setGitSyncBusy(null);
       void refreshGitBranch();
+    }
+  };
+
+  const openBranchDialog = async () => {
+    if (!folder || !hasBridge()) return;
+    setBranchError('');
+    setBranchList(null);
+    setBranchOpen(true);
+    try {
+      const r = await api().gitBranches(folder);
+      if (!r.ok || !r.branches) {
+        setBranchError(r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error || ft.branchLoadFailed);
+        return;
+      }
+      const current = r.current || '';
+      const rest = r.branches.filter((b) => b !== current);
+      setBranchCurrent(current);
+      setBranchList(current ? [current, ...rest] : rest);
+      if (current && (!gitBranch || gitBranch.branch !== current)) void refreshGitBranch();
+    } catch (error) {
+      setBranchError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const switchBranch = async (name: string) => {
+    if (!folder || !hasBridge() || branchBusy || branchCreateBusy) return;
+    setBranchBusy(name);
+    setBranchError('');
+    try {
+      const r = await api().gitCheckout(folder, name);
+      if (!r.ok) {
+        setBranchError(r.error === 'DIRTY_TREE' ? ft.branchDirty : r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error || ft.branchFailed);
+        return;
+      }
+      props.onNotice(formatStr(ft.branchSwitched, { branch: r.branch || name }));
+      setBranchOpen(false);
+      void refreshGitBranch();
+      onRefreshChanged();
+      props.onRefreshTree();
+    } catch (error) {
+      setBranchError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBranchBusy(null);
+    }
+  };
+
+  const createBranch = async () => {
+    const name = newBranchName.trim();
+    if (!folder || !hasBridge() || !name || branchBusy || branchCreateBusy) return;
+    setBranchCreateBusy(true);
+    setBranchError('');
+    try {
+      const r = await api().gitCreateBranch(folder, name);
+      if (!r.ok) {
+        setBranchError(r.error === 'BRANCH_EXISTS' ? ft.branchExists : r.error === 'BAD_BRANCH' ? ft.branchBadName : r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error || ft.branchFailed);
+        return;
+      }
+      props.onNotice(formatStr(ft.branchCreated, { branch: r.branch || name }));
+      setNewBranchName('');
+      setBranchOpen(false);
+      void refreshGitBranch();
+      onRefreshChanged();
+      props.onRefreshTree();
+    } catch (error) {
+      setBranchError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBranchCreateBusy(false);
     }
   };
 
@@ -752,16 +864,16 @@ export default function FilesTab(props: Props) {
               <RefreshIcon size={13} />
             </button>
             {changedFiles.length > 0 && (
-              <button className="btn git-commit-open" type="button" title={stagedCount > 0 ? formatStr(ft.commitStagedTitle, { count: stagedCount }) : ft.commitNoneTitle} onClick={() => { setCommitError(''); setCommitOpen(true); }}>
+              <button className="btn git-commit-open" type="button" title={stagedCount > 0 ? formatStr(ft.commitStagedTitle, { count: stagedCount }) : ft.commitNoneTitle} onClick={() => openCommit()}>
                 {ft.commitBtn}{stagedCount > 0 ? ` ${stagedCount}` : ''}
               </button>
             )}
           </div>
           <div className="git-remote-row">
             {gitBranch && (
-              <span className="git-branch" title={gitBranch.remote || ft.noRemote} aria-label={formatStr(ft.branchLabel, { branch: gitBranch.branch })}>
+              <button className="git-branch" type="button" title={ft.branchBadgeTitle} aria-label={formatStr(ft.branchLabel, { branch: gitBranch.branch })} onClick={() => void openBranchDialog()}>
                 {gitBranch.branch}{gitBranch.ahead > 0 ? ` ↑${gitBranch.ahead}` : ''}{gitBranch.behind > 0 ? ` ↓${gitBranch.behind}` : ''}
-              </span>
+              </button>
             )}
             {gitBranch && (
               <button className="mini-btn" type="button" title={ft.pullTitle} aria-label={ft.syncPull} disabled={!!gitSyncBusy} onClick={() => void doGitSync('pull')}>
@@ -769,7 +881,7 @@ export default function FilesTab(props: Props) {
               </button>
             )}
             {gitBranch && (
-              <button className="mini-btn" type="button" title={ft.pushTitle} aria-label={ft.syncPush} disabled={!!gitSyncBusy} onClick={() => void doGitSync('push')}>
+              <button className="mini-btn" type="button" title={ft.pushTitle} aria-label={ft.syncPush} disabled={!!gitSyncBusy} onClick={() => { void refreshGitBranch(); setPushOpen(true); }}>
                 {gitSyncBusy === 'push' ? ft.pushing : ft.syncPush}
               </button>
             )}
@@ -786,7 +898,7 @@ export default function FilesTab(props: Props) {
                 const kind = changedKinds[kindKey] || 'M';
                 const staged = changedStaged[kindKey] === true;
                 return (
-                  <div key={f} className="changed-row">
+                  <div key={f} className={`changed-row kind-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`}>
                     {kind !== 'C' && (
                       <button
                         type="button"
@@ -806,7 +918,7 @@ export default function FilesTab(props: Props) {
                     >
                       <FileTypeIcon size={15} name={f} />
                       <span className="changed-name">{f}</span>
-                      <span className={`git-status-badge status-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`} title={staged ? ft.gitStaged : ft.gitState}>{kind}</span>
+                      <span className={`git-status-badge status-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`} title={formatStr(staged ? ft.gitStaged : ft.gitState, { label: strings.gitKind[kind.toLowerCase()] || kind, kind })}>{kind}</span>
                     </button>
                   </div>
                 );
@@ -821,7 +933,28 @@ export default function FilesTab(props: Props) {
         }}>
           <div className="modal-header"><h3 id="git-commit-title">{ft.commitDlgTitle}</h3></div>
           <div className="modal-body">
-            <p className="modal-note">{formatStr(ft.commitNote, { count: stagedCount })}</p>
+            <p className="modal-note">{formatStr(ft.commitSelectedNote, { count: changedFiles.filter((f) => commitSelection[f]).length })}</p>
+            <div className="commit-file-head">
+              <span>{ft.commitFilesTitle}</span>
+              <span className="commit-file-actions">
+                <button type="button" className="mini-btn" disabled={commitBusy} onClick={() => setCommitSelection(Object.fromEntries(changedFiles.map((f) => [f, true])))}>{ft.commitSelectAll}</button>
+                <button type="button" className="mini-btn" disabled={commitBusy} onClick={() => setCommitSelection({})}>{ft.commitDeselectAll}</button>
+              </span>
+            </div>
+            <div className="commit-file-list" role="group" aria-label={ft.commitFilesTitle}>
+              {changedFiles.filter((f) => (changedKinds[f.replace(/\\/g, '/').toLowerCase()] || 'M') !== 'C').map((f) => {
+                const kindKey = f.replace(/\\/g, '/').toLowerCase();
+                const kind = changedKinds[kindKey] || 'M';
+                return (
+                  <label key={f} className={`commit-file-row kind-${kind.toLowerCase()}${commitSelection[f] ? ' is-checked' : ' is-unchecked'}`}>
+                    <input type="checkbox" checked={!!commitSelection[f]} disabled={commitBusy} onChange={() => setCommitSelection((prev) => ({ ...prev, [f]: !prev[f] }))} />
+                    <FileTypeIcon size={14} name={f} />
+                    <span className="changed-name">{f}</span>
+                    <span className={`git-status-badge status-${kind.toLowerCase()}`} title={formatStr(ft.gitState, { label: strings.gitKind[kind.toLowerCase()] || kind, kind })}>{kind}</span>
+                  </label>
+                );
+              })}
+            </div>
             <label className="field">{ft.msgLabel}
               <textarea value={commitMessage} disabled={commitBusy} onChange={(event) => { setCommitMessage(event.target.value); setCommitError(''); }} placeholder={ft.msgPh} aria-label={ft.msgPh} rows={3} aria-invalid={!!commitError} />
             </label>
@@ -850,6 +983,56 @@ export default function FilesTab(props: Props) {
           <div className="modal-footer">
             <button className="btn" type="button" disabled={cloneBusy} onClick={() => setCloneOpen(false)}>{strings.common.cancel}</button>
             <button className="btn-primary" type="button" disabled={cloneBusy || !cloneUrl.trim() || !cloneTarget.trim()} onClick={() => void submitClone()}>{cloneBusy ? ft.cloning : ft.cloneBtn}</button>
+          </div>
+        </section>
+      </div>}
+      {pushOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !gitSyncBusy) setPushOpen(false); }}>
+        <section className="modal modal-sm git-push-dialog" role="dialog" aria-modal="true" aria-labelledby="git-push-title" tabIndex={-1} onKeyDown={(event) => {
+          if (event.key === 'Escape' && !gitSyncBusy) { event.preventDefault(); setPushOpen(false); }
+        }}>
+          <div className="modal-header"><h3 id="git-push-title">{ft.pushDlgTitle}</h3></div>
+          <div className="modal-body">
+            {gitBranch && <p className="modal-note">{formatStr(ft.pushDetail, { branch: gitBranch.branch, remote: gitBranch.remote || ft.noRemote, ahead: gitBranch.ahead })}</p>}
+            {gitBranch && gitBranch.behind > 0 && <div className="tree-error explorer-entry-error" role="alert">{formatStr(ft.pushBehindWarn, { behind: gitBranch.behind })}</div>}
+          </div>
+          <div className="modal-footer">
+            <button className="btn" type="button" disabled={!!gitSyncBusy} onClick={() => setPushOpen(false)}>{strings.common.cancel}</button>
+            <button className="btn-primary" type="button" disabled={!!gitSyncBusy} onClick={() => { setPushOpen(false); void doGitSync('push'); }}>{gitSyncBusy === 'push' ? ft.pushing : ft.syncPush}</button>
+          </div>
+        </section>
+      </div>}
+      {branchOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !branchBusy && !branchCreateBusy) setBranchOpen(false); }}>
+        <section className="modal git-branch-dialog" role="dialog" aria-modal="true" aria-labelledby="git-branch-title" tabIndex={-1} onKeyDown={(event) => {
+          if (event.key === 'Escape' && !branchBusy && !branchCreateBusy) { event.preventDefault(); setBranchOpen(false); }
+        }}>
+          <div className="modal-header"><h3 id="git-branch-title">{ft.branchDlgTitle}</h3></div>
+          <div className="modal-body">
+            {branchList === null && !branchError && <div className="tree-loading">{strings.common.loading}</div>}
+            {branchList !== null && (
+              <div className="branch-list" role="listbox" aria-label={ft.branchListLabel}>
+                {branchList.map((b) => {
+                  const isCurrent = b === branchCurrent;
+                  return (
+                    <div key={b} className={isCurrent ? 'branch-row current' : 'branch-row'} role="option" aria-selected={isCurrent}>
+                      <span className="branch-name">{b}</span>
+                      {isCurrent
+                        ? <span className="branch-current-tag">{ft.branchCurrent}</span>
+                        : <button type="button" className="mini-btn" disabled={!!branchBusy || branchCreateBusy} onClick={() => void switchBranch(b)}>{branchBusy === b ? ft.branchSwitching : ft.branchSwitch}</button>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <label className="field">{ft.branchNewLabel}
+              <span className="branch-create-row">
+                <input value={newBranchName} disabled={!!branchBusy || branchCreateBusy} onChange={(event) => { setNewBranchName(event.target.value); setBranchError(''); }} onKeyDown={(event) => { if (event.key === 'Enter' && newBranchName.trim()) void createBranch(); }} placeholder={ft.branchNewPh} aria-label={ft.branchNewPh} spellCheck={false} />
+                <button type="button" className="btn-primary" disabled={!!branchBusy || branchCreateBusy || !newBranchName.trim()} onClick={() => void createBranch()}>{branchCreateBusy ? ft.branchCreating : ft.createBtn}</button>
+              </span>
+            </label>
+            {branchError && <div className="tree-error explorer-entry-error" role="alert">{branchError}</div>}
+          </div>
+          <div className="modal-footer">
+            <button className="btn" type="button" disabled={!!branchBusy || branchCreateBusy} onClick={() => setBranchOpen(false)}>{strings.common.close}</button>
           </div>
         </section>
       </div>}
