@@ -23,7 +23,7 @@ interface Props {
   onSwitchTab: (mode: 'recent-next' | 'recent-previous' | 'ordered-left' | 'ordered-right') => void;
   onMoveTab: (direction: -1 | 1) => void;
   onAppShortcut: (shortcut: BrowserShortcut) => void;
-  onNotice: (msg: string) => void;
+  onNotice: (msg: string, kind?: string) => void;
   bookmarks: BrowserBookmark[];
   onToggleBookmark: (tabId: string, url: string) => void;
 }

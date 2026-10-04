@@ -84,7 +84,7 @@ interface Props {
   bookmarks: BrowserBookmark[];
   onToggleBookmark: (tabId: string, url: string) => void;
   onTermShell: (id: string, shell: 'powershell' | 'cmd') => void;
-  onNotice: (msg: string) => void;
+  onNotice: (msg: string, kind?: string) => void;
 }
 
 function TabIcon({ tab }: { tab: PaneTab }) {

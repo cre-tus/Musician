@@ -17,7 +17,7 @@ interface Props {
   dark: boolean;
   active: boolean;
   onShellChange: (shell: 'powershell' | 'cmd') => void;
-  onNotice: (msg: string) => void;
+  onNotice: (msg: string, kind?: string) => void;
 }
 
 const TERMINAL_HISTORY_KEY = 'mudex:terminal-history:v1';

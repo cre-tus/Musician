@@ -61,7 +61,7 @@ interface Props {
   onCommitFiles: (message: string) => Promise<boolean>;
   onPickFolder: () => void;
   onOpenTerminalAt: (dirPath: string) => void;
-  onNotice: (message: string) => void;
+  onNotice: (message: string, kind?: string) => void;
   onRenameEntry: (entryPath: string, newName: string) => Promise<boolean>;
   onDeleteEntry: (entryPath: string, isDir: boolean) => Promise<boolean>;
 }
@@ -109,10 +109,10 @@ export default function FilesTab(props: Props) {
     if (!folder || !hasBridge()) return;
     try {
       const result = await api().gitStage(folder, [absForChanged(file)], staged);
-      if (!result.ok) props.onNotice(result.error === 'OUTSIDE_WORKSPACE' ? ft.stageOutside : result.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : result.error || ft.stageFailed);
+      if (!result.ok) props.onNotice(result.error === 'OUTSIDE_WORKSPACE' ? ft.stageOutside : result.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : result.error || ft.stageFailed, 'git');
       onRefreshChanged();
     } catch (error) {
-      props.onNotice(error instanceof Error ? error.message : String(error));
+      props.onNotice(error instanceof Error ? error.message : String(error), 'git');
     }
   };
 
@@ -183,13 +183,13 @@ export default function FilesTab(props: Props) {
     try {
       const r = op === 'pull' ? await api().gitPull(folder) : await api().gitPush(folder);
       if (!r.ok) {
-        props.onNotice(r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error === 'TIMEOUT' ? formatStr(ft.syncTimeout, { label }) : (r.error || formatStr(ft.syncFailed, { label: label.toLowerCase() })));
+        props.onNotice(r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error === 'TIMEOUT' ? formatStr(ft.syncTimeout, { label }) : (r.error || formatStr(ft.syncFailed, { label: label.toLowerCase() })), 'git');
       } else {
-        props.onNotice(op === 'pull' ? ft.pulledOk : ft.pushedOk);
+        props.onNotice(op === 'pull' ? ft.pulledOk : ft.pushedOk, 'git');
         onRefreshChanged();
       }
     } catch (error) {
-      props.onNotice(error instanceof Error ? error.message : String(error));
+      props.onNotice(error instanceof Error ? error.message : String(error), 'git');
     } finally {
       setGitSyncBusy(null);
       void refreshGitBranch();
@@ -227,7 +227,7 @@ export default function FilesTab(props: Props) {
         setBranchError(r.error === 'DIRTY_TREE' ? ft.branchDirty : r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error || ft.branchFailed);
         return;
       }
-      props.onNotice(formatStr(ft.branchSwitched, { branch: r.branch || name }));
+      props.onNotice(formatStr(ft.branchSwitched, { branch: r.branch || name }), 'git');
       setBranchOpen(false);
       void refreshGitBranch();
       onRefreshChanged();
@@ -250,7 +250,7 @@ export default function FilesTab(props: Props) {
         setBranchError(r.error === 'BRANCH_EXISTS' ? ft.branchExists : r.error === 'BAD_BRANCH' ? ft.branchBadName : r.error === 'GIT_NOT_FOUND' ? ft.gitNotFound : r.error || ft.branchFailed);
         return;
       }
-      props.onNotice(formatStr(ft.branchCreated, { branch: r.branch || name }));
+      props.onNotice(formatStr(ft.branchCreated, { branch: r.branch || name }), 'git');
       setNewBranchName('');
       setBranchOpen(false);
       void refreshGitBranch();
@@ -281,7 +281,7 @@ export default function FilesTab(props: Props) {
       setCloneOpen(false);
       setCloneUrl('');
       setCloneTarget('');
-      props.onNotice(formatStr(ft.clonedOk, { path: r.path || target }));
+      props.onNotice(formatStr(ft.clonedOk, { path: r.path || target }), 'git');
     } catch (error) {
       setCloneError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -992,7 +992,7 @@ export default function FilesTab(props: Props) {
         }}>
           <div className="modal-header"><h3 id="git-push-title">{ft.pushDlgTitle}</h3></div>
           <div className="modal-body">
-            {gitBranch && <p className="modal-note">{formatStr(ft.pushDetail, { branch: gitBranch.branch, remote: gitBranch.remote || ft.noRemote, ahead: gitBranch.ahead })}</p>}
+            {gitBranch && <p className="modal-note">{gitBranch.ahead > 0 ? formatStr(ft.pushDetail, { branch: gitBranch.branch, remote: gitBranch.remote || ft.noRemote, ahead: gitBranch.ahead }) : ft.pushUpToDate}</p>}
             {gitBranch && gitBranch.behind > 0 && <div className="tree-error explorer-entry-error" role="alert">{formatStr(ft.pushBehindWarn, { behind: gitBranch.behind })}</div>}
           </div>
           <div className="modal-footer">

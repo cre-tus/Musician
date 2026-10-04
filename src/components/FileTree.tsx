@@ -76,7 +76,7 @@ function TreeNode({
   onCreateEntry: (dirPath: string, kind: 'file' | 'folder') => Promise<void>;
   onRequestRename: (entry: FileEntry) => void;
   onRequestDelete: (entry: FileEntry) => void;
-  onNotice: (message: string) => void;
+  onNotice: (message: string, kind?: string) => void;
   onOpenFile: (filePath: string) => void;
   onOpenTerminalAt: (dirPath: string) => void;
 }) {
@@ -389,7 +389,7 @@ export default function FileTree({
   onCreateEntry: (dirPath: string, kind: 'file' | 'folder') => Promise<void>;
   onRequestRename: (entry: FileEntry) => void;
   onRequestDelete: (entry: FileEntry) => void;
-  onNotice: (message: string) => void;
+  onNotice: (message: string, kind?: string) => void;
   onOpenFile: (filePath: string) => void;
   onOpenTerminalAt: (dirPath: string) => void;
   changedFiles?: string[];

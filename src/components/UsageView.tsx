@@ -65,17 +65,28 @@ function UsageBar({ label, pct, resetMs }: { label: string; pct: number; resetMs
 export default function UsageView({ sessions, folder, onBack, onSelectThread }: Props) {
   const s = useStrings();
   const [usage, setUsage] = useState<SubscriptionUsage | null | undefined>(undefined);
+  const [usageFailed, setUsageFailed] = useState(false);
 
   useEffect(() => {
     if (!hasBridge()) {
       setUsage(null);
+      setUsageFailed(true);
       return;
     }
     api()
       .mspUsage(folder || '')
-      .then((r) => setUsage(r.ok ? r.usage ?? null : null))
-      .catch(() => setUsage(null));
-    const off = api().onMspUsage((p) => setUsage(p.usage));
+      .then((r) => {
+        // ok-but-null means connected yet unobserved (usage appears after
+        // the first turn), not a failure — keep the two states apart.
+        setUsage(r.ok ? r.usage ?? null : null);
+        setUsageFailed(!r.ok);
+      })
+      .catch(() => {
+        setUsage(null);
+        setUsageFailed(true);
+      });
+    // A null push carries no observation; never let it wipe shown data.
+    const off = api().onMspUsage((p) => setUsage((prev) => p.usage ?? prev));
     return () => {
       off();
     };
@@ -114,9 +125,14 @@ export default function UsageView({ sessions, folder, onBack, onSelectThread }: 
         <div className="section-cap">{s.usage.capQuota}</div>
         <div className="panel">
           {usage === undefined && <div className="empty-note">{s.common.loading}</div>}
-          {usage === null && (
+          {usage === null && usageFailed && (
             <div className="empty-note">
               {s.usage.unavailable}
+            </div>
+          )}
+          {usage === null && !usageFailed && (
+            <div className="empty-note">
+              {s.usage.waitingFirst}
             </div>
           )}
           {usage && (

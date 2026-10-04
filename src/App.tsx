@@ -318,6 +318,11 @@ export default function App() {
   });
   const [dark, setDark] = useState(true);
   const [notice, setNotice] = useState('');
+  const [noticeKind, setNoticeKind] = useState('');
+  const notify = (message: string, kind?: string) => {
+    setNotice(message);
+    setNoticeKind(kind === 'git' ? 'git' : '');
+  };
   const [confirmRequest, setConfirmRequest] = useState<ConfirmOptions | null>(null);
   const confirmResolverRef = useRef<((result: ConfirmResult) => void) | null>(null);
   const omittedDraftNoticeRef = useRef(false);
@@ -651,7 +656,7 @@ export default function App() {
   // Quota follows push events (initial load comes from warmup).
   useEffect(() => {
     if (!hasBridge()) return;
-    const off = api().onMspUsage((p) => setQuota(p.usage));
+    const off = api().onMspUsage((p) => setQuota((prev) => p.usage ?? prev));
     return () => {
       off();
     };
@@ -1599,7 +1604,7 @@ export default function App() {
   const commitGitFiles = async (message: string): Promise<boolean> => {
     if (!folder) return false;
     if (hasProjectRun()) {
-      setNotice(av.commitBlockedRun);
+      notify(av.commitBlockedRun, 'git');
       return false;
     }
     try {
@@ -1614,10 +1619,10 @@ export default function App() {
               : result.error === 'GIT_NOT_FOUND'
                 ? STRINGS[lang].files.gitNotFound
                 : result.error || av.commitFailedBare;
-        setNotice(notice);
+        notify(notice, 'git');
         return false;
       }
-      setNotice(result.hash ? formatStr(av.committedHash, { hash: result.hash }) : av.committedOk);
+      notify(result.hash ? formatStr(av.committedHash, { hash: result.hash }) : av.committedOk, 'git');
       void refreshChanged();
       return true;
     } catch (error) {
@@ -2261,7 +2266,7 @@ export default function App() {
 
   const openGitDiff = async (file: string, cwd: string) => {
     if (!hasBridge() || !cwd) {
-      setNotice(av.gitDiffFailed);
+      notify(av.gitDiffFailed, 'git');
       return;
     }
     const abs = `${cwd}${cwd.endsWith('\\') || cwd.endsWith('/') ? '' : '\\'}${file.replace(/\//g, '\\')}`;
@@ -2950,7 +2955,7 @@ export default function App() {
               }
             }}
             onTermShell={termShell}
-            onNotice={setNotice}
+            onNotice={notify}
           />
           </>
         )}
@@ -3043,9 +3048,9 @@ export default function App() {
         />
       )}
       {notice && (
-        <div className="toast" role="alert">
+        <div className={noticeKind === 'git' ? 'toast toast-git' : 'toast'} role="alert">
           <span>{notice}</span>
-          <button className="icon-btn" onClick={() => setNotice('')} title={common.close}>
+          <button className="icon-btn" onClick={() => { setNotice(''); setNoticeKind(''); }} title={common.close}>
             <XIcon size={14} />
           </button>
         </div>
