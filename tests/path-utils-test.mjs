@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import { isSameOrDescendantPath, maskHomePath, maskHomePathEverywhere, normalizePathForComparison, pathsEqual, relativePathFromRoot } from '../src/lib/path-utils.mjs';
+
+assert.equal(normalizePathForComparison('C:\\Project\\SRC\\'), 'c:/project/src');
+assert.equal(pathsEqual('C:\\Project\\src\\App.tsx', 'c:/project/SRC/app.TSX'), true);
+assert.equal(pathsEqual('C:\\Project\\src\\App.tsx', 'C:\\Project\\src\\Other.tsx'), false);
+assert.equal(isSameOrDescendantPath('C:\\Project\\src', 'c:/project/SRC/App.tsx'), true);
+assert.equal(isSameOrDescendantPath('C:\\Project\\src', 'C:\\Project\\src-old\\App.tsx'), false);
+assert.equal(relativePathFromRoot('C:\\Project', 'c:/PROJECT/src/App.tsx'), 'src/App.tsx');
+assert.equal(relativePathFromRoot('/project', '/project/src/App.tsx'), 'src/App.tsx');
+assert.equal(relativePathFromRoot('C:\\Other', 'C:\\Project\\src\\App.tsx'), 'C:/Project/src/App.tsx');
+assert.equal(maskHomePath('C:\\Users\\someone\\App\\Musician.exe'), '~/App/Musician.exe');
+assert.equal(maskHomePath('C:\\Users\\someone'), '~');
+assert.equal(maskHomePath('D:/Users/someone/docs/a.txt'), '~/docs/a.txt');
+assert.equal(maskHomePath('/home/someone/work'), '~/work');
+assert.equal(maskHomePath('C:\\Program Files\\tool.exe'), 'C:\\Program Files\\tool.exe');
+assert.equal(maskHomePath('relative\\path.txt'), 'relative\\path.txt');
+assert.equal(maskHomePath(''), '');
+const block = '{"command": "C:\\\\Users\\\\someone\\\\App\\\\Musician.exe", "home": "/home/someone/work"}';
+const maskedBlock = maskHomePathEverywhere(block);
+assert.ok(maskedBlock.includes('~') && !maskedBlock.includes('someone'), `block redacted: ${maskedBlock}`);
+assert.equal(maskHomePathEverywhere('no paths here'), 'no paths here');
+console.log('Path comparison checks passed.');

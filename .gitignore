@@ -1,0 +1,43 @@
+# ---- dependencies ----
+node_modules/
+
+# ---- build / packaging outputs (regenerated locally) ----
+dist/
+build/*
+!build/gen-icon.py
+!build/*.ico
+!build/*.png
+release/
+release-alt/
+release-final/
+*.exe
+*.asar
+*.blockmap
+*-unpacked/
+
+# ---- secrets & personal config (never commit) ----
+.env
+.env.*
+*.pem
+*.key
+*.p12
+secrets/
+.secrets
+
+# ---- local work logs & evidence (contain machine-specific paths) ----
+HANDOFF.md
+bug/
+.playwright-cli/
+
+# ---- local-only asset sources (build uses public/fonts) ----
+font/
+
+# ---- logs & OS noise ----
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- editor local state ----
+.vscode/
+.idea/
