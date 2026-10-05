@@ -1,9 +1,46 @@
-# Musician
+# 🎸 Musician
 
 Muse Code CLI 전용 데스크톱 앱. 채팅은 CLI 그대로, 설정은 UI로.
 
+<p>
+  <img src="https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white" alt="Electron 44">
+  <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" alt="React 19">
+  <img src="https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white" alt="Vite 8">
+  <img src="https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&logoColor=white" alt="TypeScript 7">
+  <img src="https://img.shields.io/badge/Monaco_Editor-0.57-007ACC" alt="Monaco Editor">
+  <img src="https://img.shields.io/badge/xterm.js-6-black" alt="xterm.js">
+  <img src="https://img.shields.io/badge/Node.js-24-339933?logo=node.js&logoColor=white" alt="Node.js 24">
+  <img src="https://img.shields.io/badge/platform-Windows_10%2F11_64--bit-0078D4?logo=windows&logoColor=white" alt="Windows 10/11 64-bit">
+</p>
+
 - **엔진**: `React → @muse-code/sdk → MSP → muse serve`, 실패하면 `muse exec`로 자동 폴백
 - **요금**: CLI 로그인/구독 그대로 사용. API 키 입력 없음, 추가 비용 없음
+
+## 스크린샷
+
+**변경 사항 디렉토리 묶음** — 디렉토리별 그룹 + 그룹 단위 스테이지/커밋:
+
+<img src="docs/screenshots/01-changes-grouped.png" width="800" alt="변경 사항 디렉토리 묶음 보기">
+
+**디렉토리 단위 커밋 선택** — 그룹의 커밋 버튼을 누르면 해당 디렉토리만 체크된 채 다이얼로그가 열림:
+
+<img src="docs/screenshots/02-commit-dialog.png" width="800" alt="디렉토리 단위 커밋 다이얼로그">
+
+**Monaco diff 뷰** — 변경 행을 클릭하면 양쪽 비교 탭이 열림:
+
+<img src="docs/screenshots/03-diff-view.png" width="800" alt="Monaco diff 뷰">
+
+## 기술 스택
+
+| 영역 | 스택 |
+| --- | --- |
+| 데스크톱 셸 | Electron 44 (electron-builder portable) |
+| UI | React 19 + TypeScript 7, Vite 8 빌드 |
+| 에디터 / diff | Monaco Editor, @monaco-editor/react |
+| 터미널 | xterm.js (+ fit 애드온) |
+| AI 엔진 | @muse-code/sdk → MSP → `muse serve`, `muse exec` 폴백 |
+| 채팅 렌더링 | react-markdown + remark-gfm |
+| 테스트 | Node 내장 테스트 러너 (unit) + Electron CDP 실앱 E2E |
 
 ## 배포 (사용자용)
 
@@ -27,7 +64,8 @@ Muse Code CLI 전용 데스크톱 앱. 채팅은 CLI 그대로, 설정은 UI로.
 - CLI 세션 목록 + 이어하기
 - 모델/권한/추론 수준 팝오버 (Codex식)
 - 파일 첨부 (파일 드래그 앤 드롭, 클립보드 이미지 붙여넣기, 이미지 미리보기) + 음성 입력
-- 변경 파일 카드 (+/- 줄 수, 리뷰, 실행 취소)
+- 변경 사항 디렉토리 묶음 (디렉토리별 그룹, 그룹 단위 스테이지/커밋, 접기/펼치기) + 변경 파일 카드 (+/- 줄 수, 리뷰, 실행 취소)
+- 커밋 다이얼로그 (디렉토리 묶음 기본, AI 커밋 메시지 생성)
 - 검증 칩 (package.json의 typecheck/build/test/lint 실행)
 - 파일(line N) 링크 → 에디터 줄 이동
 - 사용량: 구독 할당량(5시간/주간) + 토큰 집계
