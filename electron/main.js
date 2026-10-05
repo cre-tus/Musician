@@ -23,12 +23,16 @@ const { needsShell, quoteArg, spawnCli } = require('./spawn-cli');
 const { appendMainLog: appendLogFile } = require('./main-log');
 const { BrowserEngine, resolveAddressInput } = require('./browser');
 const { TerminalHost } = require('./terminal');
+const { createCheckpoint, restoreCheckpoint } = require('./checkpoint');
+const { buildCommitPrompt, cleanCommitMessage } = require('./commit-message');
+const { runHook, runHooks } = require('./hooks');
 const { searchFiles, searchInFiles } = require('./workspace-search');
 const { WorkspaceWatcher } = require('./workspace-watcher');
 const { normalizeExternalLink } = require('./external-link');
 const { isSafeBranchName, isSafeCloneSource, isSafeRepoRelativePath, redactRemoteUrl } = require('./git-safety');
 const { createProjectSessionCache } = require('./codex-session-cache');
 const { createProjectPathMatcher } = require('./project-path');
+const { projectClaudeSessions, readClaudeContext, claudeQueueArgs } = require('./claude-sessions');
 const { showWindowsToastAsync } = require('../scripts/windows-toast');
 
 let win = null;
@@ -96,6 +100,7 @@ const DEFAULT_SETTINGS = {
   reasoningEffort: '',
   browserAgent: true,
   browserHome: '',
+  hooks: [],
   backgroundNotifications: true,
   lang: 'ko',
 };
@@ -428,6 +433,35 @@ ipcMain.handle('mudex:export-markdown', async (_e, { title: rawTitle, markdown }
     return { ok: false, error: String((err && err.message) || err) };
   }
 });
+ipcMain.handle('mudex:export-backup', async (_e, { title: rawTitle, json }) => {
+  try {
+    if (typeof json !== 'string' || json.length > 25 * 1024 * 1024) return { ok: false, error: 'INVALID_CONTENT' };
+    const stub = process.env.MUSICIAN_E2E_SAVE_BACKUP;
+    if (stub) {
+      fs.writeFileSync(stub, json, 'utf8');
+      return { ok: true, path: stub };
+    }
+    const exportLang = loadSettings().lang;
+    const filename = exportMarkdownFilename(rawTitle, exportLang);
+    const result = await dialog.showSaveDialog(win, {
+      title: exportLang === 'en' ? 'Export sessions as backup (JSON)' : '세션 백업(JSON)으로 내보내기',
+      buttonLabel: exportLang === 'en' ? 'Export' : '내보내기',
+      defaultPath: path.join(app.getPath('downloads'), `${filename}.json`),
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: true, canceled: true };
+    fs.writeFileSync(result.filePath, json, 'utf8');
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+ipcMain.handle('mudex:pick-backup', async () => {
+  const stub = process.env.MUSICIAN_E2E_PICK_BACKUP;
+  if (stub) return { ok: true, paths: [stub] };
+  const res = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'JSON', extensions: ['json'] }] });
+  return pickDialogResult('files', res);
+});
 const FILE_PREVIEW_MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -659,9 +693,46 @@ ipcMain.handle('mudex:revert-files', async (_e, { cwd, files }) => {
   return { ok: true, results };
 });
 
+// ---------------------------------------------------------------- turn hooks
+async function fireHooks(event, ctx) {
+  let hooks = [];
+  try {
+    const s = (ctx && ctx.settings) || loadSettings();
+    const list = Array.isArray(s.hooks) ? s.hooks : [];
+    hooks = list.filter((h) => h && h.event === event && h.enabled !== false && String(h.command || '').trim());
+  } catch {
+    return [];
+  }
+  if (hooks.length === 0) return [];
+  let results = [];
+  try {
+    results = await runHooks(hooks, ctx);
+  } catch {
+    return [];
+  }
+  for (const r of results) {
+    send('mudex:hook-result', { event, command: r.command, ok: !!r.ok, code: r.code ?? null, error: r.error || null });
+  }
+  return results;
+}
+
+ipcMain.handle('mudex:hook-test', async (_e, { command, cwd }) => {
+  return runHook({ command, cwd, timeoutSec: 30, env: { MUSICIAN_EVENT: 'hook-test' } });
+});
+
+// ---------------------------------------------------------------- turn checkpoints
+ipcMain.handle('mudex:checkpoint-create', async (_e, { cwd, sessionId }) => {
+  return createCheckpoint({ userData: app.getPath('userData'), cwd, sessionId, runGit });
+});
+ipcMain.handle('mudex:checkpoint-restore', async (_e, { cwd, sessionId, id }) => {
+  return restoreCheckpoint({ userData: app.getPath('userData'), cwd, sessionId, id, runGit });
+});
+
 ipcMain.handle('mudex:list-dir', (_e, { path: dirPath }) => {
   try {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true }).map((d) => ({
+    // .git internals are noise in every listing consumer (tree, pinned
+    // reconcile); git itself is covered by the dedicated git UI.
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true }).filter((d) => d.name !== '.git').map((d) => ({
       name: d.name,
       path: path.join(dirPath, d.name),
       isDir: d.isDirectory(),
@@ -1042,16 +1113,30 @@ ipcMain.handle('mudex:cli-test', async () => {
   };
 });
 
-ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessionId }) => {
+ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessionId, plan, overrides }) => {
   const s = loadSettings();
+  const planMode = plan === true;
   const want = s.engine || 'auto';
+  // Per-session overrides (sanitized; keep in sync with REASONING_EFFORTS in
+  // msp.js and EFFORT_VALUES in src/lib/session-overrides.mjs).
+  const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  const ov = overrides && typeof overrides === 'object' ? overrides : {};
+  const ovModel = typeof ov.model === 'string' && ov.model.trim() ? ov.model.trim().slice(0, 200) : '';
+  const ovEffort = EFFORTS.includes(ov.effort) ? ov.effort : '';
+  const globalEffort = EFFORTS.includes(s.reasoningEffort) ? s.reasoningEffort : '';
+  const effModel = ovModel || s.model || '';
+  const effEffort = ovEffort || globalEffort;
+  const sendOv = { ...(ovModel ? { model: ovModel } : {}), ...(ovEffort ? { effort: ovEffort } : {}) };
+  // turn-start hooks run first (awaited, bounded); failures notify only.
+  await fireHooks('turn-start', { cwd: cwd || s.workdir || app.getPath('home'), engine: want, reqId: threadKey || 'start', settings: s });
   if (want === 'msp' || want === 'auto') {
     try {
-      return await startMspChat(prompt, cwd, s, threadKey, mspSessionId);
+      return await startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, sendOv);
     } catch (err) {
       const msg = String((err && err.message) || err);
       if (want === 'msp' || !/CLI_NOT_FOUND|SERVE_NEEDS_EXE|SERVE_HANDSHAKE_FAIL|ENOENT/.test(msg)) {
         const workdir = cwd || s.workdir || app.getPath('home');
+        void fireHooks('turn-done', { cwd: workdir, engine: 'msp', reqId: threadKey || 'start', settings: s });
         return { ok: false, error: msg, engine: 'msp', cmd: '', cwd: workdir };
       }
       // auto + serve unavailable → fall through to exec below
@@ -1062,11 +1147,16 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
   const resolved = resolveCli(s.cliPath);
   const promptText = String(prompt);
   let promptFile = null;
-  let argv = ['exec', ...splitArgs(s.extraArgs), ...(s.model ? ['--model', s.model] : []), promptText];
+  const modelFlag = effModel ? ['--model', effModel] : [];
+  const effortFlag = effEffort ? ['--reasoning-effort', effEffort] : [];
+  let argv = ['exec', ...splitArgs(s.extraArgs), ...modelFlag, ...effortFlag, promptText];
   if (needsShell(resolved.path)) {
     promptFile = writePromptFile(promptText);
-    argv = ['exec', ...splitArgs(s.extraArgs), ...(s.model ? ['--model', s.model] : []), '--prompt-file', promptFile];
+    argv = ['exec', ...splitArgs(s.extraArgs), ...modelFlag, ...effortFlag, '--prompt-file', promptFile];
   }
+  // Plan mode is enforced by the engine, not the prompt: no workspace
+  // writes, no shell. Flags go right after 'exec', prompt stays last.
+  if (planMode) argv.splice(1, 0, '--disable-write', '--disable-shell');
   const workdir = cwd || s.workdir || app.getPath('home');
   const cmd = [quoteArg(resolved.path), ...argv.map(quoteArg)].join(' ');
   const reqId = `r${Date.now()}-${(reqSeq += 1)}`;
@@ -1099,6 +1189,7 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
           running.delete(reqId);
           dropPromptFile(promptFile);
           promptFiles.delete(reqId);
+          void fireHooks('turn-done', { cwd: workdir, engine: 'exec', reqId, settings: s });
           send('mudex:chat-done', { reqId, code: null, error: `TIMEOUT:${execTimeoutMs}` });
         }, execTimeoutMs)
       : null;
@@ -1112,6 +1203,7 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
     dropPromptFile(promptFile);
     promptFiles.delete(reqId);
     const notFound = err && err.code === 'ENOENT';
+    void fireHooks('turn-done', { cwd: workdir, engine: 'exec', reqId, settings: s });
     send('mudex:chat-done', {
       reqId,
       code: null,
@@ -1123,6 +1215,7 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
     running.delete(reqId);
     dropPromptFile(promptFile);
     promptFiles.delete(reqId);
+    void fireHooks('turn-done', { cwd: workdir, engine: 'exec', reqId, settings: s });
     send('mudex:chat-done', { reqId, code, signal: signal || null });
   });
 
@@ -1226,6 +1319,83 @@ ipcMain.handle('mudex:git-commit', async (_e, { cwd, message }) => {
   return { ok: true, hash: head.ok ? String(head.stdout || '').trim() : undefined };
 });
 
+ipcMain.handle('mudex:commit-message', async (_e, { cwd, files }) => {
+  if (!cwd) return { ok: false, error: 'NO_CWD' };
+  const picked = Array.isArray(files)
+    ? files.filter((f) => typeof f === 'string' && f && !f.includes('..') && !path.isAbsolute(f)).slice(0, 100)
+    : [];
+  const s = loadSettings();
+  const status = await runGit(cwd, ['status', '--short']);
+  if (!status.ok) return { ok: false, error: 'GIT_NOT_FOUND' };
+  const diffArgs = picked.length > 0 ? ['diff', 'HEAD', '--', ...picked] : ['diff', 'HEAD'];
+  const diff = await runGit(cwd, diffArgs, 30000);
+  let diffText = diff.ok ? String(diff.stdout || '') : '';
+  // Untracked files never appear in `git diff HEAD`: attach their content.
+  const statusText = String(status.stdout || '');
+  const untracked = new Set(statusText.split('\n').filter((line) => line.startsWith('??')).map((line) => line.slice(3).trim()));
+  const newFiles = (picked.length > 0 ? picked : [...untracked]).filter((f) => untracked.has(f)).slice(0, 5);
+  for (const f of newFiles) {
+    try {
+      const abs = path.join(cwd, f);
+      const stat = fs.statSync(abs);
+      if (!stat.isFile() || stat.size > 20000) continue;
+      const content = fs.readFileSync(abs, 'utf8');
+      if (content.includes('\0')) continue;
+      diffText += `\n--- new file: ${f} ---\n${content.slice(0, 5000)}`;
+    } catch {
+      /* unreadable: status line already names it */
+    }
+  }
+  if (!diffText.trim()) return { ok: false, error: 'NO_CHANGES' };
+  const prompt = buildCommitPrompt({ status: String(status.stdout || ''), diff: diffText, lang: s.lang });
+  const resolved = resolveCli(s.cliPath);
+  const promptFile = writePromptFile(prompt);
+  const argv = ['exec', ...splitArgs(s.extraArgs), ...(s.model ? ['--model', s.model] : []), '--prompt-file', promptFile];
+  return new Promise((resolve) => {
+    let out = '';
+    let done = false;
+    let child;
+    try {
+      child = spawnCli(resolved.path, argv, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      resolve({ ok: false, error: 'CLI_NOT_FOUND' });
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try {
+        killTree(child);
+      } catch {
+        /* ignore */
+      }
+      resolve({ ok: false, error: 'TIMEOUT' });
+    }, 120000);
+    if (timer.unref) timer.unref();
+    child.stdout.on('data', (d) => {
+      out += d.toString();
+      if (out.length > 16000) out = out.slice(-16000);
+    });
+    child.on('error', () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: 'CLI_NOT_FOUND' });
+    });
+    child.on('close', () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      const message = cleanCommitMessage(out);
+      if (!message) {
+        resolve({ ok: false, error: 'EMPTY_RESULT' });
+        return;
+      }
+      resolve({ ok: true, message });
+    });
+  });
+});
+
 ipcMain.handle('mudex:git-branch', async (_e, { cwd }) => {
   if (!cwd) return { ok: false, error: 'NO_CWD' };
   const b = await runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -1318,8 +1488,11 @@ ipcMain.handle('mudex:git-clone', async (_e, { url, target }) => {
   return { ok: true, path: absTarget };
 });
 
-async function startMspChat(prompt, cwd, s, threadKey, mspSessionId) {
-  const key = threadKey || `t-${Date.now()}-${(reqSeq += 1)}`;
+async function startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, sendOv) {
+  const baseKey = threadKey || `t-${Date.now()}-${(reqSeq += 1)}`;
+  // Plan turns live on a separate read-only host + session: same suffix as
+  // planThreadKey() in src/lib/plan-mode.mjs (kept in sync by test).
+  const key = planMode ? `${baseKey}\0plan` : baseKey;
   const reqId = `m${Date.now()}-${(reqSeq += 1)}`;
   const workdir = cwd || s.workdir || app.getPath('home');
   const timeoutMs = Number(s.timeoutMs) || 0;
@@ -1328,6 +1501,7 @@ async function startMspChat(prompt, cwd, s, threadKey, mspSessionId) {
       ? setTimeout(() => {
           running.delete(reqId);
           msp.cancelTurn(key).catch(() => {});
+          void fireHooks('turn-done', { cwd: workdir, engine: 'msp', reqId, settings: s });
           send('mudex:chat-done', { reqId, code: null, error: `TIMEOUT:${timeoutMs}` });
         }, timeoutMs)
       : null;
@@ -1338,11 +1512,17 @@ async function startMspChat(prompt, cwd, s, threadKey, mspSessionId) {
     turn = await msp.sendTurn(key, String(prompt), {
       cwd: workdir,
       settings: s,
-      mspSessionId,
+      modelOverride: sendOv && sendOv.model,
+      effortOverride: sendOv && sendOv.effort,
+      // A plan turn must never resume the main session: fresh plan session
+      // on the read-only host, so the main history stays untouched.
+      mspSessionId: planMode ? undefined : mspSessionId,
+      readonly: planMode || undefined,
       onItem: ({ turnId, item }) => send('msp:item', { reqId, threadKey: key, turnId, item }),
       onDone: ({ outcome, error }) => {
         clearTimeout(timer);
         running.delete(reqId);
+        void fireHooks('turn-done', { cwd: workdir, engine: 'msp', reqId, settings: s });
         if (error) {
           send('mudex:chat-done', { reqId, code: null, error });
           return;
@@ -1612,6 +1792,67 @@ ipcMain.handle('codex:queue', async (_e, { sessionId, cwd, context } = {}) => {
         child.unref();
       }
     }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// ---------------------------------------------------------------- Claude project handoff
+// Same shape as the Codex flow: cached project scan, context read, then a
+// scripted follow-up (`claude -p --resume <id> <message>`) that runs the
+// handoff headlessly instead of queueing into an interactive app.
+const claudeProjectSessionCache = createProjectSessionCache(
+  (cwd) => projectClaudeSessions(cwd, { homeDir: app.getPath('home') }),
+);
+
+function runClaude(args, cwd, timeoutMs = 300000) {
+  return new Promise((resolve) => {
+    const bin = findOnPath('claude');
+    if (!bin) return resolve({ ok: false, error: 'CLAUDE_NOT_FOUND' });
+    let stdout = '';
+    let stderr = '';
+    let child;
+    try {
+      child = spawnCli(bin, args, { cwd: cwd || undefined, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      return resolve({ ok: false, error: String((err && err.message) || err) });
+    }
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } }, timeoutMs);
+    child.stdout.on('data', (d) => { stdout += String(d); });
+    child.stderr.on('data', (d) => { stderr += String(d); });
+    child.on('error', (err) => { clearTimeout(timer); resolve({ ok: false, error: String(err.message || err) }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ ok: code === 0, error: code === 0 ? undefined : (stderr || stdout || `CLAUDE_EXIT_${code}`).slice(-2000) }); });
+  });
+}
+
+ipcMain.handle('claude:sessions', (_e, { cwd } = {}) => {
+  try {
+    return { ok: true, sessions: claudeProjectSessionCache.get(cwd, { refresh: true }).slice(0, 100).map(({ file: _file, ...s }) => s) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('claude:read', (_e, { sessionId, cwd } = {}) => {
+  try {
+    let hit = claudeProjectSessionCache.get(cwd).find((s) => s.id === sessionId);
+    if (!hit) hit = claudeProjectSessionCache.get(cwd, { refresh: true }).find((s) => s.id === sessionId);
+    if (!hit) return { ok: false, error: 'PROJECT_SESSION_NOT_FOUND' };
+    return { ok: true, title: hit.title, context: readClaudeContext(hit.file) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('claude:queue', async (_e, { sessionId, cwd, context } = {}) => {
+  try {
+    const hit = claudeProjectSessionCache.get(cwd, { refresh: true }).find((s) => s.id === sessionId);
+    if (!hit) return { ok: false, error: 'PROJECT_SESSION_NOT_FOUND' };
+    const text = String(context || '').slice(0, 28000);
+    if (!text) return { ok: false, error: 'EMPTY_HANDOFF' };
+    const queued = await runClaude(claudeQueueArgs(sessionId, text), cwd);
+    if (!queued.ok) return queued;
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };

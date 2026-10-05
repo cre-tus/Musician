@@ -35,6 +35,13 @@ export function maskHomePathEverywhere(value) {
     .replace(/\/(home|Users)\/[^/"'\s]+/g, '~');
 }
 
+export function baseName(filePath) {
+  const s = String(filePath == null ? '' : filePath).replace(/[\\/]+$/, '');
+  if (!s) return '';
+  const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+  return i < 0 ? s : s.slice(i + 1);
+}
+
 export function relativePathFromRoot(rootPath, filePath) {
   const root = String(rootPath || '').replace(/[\\/]+$/, '');
   const file = String(filePath || '');

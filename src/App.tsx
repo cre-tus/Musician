@@ -18,10 +18,12 @@ import { normalizePromptQueue } from './lib/prompt-queue.mjs';
 import { reconcileOpenFileDiskState } from './lib/open-file-disk-state.mjs';
 import { ensureFilesTabFallback, unpinnedPaneTabIds } from './lib/pane-tab-management.mjs';
 import { detachProjectSessions } from './lib/project-sessions.mjs';
+import { loadLastUsage, saveLastUsage } from './lib/usage-cache.mjs';
 import { formatStr, sanitizeLang, STRINGS } from './lib/i18n.mjs';
 import { LangContext } from './lib/lang';
 import { hideHostSessionId, readHiddenHostSessionIds, visibleHostSessions } from './lib/host-session-filter.mjs';
 import { shouldShowBackgroundNotification } from './lib/notification-rules.mjs';
+import { clearUnread, createStopRegistry, markUnread } from './lib/session-alerts.mjs';
 import { addScheduledPrompt, cancelScheduledPrompt, createScheduledPrompt, dueScheduledPrompts, fireableScheduledPrompt, formatRepeat, formatScheduledFireTime, markScheduledPrompt, readScheduledPrompts, rescheduleScheduledPrompt, rollRepeatingPrompt, staleScheduledPrompts, writeScheduledPrompts } from './lib/scheduled-prompts.mjs';
 import { shouldParkBrowserForOverlays } from './lib/browser-overlay-park.mjs';
 import { bookmarkHost, isBrowserBookmarked, normalizeBookmarkUrl, readBrowserBookmarks, toggleBrowserBookmark, writeBrowserBookmarks } from './lib/browser-bookmarks.mjs';
@@ -34,6 +36,8 @@ import { isSameOrDescendantPath, normalizePathForComparison, pathsEqual } from '
 import { createSingleFlight } from './lib/single-flight.mjs';
 import { nextRecentTab, touchRecentTab } from './lib/recent-tab-history.mjs';
 import { formatSessionTranscript, formatSessionTranscripts } from './lib/session-transcript.mjs';
+import { createSessionBackup, parseSessionBackup, toImportSessions } from './lib/session-backup.mjs';
+import { forkSession } from './lib/session-fork.mjs';
 import { mcpChatNotice } from './lib/mcp-chat-notice.mjs';
 import { readPinnedProjects, togglePinnedProject, writePinnedProjects } from './lib/pinned-projects.mjs';
 import { prefillWorkspaceSearchQuery } from './lib/workspace-search-query.mjs';
@@ -291,6 +295,8 @@ export default function App() {
   const [runningIds, setRunningIds] = useState<string[]>([]);
   const runningIdsRef = useRef(runningIds);
   runningIdsRef.current = runningIds;
+  const [unreadIds, setUnreadIds] = useState<string[]>([]);
+  const stopRegistryRef = useRef(createStopRegistry());
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const activeIdRef = useRef(activeId);
@@ -326,6 +332,7 @@ export default function App() {
   const [confirmRequest, setConfirmRequest] = useState<ConfirmOptions | null>(null);
   const confirmResolverRef = useRef<((result: ConfirmResult) => void) | null>(null);
   const omittedDraftNoticeRef = useRef(false);
+  const gateToastSeenRef = useRef<Set<string>>(new Set());
   const [hostSessions, setHostSessions] = useState<HostSession[]>([]);
   const [changed, setChanged] = useState<string[]>([]);
   const [changedKinds, setChangedKinds] = useState<Record<string, GitStatusKind>>({});
@@ -333,8 +340,9 @@ export default function App() {
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [mspStatus, setMspStatus] = useState<MspStatus>({ state: 'idle' });
   const [codexSignal, setCodexSignal] = useState(0);
+  const [claudeSignal, setClaudeSignal] = useState(0);
   const [tuneSignal, setTuneSignal] = useState(0);
-  const [quota, setQuota] = useState<SubscriptionUsage | null>(null);
+  const [quota, setQuota] = useState<SubscriptionUsage | null>(() => loadLastUsage(localStorage));
   const [sideW, setSideW] = useState(() => clamp(loadNum('mudex:sidew', 284), 200, 480));
   const [chatRatio, setChatRatio] = useState(() => clamp(loadNum('mudex:chatratio', 0.45), 0.25, 0.75));
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -558,7 +566,10 @@ export default function App() {
       .then((r) => {
         if (r.ok) {
           setHostSessions(visibleHostSessions(r.sessions || [], readHiddenHostSessionIds()));
-          setQuota(r.usage ?? null);
+          if (r.usage) {
+            setQuota(r.usage);
+            saveLastUsage(localStorage, r.usage);
+          }
           setMspStatus({ state: 'ok' });
         } else {
           setMspStatus({ state: 'error', error: r.error });
@@ -656,7 +667,25 @@ export default function App() {
   // Quota follows push events (initial load comes from warmup).
   useEffect(() => {
     if (!hasBridge()) return;
-    const off = api().onMspUsage((p) => setQuota((prev) => p.usage ?? prev));
+    const off = api().onMspUsage((p) => {
+      if (p.usage) saveLastUsage(localStorage, p.usage);
+      setQuota((prev) => p.usage ?? prev);
+    });
+    return () => {
+      off();
+    };
+  }, []);
+
+  // Serve re-announces a gated effort downgrade every turn; toast once
+  // per host+gate so the user learns ultra fell back to xhigh.
+  useEffect(() => {
+    if (!hasBridge()) return;
+    const off = api().onMspGateFallback((p) => {
+      const id = `${p.key}::${p.gate}`;
+      if (gateToastSeenRef.current.has(id)) return;
+      gateToastSeenRef.current.add(id);
+      notify(formatStr(STRINGS[langRef.current].app.gateFallback, { requested: p.requested, fallback: p.fallback }));
+    });
     return () => {
       off();
     };
@@ -1285,10 +1314,19 @@ export default function App() {
         s.id === sessionId ? { ...s, cwd: s.cwd || folder || undefined, messages: [...s.messages, msg] } : s,
       ),
     );
-  const appendAssistant = (sessionId: string, msg: ChatMessage) =>
+  const appendAssistant = (sessionId: string, msg: ChatMessage) => {
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, messages: [...s.messages, msg] } : s)),
     );
+    // A background session finished a turn — flag it until the user opens it.
+    if (sessionId !== activeIdRef.current) setUnreadIds((prev) => markUnread(prev, sessionId));
+  };
+  useEffect(() => {
+    setUnreadIds((prev) => clearUnread(prev, activeId));
+  }, [activeId]);
+  const stopSession = (sessionId: string) => {
+    stopRegistryRef.current.request(sessionId);
+  };
 
   const titleMaybe = (sessionId: string, firstPrompt: string) =>
     setSessions((prev) =>
@@ -1370,6 +1408,21 @@ export default function App() {
     const s = newSession(undefined, lang);
     setSessions((prev) => [s, ...prev]);
     setActiveId(s.id);
+  };
+
+  const forkSessionFrom = (sessionId: string, messageId: string) => {
+    const source = sessions.find((session) => session.id === sessionId);
+    if (!source) return;
+    const forked = forkSession(source, messageId, {
+      createId: () => uid('s'),
+      now: Date.now(),
+      title: `${source.title} (${av.forkSuffix})`,
+    });
+    if (!forked) return;
+    setSessions((prev) => [forked, ...prev]);
+    setActiveId(forked.id);
+    setView('thread');
+    setNotice(formatStr(av.forkedOk, { title: source.title }));
   };
   newChatRef.current = newChat;
 
@@ -1498,6 +1551,56 @@ export default function App() {
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? formatStr(av.exportFailed, { error: error.message }) : av.exportFailedBare);
+      return false;
+    }
+  };
+
+  const backupSessions = async (ids: string[]): Promise<boolean> => {
+    const targetIds = new Set(ids);
+    const selectedSessions = sessions.filter((session) => targetIds.has(session.id));
+    if (!selectedSessions.length) return false;
+    try {
+      const result = await api().exportBackup(
+        formatStr(av.backupFileName, { n: selectedSessions.length }),
+        createSessionBackup(selectedSessions),
+      );
+      if (!result.ok) {
+        setNotice(formatStr(av.backupFailed, { error: result.error || common.unknownError }));
+        return false;
+      }
+      if (result.canceled) return false;
+      setNotice(formatStr(av.backupedOk, { n: selectedSessions.length, tail: result.path ? formatStr(av.exportedPathTail, { path: result.path }) : av.exportedNoPath }));
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? formatStr(av.backupFailed, { error: error.message }) : av.backupFailedBare);
+      return false;
+    }
+  };
+
+  const importSessions = async (): Promise<boolean> => {
+    try {
+      const picked = await api().pickBackup();
+      if (!picked.ok || picked.cancelled || !picked.paths || picked.paths.length === 0) {
+        setNotice(av.importCanceled);
+        return false;
+      }
+      const read = await api().readFile(picked.paths[0]);
+      if (!read.ok || read.content === undefined) {
+        setNotice(formatStr(av.importReadFailed, { error: read.error || common.unknownError }));
+        return false;
+      }
+      const parsed = parseSessionBackup(read.content);
+      if (!parsed.ok) {
+        setNotice(formatStr(av.importParseFailed, { error: parsed.error }));
+        return false;
+      }
+      const now = Date.now();
+      const fresh = toImportSessions(parsed.sessions, { createId: () => uid('id'), now });
+      setSessions((prev) => [...fresh, ...prev]);
+      setNotice(formatStr(av.importedOk, { n: fresh.length }));
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? formatStr(av.importReadFailed, { error: error.message }) : av.importFailedBare);
       return false;
     }
   };
@@ -2400,6 +2503,11 @@ export default function App() {
     setCodexSignal((n) => n + 1);
   };
 
+  const openClaude = () => {
+    setView('thread');
+    setClaudeSignal((n) => n + 1);
+  };
+
   const openBrowser = () => {
     setView('thread');
     setEditorVisible(true);
@@ -2700,6 +2808,8 @@ export default function App() {
           activeId={active?.id ?? ''}
           groupBy={groupBy}
           runningIds={runningIds}
+          unreadIds={unreadIds}
+          onStopSession={stopSession}
           hostSessions={hostSessions}
           resumingId={resumingId}
           sessionSearchFocusRequest={sessionSearchFocusRequest}
@@ -2716,11 +2826,14 @@ export default function App() {
           onToggleArchivedMany={toggleSessionsArchived}
           onDeleteMany={deleteSessions}
           onExportMany={exportSessionTranscripts}
+          onBackupMany={backupSessions}
+          onImport={() => { void importSessions(); }}
           onToggleArchived={toggleSessionArchived}
           onRename={renameSession}
           onCollapse={() => setSidebarVisible(false)}
           onOpenSettings={() => setView('settings')}
           onOpenCodex={openCodex}
+          onOpenClaude={openClaude}
           onOpenFiles={openFilesViewer}
           projects={projects}
           pinnedProjects={pinnedProjects}
@@ -2802,8 +2915,11 @@ export default function App() {
             onOpenFileAtLine={openFileAtLine}
             onConfirm={requestConfirm}
             onRunningChange={(r) => setRunningIds((prev) => r ? (prev.includes(s.id) ? prev : [...prev, s.id]) : prev.filter((id) => id !== s.id))}
+            onRegisterStop={(stop) => stopRegistryRef.current.register(s.id, stop)}
             onMspSession={(mspSessionId, engine) => linkMsp(s.id, mspSessionId, engine)}
             onPatchSettings={patchSettings}
+            onSessionOverride={(patch) => setSessions((prev) => prev.map((row) => row.id === s.id ? { ...row, ...patch } : row))}
+            onForkSession={(messageId) => forkSessionFrom(s.id, messageId)}
             onUpdateMessage={(msgId, patch) => patchMessage(s.id, msgId, patch)}
             onDraftStatus={updateDraftSessionStatus}
             onQueueStatus={updateQueuedSessionCount}
@@ -2823,6 +2939,7 @@ export default function App() {
             }}
             onSlashCommand={(id) => runSlashCommand(s.id, id)}
             codexSignal={s.id === activeId ? codexSignal : 0}
+            claudeSignal={s.id === activeId ? claudeSignal : 0}
             tuneSignal={s.id === activeId ? tuneSignal : 0}
             tokenWin={tokenWin}
             quota={quota}

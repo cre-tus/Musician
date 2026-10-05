@@ -92,6 +92,24 @@ function serveError(code, detail) {
   return e;
 }
 
+// Serve downgrades gated effort tiers at turn time and says so on stderr
+// ("reasoning effort ultra is not available (gate ... is closed); using
+// xhigh"). stderr arrives fragmented, so scan tail+chunk and consume through
+// each match; the tail stays bounded for long-lived hosts.
+const GATE_FALLBACK_RE = /reasoning effort (\w+) is not available \(gate (\S+) is closed\); using (\w+)/;
+function scanGateFallback(tail, chunk) {
+  const combined = `${tail || ''}${chunk || ''}`;
+  const m = combined.match(GATE_FALLBACK_RE);
+  if (!m) {
+    return { hit: null, tail: combined.length > 512 ? combined.slice(-512) : combined };
+  }
+  const rest = combined.slice(m.index + m[0].length);
+  return {
+    hit: { requested: m[1], gate: m[2], fallback: m[3] },
+    tail: rest.length > 512 ? rest.slice(-512) : rest,
+  };
+}
+
 // ---------------------------------------------------------------- shapes
 function slimItem(it) {
   if (!it || typeof it !== 'object') return null;
@@ -103,6 +121,25 @@ function slimItem(it) {
     if (it[k] !== undefined) o[k] = it[k];
   }
   return o;
+}
+
+const TODO_STATUSES = new Set(['pending', 'inProgress', 'completed', 'cancelled']);
+
+// session/todoListChanged carries the whole list; slim + cap it for the wire.
+function slimTodos(items) {
+  if (!Array.isArray(items)) return [];
+  const out = [];
+  for (const it of items.slice(0, 50)) {
+    if (!it || typeof it !== 'object') continue;
+    const text = String(it.text == null ? '' : it.text).slice(0, 300);
+    if (!text) continue;
+    out.push({
+      text,
+      status: TODO_STATUSES.has(it.status) ? it.status : 'pending',
+      active: typeof it.activeForm === 'string' && it.activeForm ? it.activeForm.slice(0, 300) : undefined,
+    });
+  }
+  return out;
 }
 
 function slimOutcome(o) {
@@ -210,11 +247,11 @@ class MspEngine {
   }
 
   // One handshake attempt. Closes the failed attempt so no serve process leaks.
-  async _handshake(bin, cwd, caps, onStderr) {
+  async _handshake(bin, cwd, caps, onStderr, extraArgs) {
     const { spawnMspConnection } = await loadSdk();
     const handshake = spawnMspConnection({
       command: bin.path,
-      args: this.serveArgs,
+      args: extraArgs && extraArgs.length > 0 ? [...this.serveArgs, ...extraArgs] : this.serveArgs,
       cwd: cwd || undefined,
       env: process.env,
       onStderr,
@@ -234,8 +271,12 @@ class MspEngine {
     }
   }
 
-  async ensureHost(cwd, settings) {
-    const key = this._key(cwd);
+  async ensureHost(cwd, settings, opts) {
+    const readonly = !!(opts && opts.readonly);
+    // Read-only plan hosts are keyed apart and spawned with writes + shell
+    // disabled (fixed for the host's lifetime — the serve contract). Same
+    // suffix as readonlyHostKey() in src/lib/plan-mode.mjs (test-synced).
+    const key = readonly ? `${this._key(cwd)}\0readonly` : this._key(cwd);
     const existing = this.hosts.get(key);
     if (existing && !existing.dead) return existing;
     if (existing) this.hosts.delete(key);
@@ -246,16 +287,24 @@ class MspEngine {
     if (!this.museBin && /\.(cmd|bat|ps1|sh)$/i.test(bin.path)) {
       throw serveError('SERVE_NEEDS_EXE', bin.path);
     }
-    const onStderr = (c) => this.send('msp:stderr', { key, text: String(c) });
+    let gateTail = '';
+    const onStderr = (c) => {
+      const text = String(c);
+      this.send('msp:stderr', { key, text });
+      const scanned = scanGateFallback(gateTail, text);
+      gateTail = scanned.tail;
+      if (scanned.hit) this.send('msp:gate-fallback', { key, requested: scanned.hit.requested, gate: scanned.hit.gate, fallback: scanned.hit.fallback });
+    };
     let spawned;
     let sessionMcp = true;
+    const extraArgs = readonly ? ['--disable-write', '--disable-shell'] : null;
     try {
-      spawned = await this._handshake(bin, cwd, FULL_CAPS, onStderr);
+      spawned = await this._handshake(bin, cwd, FULL_CAPS, onStderr, extraArgs);
     } catch (firstErr) {
       // Hosts older than session MCP fail the full handshake: retry bare so
       // plain chat keeps working, and mark the host degraded for callers.
       try {
-        spawned = await this._handshake(bin, cwd, BASE_CAPS, onStderr);
+        spawned = await this._handshake(bin, cwd, BASE_CAPS, onStderr, extraArgs);
         sessionMcp = false;
       } catch (err) {
         throw serveError('SERVE_HANDSHAKE_FAIL', (err && err.message) || String(err));
@@ -307,13 +356,15 @@ class MspEngine {
     }
   }
 
-  async _threadSession(threadKey, cwd, settings, mspSessionId) {
+  async _threadSession(threadKey, cwd, settings, mspSessionId, readonly) {
     const live = this.threads.get(threadKey);
     if (live && !live.host.dead) return { t: live, history: [] };
-    let host = await this.ensureHost(cwd, settings);
+    let host = await this.ensureHost(cwd, settings, { readonly: !!readonly });
     const { Session } = await loadSdk();
     const s = settings || {};
-    const id = (live && live.mspSessionId) || mspSessionId;
+    // Read-only plan threads never resume: always a fresh plan session, so
+    // the main conversation history is neither read nor polluted.
+    const id = readonly ? null : ((live && live.mspSessionId) || mspSessionId);
     const config = this.getSessionConfig ? await this.getSessionConfig(s) : undefined;
     this._assertMcpCapable(host, config, id, s.lang);
     // Optional servers fail silently on the host (no error, no event), so
@@ -350,7 +401,7 @@ class MspEngine {
         }
         this.send('msp:host-bounced', { key: host.key, reason: 'mcp-config-conflict' });
         await this._dropHost(host);
-        host = await this.ensureHost(cwd, settings);
+        host = await this.ensureHost(cwd, settings, { readonly: !!readonly });
         this._assertMcpCapable(host, config, id, s.lang);
         res = await attempt();
       }
@@ -413,7 +464,28 @@ class MspEngine {
 
   async sendTurn(threadKey, text, opts) {
     const o = opts || {};
-    const { t, mcpHealth } = await this._threadSession(threadKey, o.cwd, o.settings, o.mspSessionId);
+    const ovModel = typeof o.modelOverride === 'string' && o.modelOverride ? o.modelOverride.slice(0, 200) : '';
+    const ovEffort = REASONING_EFFORTS.has(o.effortOverride) ? o.effortOverride : '';
+    const settings = ovModel || ovEffort
+      ? { ...o.settings, ...(ovModel ? { model: ovModel } : {}), ...(ovEffort ? { reasoningEffort: ovEffort } : {}) }
+      : o.settings;
+    const { t, mcpHealth } = await this._threadSession(threadKey, o.cwd, settings, o.mspSessionId, o.readonly);
+    // New threads start with the shim above; existing threads need an
+    // explicit push. Best-effort: the turn must never fail over this.
+    if (ovModel) {
+      try {
+        await this.setModel(threadKey, ovModel);
+      } catch {
+        /* turn continues with thread state */
+      }
+    }
+    if (ovEffort) {
+      try {
+        await this.setReasoningEffort(threadKey, ovEffort);
+      } catch {
+        /* turn continues with thread state */
+      }
+    }
     const short = String(text).length > 200 ? `${String(text).slice(0, 200)}…` : String(text);
     const turn = await t.session.sendUserTurn({ input: [{ type: 'text', text: String(text) }], displayText: short });
     t.turnId = turn.turnId;
@@ -478,6 +550,14 @@ class MspEngine {
       });
     } else if (method === 'usage/changed') {
       this.send('msp:usage', { key: host.key, usage: slimUsage(p.usage !== undefined ? p.usage : p) });
+    } else if (method === 'session/todoListChanged') {
+      const thread = sid ? host.sessions.get(sid) : null;
+      this.send('msp:todos', {
+        key: host.key,
+        threadKey: thread ? thread.threadKey : null,
+        sessionId: sid,
+        items: slimTodos(p.items),
+      });
     } else if (method === 'approval/resolved') {
       this.send('msp:approval-resolved', { key: host.key, sessionId: sid, approvalId: p.approvalId || null });
     } else if (method === 'session/listChanged') {
@@ -739,4 +819,4 @@ class MspEngine {
   }
 }
 
-module.exports = { MspEngine };
+module.exports = { MspEngine, scanGateFallback, slimTodos };

@@ -532,6 +532,19 @@ export const ExportIcon = ({ size }: P) => (
     <path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" />
   </svg>
 );
+export const ImportIcon = ({ size }: P) => (
+  <svg {...svgProps(size)}>
+    <path d="M12 14V3M8 7l4-4 4 4" />
+    <path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" />
+  </svg>
+);
+export const ForkIcon = ({ size }: P) => (
+  <svg {...svgProps(size)}>
+    <circle cx="6" cy="18" r="2.5" />
+    <circle cx="18" cy="18" r="2.5" />
+    <path d="M12 3v7m0 0c0 3-6 3-6 6m6-6c0 3 6 3 6 6" />
+  </svg>
+);
 export const RefreshIcon = ({ size }: P) => (
   <svg {...svgProps(size)}>
     <path d="M20 12a8 8 0 1 1-2.3-5.6" />
@@ -608,4 +621,11 @@ export const WrapLinesIcon = ({ size }: P) => (
 );
 export const GuitarIcon = ({ size = 24 }: P) => (
   <img className="guitar-pictogram" src={guitarPictogramDark} width={size} height={size} alt="" aria-hidden="true" />
+);
+export const PlanIcon = ({ size }: P) => (
+  <svg {...svgProps(size)}>
+    <rect x="5" y="4" width="14" height="17" rx="2" />
+    <path d="m9 13 2 2 4-4" />
+    <path d="M9 7.5h6" />
+  </svg>
 );

@@ -1,5 +1,6 @@
 import type { ChatMessage, CliSettings, MudexApi, Session } from '../types';
 import { normalizePathForComparison } from './path-utils.mjs';
+import { PLAN_FLAGS } from './plan-mode.mjs';
 export { normalizeCommitMessage, porcelainPath, porcelainStaged, porcelainStatus } from './git-status.mjs';
 
 export function hasBridge(): boolean {
@@ -49,9 +50,9 @@ export function needsShell(file: string): boolean {
   return /\.(cmd|bat)$/i.test(String(file || ''));
 }
 
-export function buildCmdPreview(s: CliSettings, prompt: string, cliPath?: string): string {
+export function buildCmdPreview(s: CliSettings, prompt: string, cliPath?: string, plan?: boolean): string {
   const exe = cliPath || s.cliPath || 'muse';
-  const base = ['exec', ...splitArgs(s.extraArgs), ...(s.model ? ['--model', s.model] : [])];
+  const base = ['exec', ...(plan ? PLAN_FLAGS : []), ...splitArgs(s.extraArgs), ...(s.model ? ['--model', s.model] : [])];
   if (needsShell(exe)) {
     // Mirrors main: the shell path passes the prompt via file.
     return [quoteArg(exe), ...base.map(quoteArg), '--prompt-file', quoteArg('<임시파일>')].join(' ');

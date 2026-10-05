@@ -15,6 +15,14 @@ export interface CliSettings {
   browserHome: string;
   backgroundNotifications: boolean;
   lang?: 'ko' | 'en';
+  hooks?: TurnHook[];
+}
+
+export interface TurnHook {
+  event: 'turn-start' | 'turn-done';
+  command: string;
+  enabled: boolean;
+  timeoutSec: number;
 }
 
 export interface BrowserState {
@@ -105,6 +113,9 @@ export interface ChatMessage {
   verify?: VerifyResult[];
   reverted?: boolean;
   work?: string[];
+  plan?: boolean;
+  checkpointId?: string;
+  todos?: MspTodo[];
 }
 
 export interface TokenUsage {
@@ -140,6 +151,12 @@ export interface MspStatus {
   error?: string;
 }
 
+export interface MspTodo {
+  text: string;
+  status: 'pending' | 'inProgress' | 'completed' | 'cancelled';
+  active?: string;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -150,6 +167,8 @@ export interface Session {
   mspSessionId?: string;
   pinned?: boolean;
   archived?: boolean;
+  modelOverride?: string;
+  effortOverride?: string;
 }
 
 export interface ApprovalChoice {
@@ -217,6 +236,12 @@ export interface HostSession {
 }
 
 export interface CodexSessionInfo {
+  id: string;
+  title: string;
+  updatedAt: string;
+}
+
+export interface ClaudeSessionInfo {
   id: string;
   title: string;
   updatedAt: string;
@@ -293,6 +318,8 @@ export interface MudexApi {
   getPathForFile: (file: File) => string;
   savePastedImage: (name: string, base64: string, mime: string) => Promise<{ ok: boolean; path?: string; error?: string }>;
   exportMarkdown: (title: string, markdown: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+  exportBackup: (title: string, json: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+  pickBackup: () => Promise<{ ok: boolean; cancelled?: boolean; paths?: string[] }>;
   readFileBytes: (filePath: string) => Promise<{ ok: boolean; base64?: string; ext?: string; mime?: string; error?: string }>;
   openFileDefault: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
   openExternalLink: (url: string) => Promise<{ ok: boolean; error?: string }>;
@@ -300,6 +327,8 @@ export interface MudexApi {
   verifyScripts: (cwd: string) => Promise<{ ok: boolean; scripts?: string[]; error?: string }>;
   verifyRun: (cwd: string, script: string) => Promise<{ ok: boolean; code?: number | null; tail?: string; error?: string }>;
   revertFiles: (cwd: string, files: string[]) => Promise<{ ok: boolean; results?: { file: string; ok: boolean; deleted?: boolean; error?: string }[]; error?: string }>;
+  checkpointCreate: (cwd: string, sessionId: string) => Promise<{ ok: boolean; id?: string; mode?: string; error?: string }>;
+  checkpointRestore: (cwd: string, sessionId: string, id: string) => Promise<{ ok: boolean; restored?: string[]; deleted?: string[]; failed?: string[]; error?: string }>;
   writeFile: (filePath: string, content: string, expectedOriginal?: string) => Promise<{ ok: boolean; error?: string }>;
   getSettings: () => Promise<{ ok: boolean; settings: CliSettings }>;
   saveSettings: (patch: Partial<CliSettings>) => Promise<{ ok: boolean; settings: CliSettings }>;
@@ -317,7 +346,7 @@ export interface MudexApi {
     resolvedPath?: string;
     source?: string;
   }>;
-  chatStart: (prompt: string, cwd: string, threadKey?: string, mspSessionId?: string) => Promise<ChatStartResult>;
+  chatStart: (prompt: string, cwd: string, threadKey?: string, mspSessionId?: string, plan?: boolean, overrides?: { model?: string; effort?: string }) => Promise<ChatStartResult>;
   chatCancel: (reqId: string) => Promise<{ ok: boolean }>;
   mspPrewarm: (cwd: string) => Promise<{ ok: boolean; key?: string; error?: string }>;
   mspDecide: (key: string, choiceId: string, feedback?: string) => Promise<{ ok: boolean }>;
@@ -334,10 +363,14 @@ export interface MudexApi {
   codexSessions: (cwd: string) => Promise<{ ok: boolean; sessions?: CodexSessionInfo[]; error?: string }>;
   codexRead: (sessionId: string, cwd: string) => Promise<{ ok: boolean; context?: string; title?: string; error?: string }>;
   codexQueue: (sessionId: string, cwd: string, context: string) => Promise<{ ok: boolean; error?: string }>;
+  claudeSessions: (cwd: string) => Promise<{ ok: boolean; sessions?: ClaudeSessionInfo[]; error?: string }>;
+  claudeRead: (sessionId: string, cwd: string) => Promise<{ ok: boolean; context?: string; title?: string; error?: string }>;
+  claudeQueue: (sessionId: string, cwd: string, context: string) => Promise<{ ok: boolean; error?: string }>;
   gitStatus: (cwd: string) => Promise<{ ok: boolean; files?: string[]; error?: string }>;
   gitShow: (cwd: string, file: string) => Promise<{ ok: boolean; content?: string; error?: string }>;
   gitStage: (cwd: string, files: string[], staged: boolean) => Promise<{ ok: boolean; error?: string }>;
   gitCommit: (cwd: string, message: string) => Promise<{ ok: boolean; hash?: string; error?: string }>;
+  commitMessage: (cwd: string, files: string[]) => Promise<{ ok: boolean; message?: string; error?: string }>;
   gitBranch: (cwd: string) => Promise<{ ok: boolean; branch?: string; counts?: string; remote?: string; error?: string }>;
   gitBranches: (cwd: string) => Promise<{ ok: boolean; current?: string; branches?: string[]; error?: string }>;
   gitCheckout: (cwd: string, branch: string) => Promise<{ ok: boolean; branch?: string; error?: string }>;
@@ -388,6 +421,10 @@ export interface MudexApi {
   onMspTokens: (fn: (p: { sessionId: string | null; turnId: string | null; usage: TokenUsage | null; cumulative: { totalTokens: number } | null }) => void) => () => void;
   onMspSessionsChanged: (fn: (p: { key: string }) => void) => () => void;
   onMspHostDead: (fn: (p: { key: string; code: number | null }) => void) => () => void;
+  onMspGateFallback: (fn: (p: { key: string; requested: string; gate: string; fallback: string }) => void) => () => void;
+  onMspTodos: (fn: (p: { key: string; threadKey: string | null; sessionId: string | null; items: MspTodo[] }) => void) => () => void;
+  onHookResult: (fn: (p: { event: string; command: string; ok: boolean; code: number | null; error: string | null }) => void) => () => void;
+  hookTest: (command: string, cwd: string) => Promise<{ ok: boolean; code?: number | null; error?: string; stdout?: string; stderr?: string } >;
 }
 
 export interface MspItem {

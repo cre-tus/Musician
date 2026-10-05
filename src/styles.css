@@ -432,6 +432,7 @@ textarea::placeholder {
   min-width: 0;
 }
 .chat-title {
+  flex: 1 1 auto;
   font-weight: 800;
   font-size: 15px;
   white-space: nowrap;
@@ -441,6 +442,7 @@ textarea::placeholder {
 }
 .chat-workspace {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 5px;
   min-width: 0;
@@ -527,6 +529,20 @@ textarea::placeholder {
   gap: 8px;
   justify-content: center;
   margin-top: 8px;
+}
+.empty-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  justify-content: center;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.empty-hints code {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--accent-text);
 }
 .example-btn {
   border: 1px solid var(--border);
@@ -1781,6 +1797,20 @@ pre.worklog {
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
 }
+.thread-unread-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: blink 1.6s infinite;
+}
+.thread-row.unread .thread-title {
+  font-weight: 700;
+}
+.thread-stop {
+  color: var(--danger);
+}
 .thread-project-path {
   display: inline-flex;
   align-items: center;
@@ -2972,6 +3002,22 @@ pre.worklog {
   color: var(--muted);
   padding: 3px 6px 2px;
 }
+.tune-desc {
+  margin: 0;
+  padding: 0 6px 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.tune-subtitle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 4px 6px 2px;
+}
 .tune-meter-value {
   font-size: 11.5px;
   color: var(--accent-text);
@@ -3281,6 +3327,120 @@ pre.worklog {
 .tool-btn.mic.on {
   background: var(--danger);
   color: #fff;
+}
+.tool-btn.plan.on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.plan-badge {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.plan-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  color: var(--accent-text);
+  font-size: 12px;
+}
+.plan-bar-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-bar .btn,
+.plan-bar .btn-primary {
+  flex: none;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.msg-plan-tag {
+  flex: none;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.todo-strip {
+  padding: 7px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+.todo-strip-head {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  margin-bottom: 4px;
+}
+.todo-done {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.todo-done summary {
+  cursor: pointer;
+}
+.todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.todo-item {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.todo-item.completed .todo-text {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+.todo-item.cancelled .todo-text {
+  color: var(--muted);
+}
+.todo-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.todo-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  align-self: center;
+  border: 1.5px solid var(--muted);
+}
+.todo-dot.inProgress {
+  border-color: var(--accent-text);
+  background: var(--accent-text);
+}
+.todo-dot.completed {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+.todo-dot.cancelled {
+  border-color: var(--danger);
 }
 
 /* token strip below the chat composer */
@@ -3949,6 +4109,120 @@ pre.worklog {
   flex: none;
   color: var(--muted);
   font-size: 10px;
+}
+.composer-slash-option > span.composer-slash-badge {
+  flex: none;
+  min-width: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.chat-context-meter {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: default;
+}
+.custom-cmd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+.custom-cmd-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+.custom-cmd-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+.custom-cmd-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.custom-cmd-slash {
+  flex: none;
+  color: var(--accent-text);
+  font-weight: 700;
+}
+.custom-cmd-name {
+  flex: 0 1 160px;
+  min-width: 0;
+  font-family: var(--mono);
+}
+.custom-cmd-desc {
+  flex: 1;
+  min-width: 0;
+}
+.custom-cmd-del {
+  flex: none;
+}
+.custom-cmd-template {
+  width: 100%;
+  resize: vertical;
+  min-height: 44px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.custom-cmd-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.custom-cmd-msg {
+  color: var(--muted);
+  font-size: 12px;
+}
+.hook-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.hook-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+.hook-enabled {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+.hook-event {
+  flex: none;
+  max-width: 110px;
+}
+.hook-command {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.hook-timeout {
+  flex: none;
+  width: 56px;
+}
+.hook-row .btn {
+  flex: none;
 }
 .composer-bar {
   gap: 5px;

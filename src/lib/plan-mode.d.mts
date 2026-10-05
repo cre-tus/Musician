@@ -1,0 +1,12 @@
+export const PLAN_FLAGS: string[];
+export const PLAN_THREAD_SUFFIX: string;
+export const READONLY_HOST_SUFFIX: string;
+export function planModeKey(sessionId: unknown): string;
+export function readPlanMode(storage: Pick<Storage, 'getItem'> | null | undefined, sessionId: unknown): boolean;
+export function writePlanMode(storage: Pick<Storage, 'setItem' | 'removeItem'> | null | undefined, sessionId: unknown, on: unknown): boolean;
+export function planThreadKey(threadKey: unknown): string;
+export function isPlanThreadKey(key: unknown): boolean;
+export function matchesSessionThread(threadKey: unknown, sessionId: unknown): boolean;
+export function readonlyHostKey(cwd: unknown): string;
+export function buildPlanPrompt(text: unknown, lang?: 'ko' | 'en'): string;
+export function buildExecutePrompt(planText: unknown, lang?: 'ko' | 'en'): string;

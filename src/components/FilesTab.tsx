@@ -4,6 +4,7 @@ import { CheckIcon, ChevronDownIcon, ChevronRightIcon, ClockIcon, CollapseIcon, 
 import { api, hasBridge } from '../lib/mudex';
 import { normalizePinnedFilePath, pinnedFileParentDirectories, pinnedFileStorageKey, readPinnedFilePaths, reconcilePinnedFilePaths, removePinnedFilePaths, renamePinnedFilePaths } from '../lib/pinned-file-paths.mjs';
 import { normalizeCommitMessage, parseUpstreamCounts } from '../lib/git-status.mjs';
+import { commitGroupCheckState, commitInitialSelection, groupCommitFiles, partitionGroupStage } from '../lib/commit-groups.mjs';
 import { readExplorerSectionState, toggleExplorerSection, writeExplorerSectionState } from '../lib/explorer-section-state.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import type { ExplorerSection } from '../lib/explorer-section-state.mjs';
@@ -75,8 +76,12 @@ export default function FilesTab(props: Props) {
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
   const [commitBusy, setCommitBusy] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
   const [commitError, setCommitError] = useState('');
   const [commitSelection, setCommitSelection] = useState<Record<string, boolean>>({});
+  const [commitGrouped, setCommitGrouped] = useState(true);
+  const [changesGrouped, setChangesGrouped] = useState(true);
+  const [collapsedChangeGroups, setCollapsedChangeGroups] = useState<Record<string, boolean>>({});
   const stagedCount = changedFiles.filter((f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()]).length;
   const [gitBranch, setGitBranch] = useState<{ branch: string; ahead: number; behind: number; remote: string } | null>(null);
   const [gitSyncBusy, setGitSyncBusy] = useState<'pull' | 'push' | null>(null);
@@ -96,10 +101,10 @@ export default function FilesTab(props: Props) {
 
   const absForChanged = (file: string) => `${folder}${folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\'}${file.replace(/\//g, '\\')}`;
 
-  const openCommit = () => {
+  const openCommit = (onlyFiles?: string[]) => {
     // Default the checklist to the staged set when one exists; otherwise everything.
-    const staged = changedFiles.filter((f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()]);
-    const initial = staged.length > 0 ? staged : changedFiles;
+    // A directory group passes its own files to commit just that directory.
+    const initial = commitInitialSelection(changedFiles, (f) => Boolean(changedStaged[f.replace(/\\/g, '/').toLowerCase()]), onlyFiles);
     setCommitSelection(Object.fromEntries(initial.map((f) => [f, true])));
     setCommitError('');
     setCommitOpen(true);
@@ -113,6 +118,92 @@ export default function FilesTab(props: Props) {
       onRefreshChanged();
     } catch (error) {
       props.onNotice(error instanceof Error ? error.message : String(error), 'git');
+    }
+  };
+
+  const toggleGroupStaged = async (files: string[]) => {
+    if (!folder || !hasBridge() || files.length === 0) return;
+    const { stage, unstage } = partitionGroupStage(files, (f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()] === true);
+    const stageError = (error: string | undefined) => error === 'OUTSIDE_WORKSPACE' ? ft.stageOutside : error === 'GIT_NOT_FOUND' ? ft.gitNotFound : error || ft.stageFailed;
+    try {
+      if (stage.length > 0) {
+        const added = await api().gitStage(folder, stage.map(absForChanged), false);
+        if (!added.ok) {
+          props.onNotice(stageError(added.error), 'git');
+          onRefreshChanged();
+          return;
+        }
+      }
+      if (unstage.length > 0) {
+        const removed = await api().gitStage(folder, unstage.map(absForChanged), true);
+        if (!removed.ok) {
+          props.onNotice(stageError(removed.error), 'git');
+          onRefreshChanged();
+          return;
+        }
+      }
+      onRefreshChanged();
+    } catch (error) {
+      props.onNotice(error instanceof Error ? error.message : String(error), 'git');
+    }
+  };
+
+  const renderChangedRow = (f: string) => {
+    const kindKey = f.replace(/\\/g, '/').toLowerCase();
+    const kind = changedKinds[kindKey] || 'M';
+    const staged = changedStaged[kindKey] === true;
+    return (
+      <div key={f} className={`changed-row kind-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`}>
+        {kind !== 'C' && (
+          <button
+            type="button"
+            className={staged ? 'icon-btn stage-toggle on' : 'icon-btn stage-toggle'}
+            aria-pressed={staged}
+            title={staged ? ft.unstage : ft.stage}
+            aria-label={formatStr(ft.stageLabel, { file: f, action: staged ? ft.unstage : ft.stage })}
+            onClick={() => void toggleStaged(f, staged)}
+          >
+            {staged ? <CheckIcon size={13} /> : <PlusIcon size={13} />}
+          </button>
+        )}
+        <button
+          className="changed-item"
+          title={formatStr(ft.diffTitle, { file: f })}
+          onClick={() => onOpenChanged(f)}
+        >
+          <FileTypeIcon size={15} name={f} />
+          <span className="changed-name">{f}</span>
+          <span className={`git-status-badge status-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`} title={formatStr(staged ? ft.gitStaged : ft.gitState, { label: strings.gitKind[kind.toLowerCase()] || kind, kind })}>{kind}</span>
+        </button>
+      </div>
+    );
+  };
+
+  const generateCommitMessage = async () => {
+    if (genBusy || commitBusy || !folder || !hasBridge()) return;
+    const selected = changedFiles.filter((f) => commitSelection[f]);
+    if (selected.length === 0) {
+      setCommitError(ft.commitNoneSelected);
+      return;
+    }
+    setGenBusy(true);
+    setCommitError('');
+    try {
+      const result = await api().commitMessage(folder, selected);
+      if (result.ok && result.message) {
+        setCommitMessage(result.message);
+      } else {
+        setCommitError(
+          result.error === 'NO_CHANGES' ? ft.genNoChanges
+            : result.error === 'TIMEOUT' ? ft.genTimeout
+            : result.error === 'GIT_NOT_FOUND' ? ft.gitNotFound
+              : result.error || ft.genFailed,
+        );
+      }
+    } catch (error) {
+      setCommitError(error instanceof Error ? error.message : ft.genFailed);
+    } finally {
+      setGenBusy(false);
     }
   };
 
@@ -161,6 +252,31 @@ export default function FilesTab(props: Props) {
     } finally {
       setCommitBusy(false);
     }
+  };
+
+  // Conflicted ('C') rows stay out of the dialog in both flat and grouped views.
+  const committableFiles = changedFiles.filter((f) => (changedKinds[f.replace(/\\/g, '/').toLowerCase()] || 'M') !== 'C');
+
+  const renderCommitFileRow = (f: string) => {
+    const kindKey = f.replace(/\\/g, '/').toLowerCase();
+    const kind = changedKinds[kindKey] || 'M';
+    return (
+      <label key={f} className={`commit-file-row kind-${kind.toLowerCase()}${commitSelection[f] ? ' is-checked' : ' is-unchecked'}`}>
+        <input type="checkbox" checked={!!commitSelection[f]} disabled={commitBusy} onChange={() => setCommitSelection((prev) => ({ ...prev, [f]: !prev[f] }))} />
+        <FileTypeIcon size={14} name={f} />
+        <span className="changed-name">{f}</span>
+        <span className={`git-status-badge status-${kind.toLowerCase()}`} title={formatStr(ft.gitState, { label: strings.gitKind[kind.toLowerCase()] || kind, kind })}>{kind}</span>
+      </label>
+    );
+  };
+
+  const toggleCommitGroup = (files: string[], state: 'all' | 'some' | 'none') => {
+    const next = state !== 'all';
+    setCommitSelection((prev) => {
+      const copy = { ...prev };
+      for (const file of files) copy[file] = next;
+      return copy;
+    });
   };
 
   const refreshGitBranch = async () => {
@@ -868,6 +984,11 @@ export default function FilesTab(props: Props) {
                 {ft.commitBtn}{stagedCount > 0 ? ` ${stagedCount}` : ''}
               </button>
             )}
+            {changedFiles.length > 0 && (
+              <button className="mini-btn changes-group-toggle" type="button" aria-pressed={changesGrouped} onClick={() => setChangesGrouped((v) => !v)}>
+                {changesGrouped ? ft.commitFlatList : ft.commitGroupByDir}
+              </button>
+            )}
           </div>
           <div className="git-remote-row">
             {gitBranch && (
@@ -891,38 +1012,66 @@ export default function FilesTab(props: Props) {
           </div>
           {sections.changed && changedFiles.length === 0 ? (
             <div className="empty-note">{ft.noChanges}</div>
-          ) : sections.changed ? (
-            <div className="changed-list">
-              {changedFiles.map((f) => {
-                const kindKey = f.replace(/\\/g, '/').toLowerCase();
-                const kind = changedKinds[kindKey] || 'M';
-                const staged = changedStaged[kindKey] === true;
+          ) : sections.changed && changesGrouped ? (
+            <div className="changed-list is-grouped">
+              {groupCommitFiles(changedFiles).map((group) => {
+                const eligible = group.files.filter((f) => (changedKinds[f.replace(/\\/g, '/').toLowerCase()] || 'M') !== 'C');
+                const stagedCount = eligible.filter((f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()] === true).length;
+                const allStaged = eligible.length > 0 && stagedCount === eligible.length;
+                const collapsed = !!collapsedChangeGroups[group.dir];
+                const label = group.dir || ft.commitRootGroup;
                 return (
-                  <div key={f} className={`changed-row kind-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`}>
-                    {kind !== 'C' && (
+                  <div key={group.dir || '.'} className="changes-group" data-dir={group.dir}>
+                    <div className="changes-group-head">
                       <button
                         type="button"
-                        className={staged ? 'icon-btn stage-toggle on' : 'icon-btn stage-toggle'}
-                        aria-pressed={staged}
-                        title={staged ? ft.unstage : ft.stage}
-                        aria-label={formatStr(ft.stageLabel, { file: f, action: staged ? ft.unstage : ft.stage })}
-                        onClick={() => void toggleStaged(f, staged)}
+                        className="icon-btn changes-collapse"
+                        aria-expanded={!collapsed}
+                        onClick={() => setCollapsedChangeGroups((prev) => ({ ...prev, [group.dir]: !prev[group.dir] }))}
                       >
-                        {staged ? <CheckIcon size={13} /> : <PlusIcon size={13} />}
+                        {collapsed ? <ChevronRightIcon size={12} /> : <ChevronDownIcon size={12} />}
                       </button>
+                      {eligible.length > 0 && (
+                        <button
+                          type="button"
+                          className={allStaged ? 'icon-btn stage-toggle on' : 'icon-btn stage-toggle'}
+                          aria-pressed={allStaged}
+                          title={allStaged ? ft.unstage : ft.stage}
+                          aria-label={formatStr(ft.stageLabel, { file: label, action: allStaged ? ft.unstage : ft.stage })}
+                          onClick={() => void toggleGroupStaged(eligible)}
+                        >
+                          {allStaged ? <CheckIcon size={13} /> : <PlusIcon size={13} />}
+                        </button>
+                      )}
+                      <span className="changes-group-name" title={label}>
+                        <FolderIcon size={13} />
+                        <span className="changes-group-label">{label}</span>
+                      </span>
+                      <span className="changes-group-count">{stagedCount}/{group.files.length}</span>
+                      {eligible.length > 0 && (
+                        <button
+                          type="button"
+                          className="mini-btn changes-group-commit"
+                          title={formatStr(ft.commitGroupTitle, { dir: label })}
+                          aria-label={formatStr(ft.commitGroupTitle, { dir: label })}
+                          onClick={() => openCommit(eligible)}
+                        >
+                          {ft.commitBtn}
+                        </button>
+                      )}
+                    </div>
+                    {!collapsed && (
+                      <div className="changes-group-rows">
+                        {group.files.map((f) => renderChangedRow(f))}
+                      </div>
                     )}
-                    <button
-                      className="changed-item"
-                      title={formatStr(ft.diffTitle, { file: f })}
-                      onClick={() => onOpenChanged(f)}
-                    >
-                      <FileTypeIcon size={15} name={f} />
-                      <span className="changed-name">{f}</span>
-                      <span className={`git-status-badge status-${kind.toLowerCase()}${staged ? ' is-staged' : ''}`} title={formatStr(staged ? ft.gitStaged : ft.gitState, { label: strings.gitKind[kind.toLowerCase()] || kind, kind })}>{kind}</span>
-                    </button>
                   </div>
                 );
               })}
+            </div>
+          ) : sections.changed ? (
+            <div className="changed-list">
+              {changedFiles.map((f) => renderChangedRow(f))}
             </div>
           ) : null}
         </div>
@@ -937,32 +1086,40 @@ export default function FilesTab(props: Props) {
             <div className="commit-file-head">
               <span>{ft.commitFilesTitle}</span>
               <span className="commit-file-actions">
+                <button type="button" className="mini-btn commit-group-toggle" aria-pressed={commitGrouped} disabled={commitBusy} onClick={() => setCommitGrouped((v) => !v)}>{commitGrouped ? ft.commitFlatList : ft.commitGroupByDir}</button>
                 <button type="button" className="mini-btn" disabled={commitBusy} onClick={() => setCommitSelection(Object.fromEntries(changedFiles.map((f) => [f, true])))}>{ft.commitSelectAll}</button>
                 <button type="button" className="mini-btn" disabled={commitBusy} onClick={() => setCommitSelection({})}>{ft.commitDeselectAll}</button>
               </span>
             </div>
             <div className="commit-file-list" role="group" aria-label={ft.commitFilesTitle}>
-              {changedFiles.filter((f) => (changedKinds[f.replace(/\\/g, '/').toLowerCase()] || 'M') !== 'C').map((f) => {
-                const kindKey = f.replace(/\\/g, '/').toLowerCase();
-                const kind = changedKinds[kindKey] || 'M';
+              {commitGrouped ? groupCommitFiles(committableFiles).map((group) => {
+                const state = commitGroupCheckState(group.files, commitSelection);
+                const checkedCount = group.files.filter((f) => commitSelection[f]).length;
+                const label = group.dir || ft.commitRootGroup;
                 return (
-                  <label key={f} className={`commit-file-row kind-${kind.toLowerCase()}${commitSelection[f] ? ' is-checked' : ' is-unchecked'}`}>
-                    <input type="checkbox" checked={!!commitSelection[f]} disabled={commitBusy} onChange={() => setCommitSelection((prev) => ({ ...prev, [f]: !prev[f] }))} />
-                    <FileTypeIcon size={14} name={f} />
-                    <span className="changed-name">{f}</span>
-                    <span className={`git-status-badge status-${kind.toLowerCase()}`} title={formatStr(ft.gitState, { label: strings.gitKind[kind.toLowerCase()] || kind, kind })}>{kind}</span>
-                  </label>
+                  <div key={group.dir || '.'} className="commit-group" data-dir={group.dir}>
+                    <label className="commit-group-head">
+                      <input type="checkbox" checked={state === 'all'} ref={(el) => { if (el) el.indeterminate = state === 'some'; }} disabled={commitBusy} aria-label={`${label} (${checkedCount}/${group.files.length})`} onChange={() => toggleCommitGroup(group.files, state)} />
+                      <FolderIcon size={14} />
+                      <span className="commit-group-name">{label}</span>
+                      <span className="commit-group-count">{checkedCount}/{group.files.length}</span>
+                    </label>
+                    <div className="commit-group-files">
+                      {group.files.map((f) => renderCommitFileRow(f))}
+                    </div>
+                  </div>
                 );
-              })}
+              }) : committableFiles.map((f) => renderCommitFileRow(f))}
             </div>
             <label className="field">{ft.msgLabel}
-              <textarea value={commitMessage} disabled={commitBusy} onChange={(event) => { setCommitMessage(event.target.value); setCommitError(''); }} placeholder={ft.msgPh} aria-label={ft.msgPh} rows={3} aria-invalid={!!commitError} />
+              <textarea value={commitMessage} disabled={commitBusy || genBusy} onChange={(event) => { setCommitMessage(event.target.value); setCommitError(''); }} placeholder={ft.msgPh} aria-label={ft.msgPh} rows={3} aria-invalid={!!commitError} />
             </label>
             {commitError && <div className="tree-error explorer-entry-error" role="alert">{commitError}</div>}
           </div>
           <div className="modal-footer">
-            <button className="btn" type="button" disabled={commitBusy} onClick={() => setCommitOpen(false)}>{strings.common.cancel}</button>
-            <button className="btn-primary" type="button" disabled={commitBusy || !normalizeCommitMessage(commitMessage).ok} onClick={() => void submitCommit()}>{commitBusy ? ft.committing : ft.commitBtn}</button>
+            <button className="btn commit-gen" type="button" disabled={commitBusy || genBusy} title={ft.genTitle} onClick={() => void generateCommitMessage()}>{genBusy ? ft.genBusy : ft.genBtn}</button>
+            <button className="btn" type="button" disabled={commitBusy || genBusy} onClick={() => setCommitOpen(false)}>{strings.common.cancel}</button>
+            <button className="btn-primary" type="button" disabled={commitBusy || genBusy || !normalizeCommitMessage(commitMessage).ok} onClick={() => void submitCommit()}>{commitBusy ? ft.committing : ft.commitBtn}</button>
           </div>
         </section>
       </div>}

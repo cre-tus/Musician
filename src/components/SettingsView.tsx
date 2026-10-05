@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { CliSettings, CliStatus, MudexApi } from '../types';
+import type { CliSettings, CliStatus, MudexApi, TurnHook } from '../types';
 import { api, hasBridge } from '../lib/mudex';
 import { maskHomePath, maskHomePathEverywhere } from '../lib/path-utils.mjs';
+import { SLASH_COMMANDS } from '../lib/slash-commands.mjs';
+import { CUSTOM_SLASH_KEY, readCustomSlashCommands, writeCustomSlashCommands } from '../lib/custom-slash.mjs';
+import type { CustomSlashCommand } from '../lib/custom-slash.mjs';
+import { mirrorStoredKey } from '../lib/durable-state.mjs';
+import { cleanHooks, normalizeHookTimeout, validateHooks } from '../lib/hooks.mjs';
 import { formatStr } from '../lib/i18n.mjs';
 import { useLang, useStrings } from '../lib/lang';
 import { BackIcon, CopyIcon, SearchIcon, XIcon } from './icons';
@@ -60,6 +65,71 @@ export default function SettingsView(props: Props) {
   const [mcpRegistration, setMcpRegistration] = useState('');
   const [filterQuery, setFilterQuery] = useState('');
   const [filterSummary, setFilterSummary] = useState('');
+  const [customCmds, setCustomCmds] = useState<CustomSlashCommand[]>(() => {
+    try { return readCustomSlashCommands(localStorage, SLASH_COMMANDS.map((c) => c.id)); } catch { return []; }
+  });
+  const [customMsg, setCustomMsg] = useState('');
+  const saveCustomCmds = () => {
+    const builtinIds = SLASH_COMMANDS.map((c) => c.id);
+    const r = writeCustomSlashCommands(localStorage, customCmds, builtinIds);
+    if (!r.ok) {
+      const code = r.error || 'WRITE_FAILED';
+      setCustomMsg(
+        code === 'BAD_NAME' ? st.customErrBadName
+        : code === 'DUPLICATE' ? st.customErrDuplicate
+        : code === 'RESERVED' ? st.customErrReserved
+        : code === 'EMPTY_TEMPLATE' ? st.customErrEmpty
+        : code === 'TEMPLATE_TOO_LONG' ? st.customErrTooLong
+        : code === 'TOO_MANY' ? st.customErrTooMany
+        : st.customErrWrite,
+      );
+      return;
+    }
+    if (hasBridge()) {
+      try {
+        const apiObj = api();
+        mirrorStoredKey({ set: (key: string, value: string | null) => apiObj.rendererStateSet(key, value) }, localStorage, CUSTOM_SLASH_KEY);
+      } catch { /* durable backup best-effort */ }
+    }
+    setCustomCmds(readCustomSlashCommands(localStorage, builtinIds));
+    setCustomMsg(formatStr(st.customSaved, { n: customCmds.length }));
+  };
+  const [hooks, setHooks] = useState<TurnHook[]>(() => {
+    try { return cleanHooks(settings.hooks); } catch { return []; }
+  });
+  const [hookMsg, setHookMsg] = useState('');
+  const [hookTesting, setHookTesting] = useState<number | null>(null);
+  const saveHooks = () => {
+    const v = validateHooks(hooks);
+    if (!v.ok) {
+      const code = v.error || 'EMPTY_COMMAND';
+      const base =
+        code === 'EMPTY_COMMAND' ? st.hookErrEmpty
+        : code === 'COMMAND_TOO_LONG' ? st.hookErrTooLong
+        : code === 'TOO_MANY' ? st.hookErrTooMany
+        : code === 'BAD_EVENT' ? st.hookErrBadEvent
+        : st.hookErrDuplicate;
+      setHookMsg(v.index ? `${base} (#${v.index})` : base);
+      return;
+    }
+    const clean = cleanHooks(hooks);
+    commit({ hooks: clean });
+    setHooks(clean);
+    setHookMsg(formatStr(st.hookSaved, { n: clean.length }));
+  };
+  const testHook = async (index: number) => {
+    const h = hooks[index];
+    if (!h || !h.command.trim() || !hasBridge() || hookTesting !== null) return;
+    setHookTesting(index);
+    try {
+      const r = await api().hookTest(h.command.trim(), folder || '');
+      setHookMsg(r.ok ? formatStr(st.hookTestOk, { code: r.code ?? 0 }) : formatStr(st.hookTestFailed, { err: r.error || '' }));
+    } catch (e) {
+      setHookMsg(formatStr(st.hookTestFailed, { err: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setHookTesting(null);
+    }
+  };
   const settingsSectionsRef = useRef<HTMLDivElement | null>(null);
   const filterEmptyRef = useRef<HTMLDivElement | null>(null);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
@@ -587,6 +657,198 @@ export default function SettingsView(props: Props) {
             <code>{st.execNoteCmd}</code>{st.execNoteC}{' '}
             {st.execNoteD}
           </p>
+        </div>
+
+        <div className="section-cap">{st.secCustom}</div>
+        <div className="panel">
+          <div className="setting-row col">
+            <div>
+              <b>{st.secCustom}</b>
+              <p>{st.customDesc}</p>
+              <p><code>$ARGUMENTS</code> · {st.customHint}</p>
+            </div>
+            <div className="custom-cmd-list">
+              {customCmds.length === 0 && <div className="custom-cmd-empty">{st.customEmpty}</div>}
+              {customCmds.map((cmd, index) => (
+                <div className="custom-cmd-row" key={`custom-row-${index}`}>
+                  <div className="custom-cmd-top">
+                    <span className="custom-cmd-slash">/</span>
+                    <input
+                      className="custom-cmd-name"
+                      value={cmd.name}
+                      onChange={(e) => {
+                        const next = customCmds.slice();
+                        next[index] = { ...next[index], name: e.target.value };
+                        setCustomCmds(next);
+                        setCustomMsg('');
+                      }}
+                      placeholder={st.customNamePh}
+                      spellCheck={false}
+                      aria-label={st.customNamePh}
+                    />
+                    <input
+                      className="custom-cmd-desc"
+                      value={cmd.desc}
+                      onChange={(e) => {
+                        const next = customCmds.slice();
+                        next[index] = { ...next[index], desc: e.target.value };
+                        setCustomCmds(next);
+                        setCustomMsg('');
+                      }}
+                      placeholder={st.customDescPh}
+                      spellCheck={false}
+                      aria-label={st.customDescPh}
+                    />
+                    <button
+                      type="button"
+                      className="btn custom-cmd-del"
+                      onClick={() => {
+                        setCustomCmds(customCmds.filter((_, i) => i !== index));
+                        setCustomMsg('');
+                      }}
+                    >
+                      {st.customDelete}
+                    </button>
+                  </div>
+                  <textarea
+                    className="custom-cmd-template"
+                    value={cmd.template}
+                    onChange={(e) => {
+                      const next = customCmds.slice();
+                      next[index] = { ...next[index], template: e.target.value };
+                      setCustomCmds(next);
+                      setCustomMsg('');
+                    }}
+                    placeholder={st.customTemplatePh}
+                    rows={2}
+                    spellCheck={false}
+                    aria-label={st.customTemplatePh}
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="custom-cmd-bar">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setCustomCmds([...customCmds, { name: '', template: '', desc: '' }]);
+                  setCustomMsg('');
+                }}
+              >
+                {st.customAdd}
+              </button>
+              <button type="button" className="btn-primary" onClick={saveCustomCmds}>
+                {st.customSave}
+              </button>
+              {customMsg && <span className="custom-cmd-msg" role="status">{customMsg}</span>}
+            </div>
+          </div>
+        </div>
+
+        <div className="section-cap">{st.secHooks}</div>
+        <div className="panel">
+          <div className="setting-row col">
+            <div>
+              <b>{st.secHooks}</b>
+              <p>{st.hookDesc}</p>
+            </div>
+            <div className="hook-list">
+              {hooks.length === 0 && <div className="custom-cmd-empty">{st.hookEmpty}</div>}
+              {hooks.map((h, index) => (
+                <div className="hook-row" key={`hook-row-${index}`}>
+                  <label className="hook-enabled">
+                    <input
+                      type="checkbox"
+                      checked={h.enabled !== false}
+                      onChange={(e) => {
+                        const next = hooks.slice();
+                        next[index] = { ...next[index], enabled: e.target.checked };
+                        setHooks(next);
+                        setHookMsg('');
+                      }}
+                    />
+                  </label>
+                  <select
+                    className="hook-event"
+                    value={h.event}
+                    onChange={(e) => {
+                      const next = hooks.slice();
+                      next[index] = { ...next[index], event: e.target.value as TurnHook['event'] };
+                      setHooks(next);
+                      setHookMsg('');
+                    }}
+                    aria-label={st.secHooks}
+                  >
+                    <option value="turn-start">{st.hookEventTurnStart}</option>
+                    <option value="turn-done">{st.hookEventTurnDone}</option>
+                  </select>
+                  <input
+                    className="hook-command"
+                    value={h.command}
+                    onChange={(e) => {
+                      const next = hooks.slice();
+                      next[index] = { ...next[index], command: e.target.value };
+                      setHooks(next);
+                      setHookMsg('');
+                    }}
+                    placeholder={st.hookCommandPh}
+                    spellCheck={false}
+                    aria-label={st.hookCommandPh}
+                  />
+                  <input
+                    className="hook-timeout"
+                    type="number"
+                    min={5}
+                    max={120}
+                    value={h.timeoutSec}
+                    onChange={(e) => {
+                      const next = hooks.slice();
+                      next[index] = { ...next[index], timeoutSec: normalizeHookTimeout(e.target.value) };
+                      setHooks(next);
+                      setHookMsg('');
+                    }}
+                    title="timeout (s)"
+                    aria-label="timeout (s)"
+                  />
+                  <button
+                    type="button"
+                    className="btn hook-test"
+                    disabled={hookTesting !== null}
+                    onClick={() => void testHook(index)}
+                  >
+                    {st.hookTest}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn custom-cmd-del"
+                    onClick={() => {
+                      setHooks(hooks.filter((_, i) => i !== index));
+                      setHookMsg('');
+                    }}
+                  >
+                    {st.hookDelete}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="custom-cmd-bar">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setHooks([...hooks, { event: 'turn-done', command: '', enabled: true, timeoutSec: 30 }]);
+                  setHookMsg('');
+                }}
+              >
+                {st.hookAdd}
+              </button>
+              <button type="button" className="btn-primary" onClick={saveHooks}>
+                {st.hookSave}
+              </button>
+              {hookMsg && <span className="custom-cmd-msg" role="status">{hookMsg}</span>}
+            </div>
+          </div>
         </div>
 
         <div className="section-cap">{st.secBrowser}</div>

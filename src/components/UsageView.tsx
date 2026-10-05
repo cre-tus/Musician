@@ -4,6 +4,7 @@ import { api, hasBridge } from '../lib/mudex';
 import { BackIcon } from './icons';
 import { useStrings } from '../lib/lang';
 import { formatStr } from '../lib/i18n.mjs';
+import { loadLastUsage, saveLastUsage } from '../lib/usage-cache.mjs';
 
 type Strings = Record<string, Record<string, string>>;
 
@@ -64,29 +65,41 @@ function UsageBar({ label, pct, resetMs }: { label: string; pct: number; resetMs
 
 export default function UsageView({ sessions, folder, onBack, onSelectThread }: Props) {
   const s = useStrings();
-  const [usage, setUsage] = useState<SubscriptionUsage | null | undefined>(undefined);
+  const [usage, setUsage] = useState<SubscriptionUsage | null | undefined>(() => loadLastUsage(localStorage) ?? undefined);
   const [usageFailed, setUsageFailed] = useState(false);
 
   useEffect(() => {
     if (!hasBridge()) {
-      setUsage(null);
+      setUsage((prev) => prev ?? null);
       setUsageFailed(true);
       return;
     }
     api()
       .mspUsage(folder || '')
       .then((r) => {
-        // ok-but-null means connected yet unobserved (usage appears after
-        // the first turn), not a failure — keep the two states apart.
-        setUsage(r.ok ? r.usage ?? null : null);
-        setUsageFailed(!r.ok);
+        if (r.ok && r.usage) {
+          setUsage(r.usage);
+          saveLastUsage(localStorage, r.usage);
+          setUsageFailed(false);
+        } else if (!r.ok) {
+          // Failure keeps a cached value when one exists.
+          setUsage((prev) => prev ?? null);
+          setUsageFailed(true);
+        } else {
+          // ok-but-null means connected yet unobserved (usage appears after
+          // the first turn) — keep cached data, only clear the loading state.
+          setUsage((prev) => prev ?? null);
+        }
       })
       .catch(() => {
-        setUsage(null);
+        setUsage((prev) => prev ?? null);
         setUsageFailed(true);
       });
     // A null push carries no observation; never let it wipe shown data.
-    const off = api().onMspUsage((p) => setUsage((prev) => p.usage ?? prev));
+    const off = api().onMspUsage((p) => {
+      if (p.usage) saveLastUsage(localStorage, p.usage);
+      setUsage((prev) => p.usage ?? prev);
+    });
     return () => {
       off();
     };
@@ -142,6 +155,11 @@ export default function UsageView({ sessions, folder, onBack, onSelectThread }: 
               <p className="modal-note" style={{ margin: '8px 0 0' }}>
                 {formatStr(s.usage.planLine, { tier: usage.tier, clock: fmtClock(usage.observedAtMs) })}
               </p>
+              {Date.now() - usage.observedAtMs > 3600000 && (
+                <p className="modal-note" style={{ margin: '4px 0 0' }}>
+                  {s.usage.staleNote}
+                </p>
+              )}
             </>
           )}
         </div>

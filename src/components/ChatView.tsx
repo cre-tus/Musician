@@ -1,16 +1,23 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ChangedStat, ChatMessage, CliSettings, CliStatus, CodexSessionInfo, MspApproval, MspItem, MspUserInputPrompt, Session, SubscriptionUsage, TokenWindow } from '../types';
+import type { ChangedStat, ChatMessage, ClaudeSessionInfo, CliSettings, CliStatus, CodexSessionInfo, MspApproval, MspItem, MspTodo, MspUserInputPrompt, Session, SubscriptionUsage, TokenWindow } from '../types';
 import ApprovalPanel from './ApprovalPanel';
 import MspUserInputCard from './MspUserInputCard';
 import type { ConfirmOptions, ConfirmResult } from './ConfirmDialog';
 import { api, buildCmdPreview, hasBridge, porcelainPath, uid } from '../lib/mudex';
+import { baseName } from '../lib/path-utils.mjs';
 import { enqueuePrompt, extractQueuedPrompt, MAX_QUEUED_PROMPTS, moveQueuedPrompt, normalizePromptQueue, removeQueuedPrompt, shouldAutoRunQueuedPrompt, takeNextPrompt } from '../lib/prompt-queue.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { runNotificationStatus, shouldShowBackgroundNotification } from '../lib/notification-rules.mjs';
 import { clampChatScrollTop, parseChatScrollState } from '../lib/chat-scroll-state.mjs';
 import { formatSessionTranscript } from '../lib/session-transcript.mjs';
 import { findPromptFileMention, insertPromptFileMention } from '../lib/prompt-file-mention.mjs';
-import { findSlashCommand, matchSlashCommands } from '../lib/slash-commands.mjs';
+import { findSlashCommand, matchSlashCommands, SLASH_COMMANDS } from '../lib/slash-commands.mjs';
+import type { SlashCommand } from '../lib/slash-commands.mjs';
+import { expandCustomSlash, findCustomSlash, matchCustomSlashCommands, readCustomSlashCommands } from '../lib/custom-slash.mjs';
+import type { CustomSlashCommand, CustomSlashMatch } from '../lib/custom-slash.mjs';
+import { formatCompactTokens, summarizeSessionContext } from '../lib/session-context.mjs';
+import { buildExecutePrompt, buildPlanPrompt, planThreadKey, readPlanMode, writePlanMode } from '../lib/plan-mode.mjs';
+import { hasOverride, resolveEffort, resolveModel, sanitizeEffort, sanitizeModel, sendOverrides } from '../lib/session-overrides.mjs';
 import { mcpChatNotice } from '../lib/mcp-chat-notice.mjs';
 import { formatStr, STRINGS } from '../lib/i18n.mjs';
 import { useLang, useStrings } from '../lib/lang';
@@ -26,9 +33,11 @@ import {
   FileIcon,
   FileTypeIcon,
   FolderIcon,
+  ForkIcon,
   GuitarIcon,
   MicIcon,
   PanelIcon,
+  PlanIcon,
   PencilIcon,
   PlusIcon,
   RefreshIcon,
@@ -61,8 +70,11 @@ interface Props {
   onOpenFileAtLine: (absPath: string, line: number) => void;
   onConfirm: (options: ConfirmOptions) => Promise<ConfirmResult>;
   onRunningChange: (running: boolean) => void;
+  onRegisterStop: (stop: (() => void) | null) => void;
   onMspSession: (mspSessionId: string, engine: 'msp' | 'exec') => void;
   onPatchSettings: (patch: Partial<CliSettings>) => void;
+  onSessionOverride: (patch: { modelOverride?: string; effortOverride?: string }) => void;
+  onForkSession: (messageId: string) => void;
   onUpdateMessage: (id: string, patch: Partial<ChatMessage>) => void;
   onDraftStatus: (sessionId: string, hasDraft: boolean) => void;
   onQueueStatus: (sessionId: string, count: number) => void;
@@ -71,6 +83,7 @@ interface Props {
   onScheduledConsumed: (nonce: number) => void;
   onSlashCommand: (id: string) => void;
   codexSignal: number;
+  claudeSignal: number;
   tuneSignal: number;
   paneStyle?: React.CSSProperties;
   tokenWin: { h5: TokenWindow; wk: TokenWindow };
@@ -87,6 +100,25 @@ function friendlyError(err: string, lang: 'ko' | 'en' = 'ko'): string {
   if (err.startsWith('TIMEOUT:')) return formatStr(cv.errTimeoutMs, { ms: err.slice('TIMEOUT:'.length) });
   if (err === 'TIMEOUT') return cv.errTimeout;
   return formatStr(cv.errExecFailed, { err });
+}
+
+function readPlanModeSafe(sessionId: string): boolean {
+  try { return readPlanMode(localStorage, sessionId); } catch { return false; }
+}
+
+function TodoList({ items, cv }: { items: MspTodo[]; cv: Record<string, string> }) {
+  const statusLabel = (s: string) =>
+    s === 'completed' ? cv.todoDone : s === 'inProgress' ? cv.todoActive : s === 'cancelled' ? cv.todoCancelled : cv.todoPending;
+  return (
+    <ul className="todo-list">
+      {items.map((t, i) => (
+        <li key={`${i}:${t.text}`} className={`todo-item ${t.status}`} title={statusLabel(t.status)}>
+          <span className={`todo-dot ${t.status}`} aria-hidden="true" />
+          <span className="todo-text">{t.status === 'inProgress' && t.active ? t.active : t.text}</span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 async function gitSnapshot(cwd: string): Promise<string[]> {
@@ -359,6 +391,7 @@ export default function ChatView(props: Props) {
   const kUsed = quota?.weekly.usedPercent;
   const wRem = typeof wUsed === 'number' ? Math.max(0, 100 - wUsed) : null;
   const kRem = typeof kUsed === 'number' ? Math.max(0, 100 - kUsed) : null;
+  const ctxSummary = useMemo(() => summarizeSessionContext(session.messages), [session.messages]);
   const draftKey = `mudex:draft:${session.id}`;
   const queueKey = `mudex:queue:${session.id}`;
   const queuePausedKey = `mudex:queue-paused:${session.id}`;
@@ -375,7 +408,40 @@ export default function ChatView(props: Props) {
   const [fileMentionLoading, setFileMentionLoading] = useState(false);
   const [slash, setSlash] = useState<{ query: string } | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
-  const slashResults = useMemo(() => (slash ? matchSlashCommands(slash.query, 16, lang) : []), [slash, lang]);
+  const [customSlashCmds, setCustomSlashCmds] = useState<CustomSlashCommand[]>(() => {
+    try { return readCustomSlashCommands(localStorage, SLASH_COMMANDS.map((c) => c.id)); } catch { return []; }
+  });
+  const [customSlashArgs, setCustomSlashArgs] = useState<{ name: string; args: string; template: string; desc: string } | null>(null);
+  type SlashRow = SlashCommand | CustomSlashMatch;
+  const slashResults: SlashRow[] = useMemo(() => {
+    if (customSlashArgs) {
+      return [{
+        id: `custom:${customSlashArgs.name}`,
+        name: `/${customSlashArgs.name}`,
+        title: customSlashArgs.desc || `/${customSlashArgs.name}`,
+        hint: customSlashArgs.args,
+        keywords: [],
+        kind: 'custom',
+        template: customSlashArgs.template,
+      }];
+    }
+    if (!slash) return [];
+    return [...matchSlashCommands(slash.query, 16, lang), ...matchCustomSlashCommands(slash.query, customSlashCmds, 16)].slice(0, 16);
+  }, [slash, customSlashArgs, customSlashCmds, lang]);
+  const slashOpen = !!(slash || customSlashArgs);
+  // Settings edits land in localStorage while this pane is hidden; reload on return.
+  useEffect(() => {
+    if (!props.paneActive) return;
+    try { setCustomSlashCmds(readCustomSlashCommands(localStorage, SLASH_COMMANDS.map((c) => c.id))); } catch { /* keep previous */ }
+  }, [props.paneActive]);
+  // Plan mode is per session; a pending plan belongs to its own turn only.
+  useEffect(() => {
+    setPlanMode(readPlanModeSafe(session.id));
+    setPendingPlan(null);
+    planTurnRef.current = false;
+    liveTodosRef.current = [];
+    setLiveTodos([]);
+  }, [session.id]);
   const [queuedPrompts, setQueuedPrompts] = useState<string[]>(() => {
     try {
       const saved: unknown = JSON.parse(localStorage.getItem(queueKey) || '[]');
@@ -409,6 +475,12 @@ export default function ChatView(props: Props) {
   const [notice, setNotice] = useState('');
   const [hostModels, setHostModels] = useState<{ modelId: string; displayLabel: string }[]>([]);
   const [attach, setAttach] = useState<AttachedFile[]>([]);
+  const [planMode, setPlanMode] = useState(() => readPlanModeSafe(session.id));
+  const [pendingPlan, setPendingPlan] = useState<{ msgId: string; text: string } | null>(null);
+  const planTurnRef = useRef(false);
+  const turnCheckpointRef = useRef<string | null>(null);
+  const [liveTodos, setLiveTodos] = useState<MspTodo[]>([]);
+  const liveTodosRef = useRef<MspTodo[]>([]);
   const [dropActive, setDropActive] = useState(false);
   const [dropPathActive, setDropPathActive] = useState(false);
   const dragDepthRef = useRef(0);
@@ -463,9 +535,9 @@ export default function ChatView(props: Props) {
   }, [fileMention, fileMentionIndex, fileMentionResults]);
 
   useEffect(() => {
-    if (!slash || !slashResults[slashIndex]) return;
+    if ((!slash && !customSlashArgs) || !slashResults[slashIndex]) return;
     document.getElementById(`composer-slash-${slashIndex}`)?.scrollIntoView({ block: 'nearest' });
-  }, [slash, slashIndex, slashResults]);
+  }, [slash, customSlashArgs, slashIndex, slashResults]);
   const [messageFindOpen, setMessageFindOpen] = useState(false);
   const [messageFindQuery, setMessageFindQuery] = useState('');
   const [messageFindIndex, setMessageFindIndex] = useState(0);
@@ -473,12 +545,19 @@ export default function ChatView(props: Props) {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [workspaceCopied, setWorkspaceCopied] = useState(false);
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const [handoffProvider, setHandoffProvider] = useState<'codex' | 'claude'>('codex');
   const [codexSessions, setCodexSessions] = useState<CodexSessionInfo[]>([]);
   const [codexSelected, setCodexSelected] = useState('');
   const [codexSessionQuery, setCodexSessionQuery] = useState('');
   const [codexPreview, setCodexPreview] = useState<{ sessionId: string; context: string } | null>(null);
   const [codexPreviewLoading, setCodexPreviewLoading] = useState(false);
   const [codexPreviewError, setCodexPreviewError] = useState('');
+  const [claudeSessions, setClaudeSessions] = useState<ClaudeSessionInfo[]>([]);
+  const [claudeSelected, setClaudeSelected] = useState('');
+  const [claudeSessionQuery, setClaudeSessionQuery] = useState('');
+  const [claudePreview, setClaudePreview] = useState<{ sessionId: string; context: string } | null>(null);
+  const [claudePreviewLoading, setClaudePreviewLoading] = useState(false);
+  const [claudePreviewError, setClaudePreviewError] = useState('');
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [handoffError, setHandoffError] = useState('');
   const handoffCardRef = useRef<HTMLElement | null>(null);
@@ -488,13 +567,34 @@ export default function ChatView(props: Props) {
     if (!query) return codexSessions;
     return codexSessions.filter((item) => `${item.title} ${item.id}`.toLocaleLowerCase().includes(query));
   }, [codexSessions, codexSessionQuery]);
-  const selectedCodexSessionVisible = filteredCodexSessions.some((item) => item.id === codexSelected);
+  const filteredClaudeSessions = useMemo(() => {
+    const query = claudeSessionQuery.trim().toLocaleLowerCase();
+    if (!query) return claudeSessions;
+    return claudeSessions.filter((item) => `${item.title} ${item.id}`.toLocaleLowerCase().includes(query));
+  }, [claudeSessions, claudeSessionQuery]);
+  const isClaudeHandoff = handoffProvider === 'claude';
+  const hoSessions = isClaudeHandoff ? claudeSessions : codexSessions;
+  const hoSelected = isClaudeHandoff ? claudeSelected : codexSelected;
+  const setHoSelected = isClaudeHandoff ? setClaudeSelected : setCodexSelected;
+  const hoFiltered = isClaudeHandoff ? filteredClaudeSessions : filteredCodexSessions;
+  const hoQuery = isClaudeHandoff ? claudeSessionQuery : codexSessionQuery;
+  const setHoQuery = isClaudeHandoff ? setClaudeSessionQuery : setCodexSessionQuery;
+  const hoPreview = isClaudeHandoff ? claudePreview : codexPreview;
+  const hoPreviewLoading = isClaudeHandoff ? claudePreviewLoading : codexPreviewLoading;
+  const hoPreviewError = isClaudeHandoff ? claudePreviewError : codexPreviewError;
+  const selectedHoSessionVisible = hoFiltered.some((item) => item.id === hoSelected);
 
   useEffect(() => {
     if (filteredCodexSessions.length && !filteredCodexSessions.some((item) => item.id === codexSelected)) {
       setCodexSelected(filteredCodexSessions[0].id);
     }
   }, [filteredCodexSessions, codexSelected]);
+
+  useEffect(() => {
+    if (filteredClaudeSessions.length && !filteredClaudeSessions.some((item) => item.id === claudeSelected)) {
+      setClaudeSelected(filteredClaudeSessions[0].id);
+    }
+  }, [filteredClaudeSessions, claudeSelected]);
 
   useEffect(() => {
     if (!handoffOpen) {
@@ -511,27 +611,33 @@ export default function ChatView(props: Props) {
   }, [handoffOpen]);
 
   useEffect(() => {
-    if (!handoffOpen || !folder || !codexSessions.some((item) => item.id === codexSelected)) {
-      setCodexPreview(null);
-      setCodexPreviewLoading(false);
-      setCodexPreviewError('');
+    const sessions = handoffProvider === 'claude' ? claudeSessions : codexSessions;
+    const selected = handoffProvider === 'claude' ? claudeSelected : codexSelected;
+    const setPreview = handoffProvider === 'claude' ? setClaudePreview : setCodexPreview;
+    const setLoading = handoffProvider === 'claude' ? setClaudePreviewLoading : setCodexPreviewLoading;
+    const setError = handoffProvider === 'claude' ? setClaudePreviewError : setCodexPreviewError;
+    if (!handoffOpen || !folder || !sessions.some((item) => item.id === selected)) {
+      setPreview(null);
+      setLoading(false);
+      setError('');
       return;
     }
     let cancelled = false;
-    setCodexPreview(null);
-    setCodexPreviewLoading(true);
-    setCodexPreviewError('');
-    api().codexRead(codexSelected, folder).then((result) => {
+    setPreview(null);
+    setLoading(true);
+    setError('');
+    const read = handoffProvider === 'claude' ? api().claudeRead(selected, folder) : api().codexRead(selected, folder);
+    read.then((result) => {
       if (cancelled) return;
       if (!result.ok) throw new Error(result.error || cv.previewFailed);
-      setCodexPreview({ sessionId: codexSelected, context: result.context || '' });
+      setPreview({ sessionId: selected, context: result.context || '' });
     }).catch((error: unknown) => {
-      if (!cancelled) setCodexPreviewError(error instanceof Error ? error.message : String(error));
+      if (!cancelled) setError(error instanceof Error ? error.message : String(error));
     }).finally(() => {
-      if (!cancelled) setCodexPreviewLoading(false);
+      if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [handoffOpen, codexSelected, codexSessions, folder]);
+  }, [handoffOpen, handoffProvider, codexSelected, codexSessions, claudeSelected, claudeSessions, folder]);
 
   const messageMatches = useMemo(() => {
     const query = messageFindQuery.trim().toLocaleLowerCase();
@@ -614,12 +720,29 @@ export default function ChatView(props: Props) {
   };
 
   const acceptSlashCommand = (index = slashIndex) => {
-    const cmd = slash ? slashResults[index] : undefined;
-    if (!slash || !cmd) return false;
+    const cmd = slashOpen ? slashResults[index] : undefined;
+    if (!slashOpen || !cmd) return false;
     promptHistoryIndexRef.current = null;
     slashQueryRef.current = null;
+    if ('kind' in cmd && cmd.kind === 'custom') {
+      const args = customSlashArgs && customSlashArgs.name === cmd.name.slice(1) ? customSlashArgs.args : '';
+      const expanded = expandCustomSlash(cmd.template, args);
+      setInput(expanded.text);
+      setNotice(cv.customExpanded);
+      setFileMention(null);
+      setCustomSlashArgs(null);
+      setSlash(null);
+      setSlashIndex(0);
+      scheduleAfterPaint(() => {
+        const textarea = composerInputRef.current;
+        textarea?.focus();
+        try { textarea?.setSelectionRange(expanded.cursor, expanded.cursor); } catch { /* caret best-effort */ }
+      });
+      return true;
+    }
     setInput('');
     setFileMention(null);
+    setCustomSlashArgs(null);
     setSlash(null);
     setSlashIndex(0);
     props.onSlashCommand(cmd.id);
@@ -639,11 +762,27 @@ export default function ChatView(props: Props) {
         setSlashIndex(0);
       }
       setSlash(found);
+      setCustomSlashArgs(null);
+      setFileMention(null);
+      return;
+    }
+    const customFound = textarea.selectionStart === textarea.selectionEnd
+      ? findCustomSlash(textarea.value, textarea.selectionStart, customSlashCmds)
+      : null;
+    if (customFound) {
+      const key = `${customFound.name} ${customFound.args}`;
+      if (slashQueryRef.current !== key) {
+        slashQueryRef.current = key;
+        setSlashIndex(0);
+      }
+      setCustomSlashArgs(customFound);
+      setSlash(null);
       setFileMention(null);
       return;
     }
     slashQueryRef.current = null;
     setSlash(null);
+    setCustomSlashArgs(null);
     updateFileMentionAtCaret(textarea);
   };
 
@@ -831,34 +970,58 @@ export default function ChatView(props: Props) {
     }
   };
 
-  const openHandoff = async () => {
-    if (!folder) {
-      setNotice(cv.handoffNeedFolder);
-      return;
-    }
-    if (!hasBridge()) {
-      setNotice(cv.handoffNeedApp);
-      return;
-    }
-    setHandoffOpen(true);
+  const loadHandoffSessions = async (provider: 'codex' | 'claude') => {
     setHandoffBusy(true);
     setHandoffError('');
-    setCodexSessions([]);
-    setCodexSelected('');
-    setCodexSessionQuery('');
-    setCodexPreview(null);
-    setCodexPreviewError('');
     try {
-      const r = await api().codexSessions(folder);
-      if (!r.ok) throw new Error(r.error || cv.codexNotFound);
-      const list = r.sessions || [];
-      setCodexSessions(list);
-      setCodexSelected((prev) => list.some((s) => s.id === prev) ? prev : list[0]?.id || '');
+      if (provider === 'claude') {
+        setClaudeSessions([]);
+        setClaudeSelected('');
+        setClaudeSessionQuery('');
+        setClaudePreview(null);
+        setClaudePreviewError('');
+        const r = await api().claudeSessions(folder);
+        if (!r.ok) throw new Error(r.error || cv.claudeNotFound);
+        const list = r.sessions || [];
+        setClaudeSessions(list);
+        setClaudeSelected((prev) => list.some((s) => s.id === prev) ? prev : list[0]?.id || '');
+      } else {
+        setCodexSessions([]);
+        setCodexSelected('');
+        setCodexSessionQuery('');
+        setCodexPreview(null);
+        setCodexPreviewError('');
+        const r = await api().codexSessions(folder);
+        if (!r.ok) throw new Error(r.error || cv.codexNotFound);
+        const list = r.sessions || [];
+        setCodexSessions(list);
+        setCodexSelected((prev) => list.some((s) => s.id === prev) ? prev : list[0]?.id || '');
+      }
     } catch (e) {
       setHandoffError(e instanceof Error ? e.message : String(e));
     } finally {
       setHandoffBusy(false);
     }
+  };
+
+  const openHandoff = async (provider: 'codex' | 'claude' = 'codex') => {
+    if (!folder) {
+      setNotice(provider === 'claude' ? cv.handoffNeedFolderClaude : cv.handoffNeedFolder);
+      return;
+    }
+    if (!hasBridge()) {
+      setNotice(provider === 'claude' ? cv.handoffNeedAppClaude : cv.handoffNeedApp);
+      return;
+    }
+    setHandoffProvider(provider);
+    setHandoffOpen(true);
+    await loadHandoffSessions(provider);
+  };
+
+  const switchHandoffProvider = (provider: 'codex' | 'claude') => {
+    if (provider === handoffProvider || handoffBusy) return;
+    setHandoffProvider(provider);
+    void loadHandoffSessions(provider);
   };
 
   const importFromCodex = async () => {
@@ -909,10 +1072,62 @@ export default function ChatView(props: Props) {
     }
   };
 
-  // Mini-profile "코덱스 연동하기" → App signal → open the handoff here.
+  const importFromClaude = async () => {
+    if (!claudeSelected) return;
+    setHandoffBusy(true);
+    setHandoffError('');
+    try {
+      const r = await api().claudeRead(claudeSelected, folder);
+      if (!r.ok || !r.context) throw new Error(r.error || cv.claudeEmpty);
+      promptHistoryIndexRef.current = null;
+      const draft = input;
+      const draftBlock = draft.trim() ? `\n\n[Musician 작성 중인 초안 — 보존됨]\n${draft}` : '';
+      setInput(`[Claude 세션에서 이어받기: ${r.title || claudeSelected}]\n\n${r.context}${draftBlock}\n\n위 작업을 이어서 진행해줘.`);
+      setHandoffOpen(false);
+      setNotice(draft.trim() ? cv.claudeImportedDraft : cv.claudeImported);
+    } catch (e) {
+      setHandoffError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setHandoffBusy(false);
+    }
+  };
+
+  const sendToClaude = async () => {
+    if (!claudeSelected || run) return;
+    const recent = session.messages.slice(-12).map((m) => `${m.role === 'user' ? '사용자' : 'Musician'}: ${m.text}`).join('\n\n');
+    const changed = [...new Set(session.messages.flatMap((m) => m.changedFiles || []))];
+    const context = [
+      '[Musician에서 작업 이어받기]',
+      `프로젝트: ${folder}`,
+      `Musician 스레드: ${session.title}`,
+      changed.length ? `변경 파일: ${changed.join(', ')}` : '',
+      '',
+      recent || '(아직 대화 내용 없음)',
+      '',
+      '같은 작업 폴더의 현재 파일 상태를 확인하고 위 작업을 이어서 진행해줘.',
+    ].filter((line) => line !== '').join('\n');
+    setHandoffBusy(true);
+    setHandoffError('');
+    try {
+      const r = await api().claudeQueue(claudeSelected, folder, context);
+      if (!r.ok) throw new Error(r.error || cv.claudeSendFailed);
+      setHandoffOpen(false);
+      setNotice(cv.claudeSent);
+    } catch (e) {
+      setHandoffError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setHandoffBusy(false);
+    }
+  };
+
+  // Mini-profile "코덱스/클로드 연동하기" → App signal → open the handoff here.
   useEffect(() => {
-    if (props.codexSignal > 0) void openHandoff();
+    if (props.codexSignal > 0) void openHandoff('codex');
   }, [props.codexSignal]);
+
+  useEffect(() => {
+    if (props.claudeSignal > 0) void openHandoff('claude');
+  }, [props.claudeSignal]);
 
   // Slash "/model" → App signal → open the tune popover here (idle only,
   // mirroring the composer tune button).
@@ -1006,7 +1221,15 @@ export default function ChatView(props: Props) {
               }
             : undefined),
         timeout: timedOut || undefined,
+        plan: planTurnRef.current || undefined,
+        checkpointId: turnCheckpointRef.current || undefined,
+        todos: liveTodosRef.current.length > 0 ? liveTodosRef.current : undefined,
       });
+      if (planTurnRef.current && completedSuccessfully && body) {
+        setPendingPlan({ msgId, text: body });
+        setNotice(liveCv.planDoneNotice);
+      }
+      planTurnRef.current = false;
       followScrollRef.current = true;
       setShowScrollBottom(false);
       const sc = scrollRef.current;
@@ -1043,7 +1266,8 @@ export default function ChatView(props: Props) {
       setMspActs(foldMspActs(mspItemsRef.current, langRef.current));
     });
     const offAppr = api().onMspApproval((a) => {
-      if (a.threadKey !== cbRef.current.session.id) return;
+      const sid = cbRef.current.session.id;
+      if (a.threadKey !== sid && a.threadKey !== planThreadKey(sid)) return;
       setApprovals((prev) => (prev.some((x) => x.key === a.key) ? prev : [...prev, a]));
     });
     const offApprDone = api().onMspApprovalResolved(({ approvalId }) => {
@@ -1051,7 +1275,8 @@ export default function ChatView(props: Props) {
       setApprovals((prev) => prev.filter((x) => x.approval.approvalId !== approvalId));
     });
     const offUserInput = api().onMspUserInput((prompt) => {
-      if (prompt.threadKey !== cbRef.current.session.id) return;
+      const sid = cbRef.current.session.id;
+      if (prompt.threadKey !== sid && prompt.threadKey !== planThreadKey(sid)) return;
       setUserInputs((prev) => prev.some((item) => item.key === prompt.key) ? prev : [...prev, prompt]);
     });
     const offUserInputSettled = api().onMspUserInputSettled(({ sessionId, userInputId }) => {
@@ -1061,6 +1286,18 @@ export default function ChatView(props: Props) {
       setApprovals([]);
       setUserInputs([]);
       setNotice(STRINGS[langRef.current].chat.hostDead);
+    });
+    const offHook = api().onHookResult((r) => {
+      if (!r || r.ok) return;
+      const liveCv = STRINGS[langRef.current].chat;
+      setNotice(formatStr(liveCv.hookFailed, { event: r.event || '', command: String(r.command || '').slice(0, 80), err: r.error || '' }));
+    });
+    const offTodos = api().onMspTodos((p) => {
+      const sid = cbRef.current.session.id;
+      if (p.threadKey !== sid && p.threadKey !== planThreadKey(sid)) return;
+      const items = Array.isArray(p.items) ? p.items : [];
+      liveTodosRef.current = items;
+      setLiveTodos(items);
     });
     const offTokens = api().onMspTokens((p) => {
       const run = runRef.current;
@@ -1086,6 +1323,8 @@ export default function ChatView(props: Props) {
       offUserInputSettled();
       offHostDead();
       offTokens();
+      offTodos();
+      offHook();
       try {
         recogRef.current?.stop();
       } catch {
@@ -1211,10 +1450,18 @@ export default function ChatView(props: Props) {
   const approvalLabel = (v: string) => approvalModes.find(([x]) => x === v)?.[1] || v || strings.settings.cliDefault;
   const reasoningLabel = (v: string) => reasoningEfforts.find(([x]) => x === v)?.[1] || v || strings.settings.cliDefault;
   const effortIdx = effortLevels.findIndex(([x]) => x === settings.reasoningEffort);
+  const effModel = resolveModel(session, settings);
+  const effEffort = resolveEffort(session, settings);
+  const sessionOverridden = hasOverride(session);
+  const sessionEffortValue = sanitizeEffort(session.effortOverride);
+  const sessionEffortIdx = effortLevels.findIndex(([x]) => x === sessionEffortValue);
+  const sessionModelValue = sanitizeModel(session.modelOverride);
 
   const changeModel = (v: string) => {
     cbRef.current.onPatchSettings({ model: v });
-    if (v && session.mspSessionId && hasBridge()) {
+    // A session model override owns this thread: the global change applies
+    // to other sessions, never clobbers this one.
+    if (v && session.mspSessionId && hasBridge() && !sanitizeModel(session.modelOverride)) {
       api().mspSetModel(session.id, v).catch(() => setNotice(cv.modelSetFailed));
     }
   };
@@ -1228,6 +1475,21 @@ export default function ChatView(props: Props) {
 
   const changeReasoning = (v: string) => {
     cbRef.current.onPatchSettings({ reasoningEffort: v });
+    // Same ownership rule as the model: an overridden thread keeps its own.
+    if (v && session.mspSessionId && hasBridge() && !sanitizeEffort(session.effortOverride)) {
+      api().mspSetReasoning(session.id, v).catch(() => setNotice(cv.reasoningSetFailed));
+    }
+  };
+
+  const changeSessionModel = (v: string) => {
+    cbRef.current.onSessionOverride({ modelOverride: v });
+    if (v && session.mspSessionId && hasBridge()) {
+      api().mspSetModel(session.id, v).catch(() => setNotice(cv.modelSetFailed));
+    }
+  };
+
+  const changeSessionEffort = (v: string) => {
+    cbRef.current.onSessionOverride({ effortOverride: v });
     if (v && session.mspSessionId && hasBridge()) {
       api().mspSetReasoning(session.id, v).catch(() => setNotice(cv.reasoningSetFailed));
     }
@@ -1370,7 +1632,24 @@ export default function ChatView(props: Props) {
     }
   };
 
-  const send = async (raw?: string, options: { preserveDraft?: boolean; ignoreAttachments?: boolean } = {}) => {
+  const togglePlanMode = () => {
+    const next = !planMode;
+    setPlanMode(next);
+    try { writePlanMode(localStorage, session.id, next); } catch { /* persistence best-effort */ }
+    setPendingPlan(null);
+    setNotice(next ? cv.planOn : cv.planOff);
+  };
+
+  const executePlan = () => {
+    if (!pendingPlan || run) return;
+    const planText = pendingPlan.text;
+    setPendingPlan(null);
+    setPlanMode(false);
+    try { writePlanMode(localStorage, session.id, false); } catch { /* persistence best-effort */ }
+    void send(buildExecutePrompt(planText, lang), { ignoreAttachments: true, normal: true });
+  };
+
+  const send = async (raw?: string, options: { preserveDraft?: boolean; ignoreAttachments?: boolean; normal?: boolean } = {}) => {
     const text = (raw ?? input).trim();
     const attachments = options.ignoreAttachments ? [] : attach;
     if ((!text && attachments.length === 0) || run) return;
@@ -1378,6 +1657,12 @@ export default function ChatView(props: Props) {
       setNotice(cv.needAppCli);
       return;
     }
+    // A fresh turn invalidates any pending plan; executePlan() runs normal
+    // even when the toggle is still settling (state updates are async).
+    const planTurn = planMode && !options.normal;
+    setPendingPlan(null);
+    liveTodosRef.current = [];
+    setLiveTodos([]);
     const names = attachments.map((a) => a.name).join(', ');
     const display = attachments.length > 0 ? (text ? `${text}\n\n[첨부: ${names}]` : `[첨부: ${names}]`) : text;
     const fileAttach = attachments.filter((a) => !a.image);
@@ -1404,8 +1689,22 @@ export default function ChatView(props: Props) {
     setNotice('');
     runStartRef.current = Date.now();
     beforeRef.current = await gitSnapshot(folder);
+    // Snapshot before the turn so it can be undone wholesale. Plan turns
+    // change nothing; a failed snapshot never blocks the turn.
+    turnCheckpointRef.current = null;
+    if (!planTurn && folder) {
+      try {
+        const cp = await api().checkpointCreate(folder, cbRef.current.session.id);
+        if (cp.ok && cp.id) turnCheckpointRef.current = cp.id;
+      } catch { /* checkpoint best-effort */ }
+    }
+    planTurnRef.current = planTurn;
+    // The bubble shows the user's own words; the plan contract travels on
+    // the wire only.
+    const wire = planTurn ? buildPlanPrompt(full, lang) : full;
     try {
-      const res = await api().chatStart(full, folder, cbRef.current.session.id, cbRef.current.session.mspSessionId);
+      const ov = sendOverrides(cbRef.current.session);
+      const res = await api().chatStart(wire, folder, cbRef.current.session.id, cbRef.current.session.mspSessionId, planTurn || undefined, Object.keys(ov).length > 0 ? ov : undefined);
       if (!res.ok || !res.reqId) {
         cbRef.current.onAppendAssistant({
           id: uid('m'),
@@ -1429,7 +1728,11 @@ export default function ChatView(props: Props) {
       setMspActs([]);
       setRun(runRef.current);
       cbRef.current.onRunningChange(true);
-      cbRef.current.onMspSession(res.mspSessionId || '', runEngineRef.current);
+      // A plan turn's session id belongs to the read-only plan session —
+      // adopting it would unlink the main conversation. Record the engine
+      // honestly but keep the main link untouched.
+      if (planTurn) cbRef.current.onMspSession(cbRef.current.session.mspSessionId || '', runEngineRef.current);
+      else cbRef.current.onMspSession(res.mspSessionId || '', runEngineRef.current);
       if (res.fallback) setNotice(formatStr(cv.execFallback, { reason: res.fallbackReason || '' }));
       const mcpNotice = mcpChatNotice(res.mcpHealth, lang);
       if (mcpNotice) setNotice(mcpNotice);
@@ -1550,6 +1853,15 @@ export default function ChatView(props: Props) {
     }
   };
 
+  // Let the sidebar stop this pane's run without switching to it first.
+  // The captured `cancel` belongs to the render where `run` last changed,
+  // so the registered closure always carries the current reqId.
+  useEffect(() => {
+    cbRef.current.onRegisterStop(run ? cancel : null);
+    return () => { cbRef.current.onRegisterStop(null); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run]);
+
   const runVerify = async (m: ChatMessage, script: string) => {
     if (!m.cwd || !hasBridge() || verifyRunning || run) return;
     setVerifyRunning({ msgId: m.id, script });
@@ -1601,6 +1913,25 @@ export default function ChatView(props: Props) {
     }
   };
 
+  const doCheckpointRestore = async (m: ChatMessage) => {
+    if (!m.cwd || !m.checkpointId || !hasBridge() || run || reverting) return;
+    if (await props.onConfirm({ title: cv.checkpointTitle, message: cv.checkpointMsg, confirmLabel: cv.checkpointBtn, destructive: true }) !== 'confirm') return;
+    setReverting(m.id);
+    try {
+      const r = await api().checkpointRestore(m.cwd, session.id, m.checkpointId);
+      if (!r.ok) {
+        setNotice(formatStr(cv.checkpointFailed, { err: r.error || (r.failed || []).join(', ') }));
+      } else {
+        cbRef.current.onUpdateMessage(m.id, { reverted: true });
+        setNotice(cv.checkpointRestored);
+      }
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
+    } finally {
+      setReverting(null);
+    }
+  };
+
   const continueRun = (m: ChatMessage) => {
     if (run) return;
     if (session.mspSessionId) {
@@ -1641,6 +1972,20 @@ export default function ChatView(props: Props) {
             <span>{workspaceName}</span>
             <span className="chat-workspace-copy">{workspaceCopied ? cv.wsCopied : cv.wsCopy}</span>
           </button>
+          {(ctxSummary.turns > 0 || ctxSummary.total > 0) && (
+            <span
+              className="chat-context-meter"
+              title={ctxSummary.total > 0 ? formatStr(cv.ctxMeterTitle, {
+                in: ctxSummary.input.toLocaleString(),
+                out: ctxSummary.output.toLocaleString(),
+                cached: ctxSummary.cached.toLocaleString(),
+                reasoning: ctxSummary.reasoning.toLocaleString(),
+                observed: ctxSummary.observed,
+              }) : cv.ctxMeterEmpty}
+            >
+              {formatStr(cv.ctxMeter, { tokens: formatCompactTokens(ctxSummary.total), turns: ctxSummary.turns })}
+            </span>
+          )}
         </div>
         <div className="chat-head-actions">
           <button className="icon-btn" onClick={() => void exportConversation()} title={cv.exportConvTitle} aria-label={cv.exportConvLabel}>
@@ -1698,7 +2043,7 @@ export default function ChatView(props: Props) {
             className="handoff-card"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="codex-handoff-title"
+            aria-labelledby="handoff-title"
             tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(event) => {
@@ -1725,49 +2070,53 @@ export default function ChatView(props: Props) {
           >
             <div className="handoff-head">
               <div>
-                <h3 id="codex-handoff-title">{cv.handoffTitle}</h3>
+                <h3 id="handoff-title">{isClaudeHandoff ? cv.handoffTitleClaude : cv.handoffTitle}</h3>
                 <p>{cv.handoffSub}</p>
               </div>
-              <button type="button" className="icon-btn" onClick={() => setHandoffOpen(false)} disabled={handoffBusy} title={strings.common.close} aria-label={cv.handoffClose}><XIcon size={15} /></button>
+              <button type="button" className="icon-btn" onClick={() => setHandoffOpen(false)} disabled={handoffBusy} title={strings.common.close} aria-label={isClaudeHandoff ? cv.handoffCloseClaude : cv.handoffClose}><XIcon size={15} /></button>
+            </div>
+            <div className="segmented" role="tablist" aria-label={cv.handoffProviderLabel}>
+              <button type="button" role="tab" aria-selected={!isClaudeHandoff} className={isClaudeHandoff ? 'seg' : 'seg active'} disabled={handoffBusy} onClick={() => switchHandoffProvider('codex')}>{cv.handoffTabCodex}</button>
+              <button type="button" role="tab" aria-selected={isClaudeHandoff} className={isClaudeHandoff ? 'seg active' : 'seg'} disabled={handoffBusy} onClick={() => switchHandoffProvider('claude')}>{cv.handoffTabClaude}</button>
             </div>
             {handoffError && <div className="handoff-error" role="alert">{handoffError}</div>}
-            {codexSessions.length > 0 && <label className="handoff-search">
+            {hoSessions.length > 0 && <label className="handoff-search">
               <SearchIcon size={15} />
               <input
                 type="search"
-                value={codexSessionQuery}
-                onChange={(event) => setCodexSessionQuery(event.target.value)}
+                value={hoQuery}
+                onChange={(event) => setHoQuery(event.target.value)}
                 placeholder={cv.handoffSearchPh}
-                aria-label={cv.handoffSearchLabel}
+                aria-label={isClaudeHandoff ? cv.handoffSearchLabelClaude : cv.handoffSearchLabel}
               />
-              <span>{filteredCodexSessions.length}/{codexSessions.length}</span>
+              <span>{hoFiltered.length}/{hoSessions.length}</span>
             </label>}
-            {handoffBusy && codexSessions.length === 0 ? (
-              <div className="handoff-empty">{cv.handoffLoading}</div>
-            ) : codexSessions.length === 0 ? (
+            {handoffBusy && hoSessions.length === 0 ? (
+              <div className="handoff-empty">{isClaudeHandoff ? cv.handoffLoadingClaude : cv.handoffLoading}</div>
+            ) : hoSessions.length === 0 ? (
               <div className="handoff-empty">
-                {handoffError ? <button type="button" className="btn" onClick={() => void openHandoff()}>{strings.common.retry}</button> : cv.handoffEmpty}
+                {handoffError ? <button type="button" className="btn" onClick={() => void openHandoff(handoffProvider)}>{strings.common.retry}</button> : isClaudeHandoff ? cv.handoffEmptyClaude : cv.handoffEmpty}
               </div>
             ) : (
-              <div className="handoff-list" aria-label={cv.handoffListLabel}>
-                {filteredCodexSessions.length === 0 ? <div className="handoff-empty">{cv.handoffNoMatch}</div> : filteredCodexSessions.map((s) => (
-                  <label key={s.id} className={codexSelected === s.id ? 'handoff-session active' : 'handoff-session'}>
-                    <input type="radio" name="codex-session" checked={codexSelected === s.id} onChange={() => setCodexSelected(s.id)} />
+              <div className="handoff-list" aria-label={isClaudeHandoff ? cv.handoffListLabelClaude : cv.handoffListLabel}>
+                {hoFiltered.length === 0 ? <div className="handoff-empty">{cv.handoffNoMatch}</div> : hoFiltered.map((s) => (
+                  <label key={s.id} className={hoSelected === s.id ? 'handoff-session active' : 'handoff-session'}>
+                    <input type="radio" name="handoff-session" checked={hoSelected === s.id} onChange={() => setHoSelected(s.id)} />
                     <span><b>{s.title}</b><small>{new Date(s.updatedAt).toLocaleString(lang === 'en' ? 'en-US' : 'ko-KR')} · {s.id.slice(0, 8)}</small></span>
                   </label>
                 ))}
               </div>
             )}
-            {codexSessions.length > 0 && <section className="handoff-preview" aria-label={cv.handoffPreviewLabel}>
+            {hoSessions.length > 0 && <section className="handoff-preview" aria-label={isClaudeHandoff ? cv.handoffPreviewLabelClaude : cv.handoffPreviewLabel}>
               <div className="handoff-preview-head">
                 <b>{cv.handoffPreviewTitle}</b>
-                <span role="status">{codexPreviewLoading ? cv.handoffPreviewLoading : codexPreviewError ? cv.handoffPreviewErr : ''}</span>
+                <span role="status">{hoPreviewLoading ? cv.handoffPreviewLoading : hoPreviewError ? cv.handoffPreviewErr : ''}</span>
               </div>
-              <pre>{codexPreviewLoading ? cv.handoffPreviewBody : codexPreviewError || (codexPreview?.sessionId === codexSelected ? (codexPreview.context.slice(-1800) || cv.handoffPreviewEmpty) : cv.handoffPreviewPick)}</pre>
+              <pre>{hoPreviewLoading ? cv.handoffPreviewBody : hoPreviewError || (hoPreview?.sessionId === hoSelected ? (hoPreview.context.slice(-1800) || cv.handoffPreviewEmpty) : cv.handoffPreviewPick)}</pre>
             </section>}
             <div className="handoff-actions">
-              <button type="button" className="btn" disabled={!selectedCodexSessionVisible || handoffBusy} onClick={() => void importFromCodex()}>{cv.handoffImport}</button>
-              <button type="button" className="btn btn-primary" disabled={!selectedCodexSessionVisible || handoffBusy || !!run} onClick={() => void sendToCodex()}>{cv.handoffSend}</button>
+              <button type="button" className="btn" disabled={!selectedHoSessionVisible || handoffBusy} onClick={() => void (isClaudeHandoff ? importFromClaude() : importFromCodex())}>{isClaudeHandoff ? cv.handoffImportClaude : cv.handoffImport}</button>
+              <button type="button" className="btn btn-primary" disabled={!selectedHoSessionVisible || handoffBusy || !!run} onClick={() => void (isClaudeHandoff ? sendToClaude() : sendToCodex())}>{isClaudeHandoff ? cv.handoffSendClaude : cv.handoffSend}</button>
             </div>
           </section>
         </div>
@@ -1806,6 +2155,55 @@ export default function ChatView(props: Props) {
               <b id="tune-dialog-title">{cv.tuneTitle}</b>
               <button type="button" className="icon-btn" onClick={() => setTuneOpen(false)} title={strings.common.close} aria-label={cv.tuneClose}>
                 <XIcon size={15} />
+              </button>
+            </div>
+            <div className="tune-group tune-session-group">
+              <div className="tune-title">{cv.tuneSession}</div>
+              <p className="tune-desc">{cv.tuneSessionDesc}</p>
+              <div className="tune-subtitle">{cv.tuneSessionModel}</div>
+              {[['', cv.tuneFollowGlobal], ...modelOptions.map((m): [string, string] => [m, modelLabel(m)])].map(
+                ([v, text]) => (
+                  <button
+                    key={`sess-model-${v || '(global)'}`}
+                    className={v === sessionModelValue ? 'tune-row active' : 'tune-row'}
+                    title={v || cv.tuneFollowGlobal}
+                    onClick={() => {
+                      if (v !== sessionModelValue) changeSessionModel(v);
+                    }}
+                  >
+                    <span className="tune-check">{v === sessionModelValue ? <CheckIcon size={13} /> : null}</span>
+                    <span className="tune-text">{text}</span>
+                  </button>
+                ),
+              )}
+              <div className="tune-subtitle">{cv.tuneSessionEffort}<span className="tune-meter-value">{sessionEffortValue ? reasoningLabel(sessionEffortValue) : cv.tuneFollowGlobal}</span></div>
+              <div className="tune-meter" role="radiogroup" aria-label={cv.tuneSessionEffort}>
+                {effortLevels.map(([v, text], i) => (
+                  <button
+                    key={`sess-effort-${v}`}
+                    type="button"
+                    role="radio"
+                    aria-checked={v === sessionEffortValue}
+                    aria-label={text}
+                    title={formatStr(cv.tuneEffortTitle, { text })}
+                    className={v === sessionEffortValue ? 'tune-bar on' : sessionEffortIdx >= 0 && i < sessionEffortIdx ? 'tune-bar lit' : 'tune-bar'}
+                    style={{ height: 8 + i * 3 }}
+                    onClick={() => {
+                      if (v !== sessionEffortValue) changeSessionEffort(v);
+                    }}
+                  />
+                ))}
+              </div>
+              <button
+                type="button"
+                className={sessionEffortValue === '' ? 'tune-meter-reset active' : 'tune-meter-reset'}
+                aria-label={cv.tuneFollowGlobal}
+                title={cv.tuneFollowGlobal}
+                onClick={() => {
+                  if (sessionEffortValue !== '') changeSessionEffort('');
+                }}
+              >
+                {cv.tuneFollowGlobal}
               </button>
             </div>
             <div className="tune-group">
@@ -1939,6 +2337,11 @@ export default function ChatView(props: Props) {
                 </button>
               ))}
             </div>
+            <div className="empty-hints">
+              <span><code>/</code> {cv.emptyHintSlash}</span>
+              <span><code>@</code> {cv.emptyHintMention}</span>
+              <span>{cv.emptyHintPlan}</span>
+            </div>
           </div>
         )}
 
@@ -1971,6 +2374,9 @@ export default function ChatView(props: Props) {
               )}
               <button className="icon-btn msg-copy" onClick={() => void copyMessage(m)} title={copiedMessageId === m.id ? cv.msgCopied : cv.copyMsgTitle} aria-label={cv.copyUserLabel}>
                 {copiedMessageId === m.id ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+              </button>
+              <button className="icon-btn msg-copy msg-fork" onClick={() => cbRef.current.onForkSession(m.id)} title={cv.forkTitle} aria-label={cv.forkLabel}>
+                <ForkIcon size={14} />
               </button>
             </div>
           ) : (
@@ -2106,13 +2512,21 @@ export default function ChatView(props: Props) {
                     <pre>{m.verify[m.verify.length - 1].tail}</pre>
                   </details>
                 )}
+                {m.todos && m.todos.length > 0 && (
+                  <details className="todo-done">
+                    <summary>{formatStr(cv.todosDone, { done: m.todos.filter((t) => t.status === 'completed').length, total: m.todos.length })}</summary>
+                    <TodoList items={m.todos} cv={cv} />
+                  </details>
+                )}
                 {m.durationMs != null ||
                 (m.code !== null && m.code !== undefined) ||
                 m.stderr ||
                 m.cwd ||
+                m.plan ||
                 retryPrompts.has(m.id) ||
                 (m.changedFiles && m.changedFiles.length > 0) ? (
                   <div className="msg-meta">
+                    {m.plan && <span className="msg-plan-tag">{cv.planTag}</span>}
                     {m.usage && (
                       <span
                         title={formatStr(cv.tokensTitle, {
@@ -2130,7 +2544,7 @@ export default function ChatView(props: Props) {
                         {formatStr(cv.exitCode, { code: m.code })}
                       </span>
                     )}
-                    {m.cwd && <span title={m.cwd}>{formatStr(cv.runAt, { cwd: m.cwd })}</span>}
+                    {m.cwd && <span title={m.cwd}>{formatStr(cv.runAt, { cwd: baseName(m.cwd) })}</span>}
                     {m.work && m.work.length > 0 && (
                       <details>
                         <summary>{formatStr(cv.workLog, { n: m.work.length })}</summary>
@@ -2154,6 +2568,16 @@ export default function ChatView(props: Props) {
                         {strings.common.retry}
                       </button>
                     )}
+                    {m.checkpointId && !m.reverted && !run && (
+                      <button
+                        className="mini-btn checkpoint-restore"
+                        disabled={reverting === m.id}
+                        title={cv.checkpointMsg}
+                        onClick={() => void doCheckpointRestore(m)}
+                      >
+                        {reverting === m.id ? cv.reverting : cv.checkpointBtn}
+                      </button>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -2162,6 +2586,9 @@ export default function ChatView(props: Props) {
               )}
               <button className="icon-btn msg-copy" onClick={() => void copyMessage(m)} title={copiedMessageId === m.id ? cv.msgCopied : cv.copyMsgTitle} aria-label={cv.copyAiLabel}>
                 {copiedMessageId === m.id ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+              </button>
+              <button className="icon-btn msg-copy msg-fork" onClick={() => cbRef.current.onForkSession(m.id)} title={cv.forkTitle} aria-label={cv.forkLabel}>
+                <ForkIcon size={14} />
               </button>
             </div>
           ),
@@ -2261,6 +2688,7 @@ export default function ChatView(props: Props) {
               settings,
               input.trim() || cv.cmdPromptPh,
               props.cliResolved || settings.cliPath || 'muse',
+              planMode,
             )}
           </code>
           <div className="cmd-cwd">{formatStr(cv.cmdCwd, { folder: folder || cv.cmdCwdDefault })}</div>
@@ -2334,11 +2762,12 @@ export default function ChatView(props: Props) {
                       </button>
                     )) : <div className="composer-file-mention-empty">{cv.mentionNone}</div>}
           </div>}
-          {slash && <div className="composer-slash" id="composer-slash-results" role="listbox" aria-label={cv.slashLabel}>
+          {slashOpen && <div className="composer-slash" id="composer-slash-results" role="listbox" aria-label={cv.slashLabel}>
             <div className="composer-slash-heading">{cv.slashHead} <span>{cv.slashKeys}</span></div>
             {slashResults.length ? slashResults.map((cmd, index) => (
               <button type="button" role="option" aria-selected={index === slashIndex} id={`composer-slash-${index}`} key={cmd.id} className={index === slashIndex ? 'composer-slash-option active' : 'composer-slash-option'} title={cmd.hint} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSlashIndex(index)} onClick={() => acceptSlashCommand(index)}>
                 <code>{cmd.name}</code>
+                {'kind' in cmd && cmd.kind === 'custom' && <span className="composer-slash-badge">{cv.customBadge}</span>}
                 <span>{cmd.title}</span>
                 <small>{cmd.hint}</small>
               </button>
@@ -2370,6 +2799,12 @@ export default function ChatView(props: Props) {
               ))}
             </div>
           )}
+          {run && liveTodos.length > 0 && (
+            <div className="todo-strip" aria-label={cv.todosTitle}>
+              <div className="todo-strip-head">{cv.todosTitle}</div>
+              <TodoList items={liveTodos} cv={cv} />
+            </div>
+          )}
           {attach.length > 0 && (
             <div className="attach-row">
               {attach
@@ -2395,6 +2830,14 @@ export default function ChatView(props: Props) {
                 ))}
             </div>
           )}
+          {pendingPlan && !run && (
+            <div className="plan-bar" role="group" aria-label={cv.planTag}>
+              <PlanIcon size={14} />
+              <span className="plan-bar-text">{cv.planDoneNotice}</span>
+              <button type="button" className="btn-primary plan-execute" onClick={executePlan}>{cv.planExecute}</button>
+              <button type="button" className="btn plan-dismiss" onClick={() => setPendingPlan(null)}>{cv.planDismiss}</button>
+            </div>
+          )}
           <textarea
             ref={composerInputRef}
             className="composer-input"
@@ -2407,32 +2850,33 @@ export default function ChatView(props: Props) {
             onClick={(event) => updatePopupsAtCaret(event.currentTarget)}
             role="combobox"
             aria-autocomplete="list"
-            aria-expanded={!!fileMention || !!slash}
-            aria-controls={fileMention ? 'composer-file-mention-results' : slash ? 'composer-slash-results' : undefined}
-            aria-activedescendant={slash && slashResults[slashIndex] ? `composer-slash-${slashIndex}` : fileMention && fileMentionResults[fileMentionIndex] ? `composer-file-mention-${fileMentionIndex}` : undefined}
+            aria-expanded={!!fileMention || slashOpen}
+            aria-controls={fileMention ? 'composer-file-mention-results' : slashOpen ? 'composer-slash-results' : undefined}
+            aria-activedescendant={slashOpen && slashResults[slashIndex] ? `composer-slash-${slashIndex}` : fileMention && fileMentionResults[fileMentionIndex] ? `composer-file-mention-${fileMentionIndex}` : undefined}
             aria-keyshortcuts="ArrowUp ArrowDown Enter Shift+Enter Control+Enter Meta+Enter"
             title={run ? cv.composerQueueHint : cv.composerHistoryHint}
             onKeyDown={(e) => {
               const atPromptStart = e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0;
               const composing = e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
-              if (slash && !composing && e.key === 'Escape') {
+              if (slashOpen && !composing && e.key === 'Escape') {
                 e.preventDefault();
                 slashQueryRef.current = null;
                 setSlash(null);
+                setCustomSlashArgs(null);
                 return;
               }
-              if (slash && !composing && slashResults.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+              if (slashOpen && !composing && slashResults.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
                 e.preventDefault();
                 const delta = e.key === 'ArrowDown' ? 1 : -1;
                 setSlashIndex((index) => (index + delta + slashResults.length) % slashResults.length);
                 return;
               }
-              if (slash && !composing && slashResults.length && (e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+              if (slashOpen && !composing && slashResults.length && (e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
                 e.preventDefault();
                 acceptSlashCommand();
                 return;
               }
-              if (slash && !composing && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !slashResults.length) {
+              if (slashOpen && !composing && e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !slashResults.length) {
                 // Unknown /command: dismiss and send as plain text.
                 slashQueryRef.current = null;
                 setSlash(null);
@@ -2514,6 +2958,18 @@ export default function ChatView(props: Props) {
             >
               <ClockIcon size={17} />
             </button>
+            <button
+              type="button"
+              className={planMode ? 'icon-btn tool-btn plan on' : 'icon-btn tool-btn plan'}
+              onClick={togglePlanMode}
+              title={cv.planToggleTitle}
+              aria-label={cv.planToggle}
+              aria-pressed={planMode}
+              disabled={!!run}
+            >
+              <PlanIcon size={17} />
+            </button>
+            {planMode && !run && <span className="plan-badge" role="status">{cv.planBadge}</span>}
             {run && input.trim() && <span className="composer-draft-hint" role="status">{cv.draftHint}</span>}
             <span className="bar-spacer" />
             <button
@@ -2524,7 +2980,9 @@ export default function ChatView(props: Props) {
             >
               <SlidersIcon size={14} />
               <span className="tune-btn-text">
-                {settings.model ? modelLabel(settings.model) : strings.settings.cliDefault}
+                {effModel.value ? modelLabel(effModel.value) : strings.settings.cliDefault}
+                {effEffort.value ? ` · ${reasoningLabel(effEffort.value)}` : ''}
+                {sessionOverridden ? ` · ${cv.tuneSessionMark}` : ''}
               </span>
             </button>
             {session.engine === 'msp' ? <span className="tag tag-msp">MSP</span> : <span className="tag">exec</span>}

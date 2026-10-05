@@ -22,12 +22,15 @@ import {
   ExportIcon,
   FolderIcon,
   GuitarIcon,
+  ImportIcon,
   PencilIcon,
   PlusIcon,
+  SaveIcon,
   SearchIcon,
   SidebarIcon,
   SlidersIcon,
   StarIcon,
+  StopIcon,
   TrashIcon,
   UnarchiveIcon,
   XIcon,
@@ -40,6 +43,8 @@ interface Props {
   activeId: string;
   groupBy: 'project' | 'status';
   runningIds: string[];
+  unreadIds: string[];
+  onStopSession: (id: string) => void;
   cliStatus: CliStatus;
   hostSessions: HostSession[];
   resumingId: string | null;
@@ -54,6 +59,8 @@ interface Props {
   onToggleArchivedMany: (ids: string[]) => void;
   onDeleteMany: (ids: string[]) => Promise<boolean>;
   onExportMany: (ids: string[]) => Promise<boolean>;
+  onBackupMany: (ids: string[]) => Promise<boolean>;
+  onImport: () => void;
   onToggleArchived: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onResume: (hostSessionId: string) => void;
@@ -61,6 +68,7 @@ interface Props {
   onCollapse: () => void;
   onOpenSettings: () => void;
   onOpenCodex: () => void;
+  onOpenClaude: () => void;
   onOpenFiles: () => void;
   projects: string[];
   pinnedProjects: string[];
@@ -430,6 +438,9 @@ export default function Sidebar(props: Props) {
         <button className="side-action" onClick={props.onNew} title={sb.newThreadTitle} aria-keyshortcuts="Control+N Meta+N">
           <PencilIcon size={15} /> {strings.common.newThread}
         </button>
+        <button className="side-action" onClick={props.onImport} title={sb.importTitle}>
+          <ImportIcon size={15} /> {sb.importBtn}
+        </button>
         <div className="side-search-wrap" ref={sessionSearchShellRef} onKeyDown={(event) => {
           if (event.key === 'Escape' && queryHelpOpen) {
             event.preventDefault();
@@ -534,6 +545,17 @@ export default function Sidebar(props: Props) {
               }}
             >
               <ExportIcon size={12} /> {sb.exportBtn}
+            </button>
+            <button
+              type="button"
+              className="session-selection-action"
+              disabled={selectedVisibleIds.length === 0}
+              title={sb.backupTitle}
+              onClick={async () => {
+                if (await props.onBackupMany(selectedVisibleIds)) setSelectedSessionIds([]);
+              }}
+            >
+              <SaveIcon size={12} /> {sb.backupBtn}
             </button>
             <button
               type="button"
@@ -694,6 +716,7 @@ export default function Sidebar(props: Props) {
                 g.items.map((s) => {
                   const running = runningIds.includes(s.id);
                   const failed = !running && isSidebarSessionFailed(s);
+                  const unread = s.id !== activeId && props.unreadIds.includes(s.id);
                                   const match = q && !s.title.toLowerCase().includes(q)
                                     ? [...s.messages].reverse().find((m) => m.text.toLowerCase().includes(q))?.text || ''
                                     : '';
@@ -712,7 +735,7 @@ export default function Sidebar(props: Props) {
                       onClick={(event) => selectionMode
                         ? selectSession(s.id, event.shiftKey)
                         : props.onSelect(s.id)}
-                      className={`thread-row${s.id === activeId ? ' active' : ''}${selectedVisibleIds.includes(s.id) ? ' selected' : ''}`}
+                      className={`thread-row${s.id === activeId ? ' active' : ''}${selectedVisibleIds.includes(s.id) ? ' selected' : ''}${unread ? ' unread' : ''}`}
                       title={sessionPreview ? `${s.title}\n${sessionPreview}` : s.title}
                     >
                       {selectionMode && (
@@ -766,9 +789,20 @@ export default function Sidebar(props: Props) {
                       {s.engine === 'msp' && <span className="tag tag-msp">MSP</span>}
                       {draftSessionIdSet.has(s.id) && <span className="thread-draft-indicator" title={sb.draftTitle} aria-label={sb.draftLabel}>{sb.draftTag}</span>}
                       {!!props.queuedSessionCounts[s.id] && <span className="thread-queue-indicator" title={sb.queueTitle} aria-label={formatStr(sb.queueLabel, { count: props.queuedSessionCounts[s.id] })}>{formatStr(sb.queueTag, { count: props.queuedSessionCounts[s.id] })}</span>}
+                      {unread && <span className="thread-unread-dot" title={sb.newReplyTitle} aria-label={sb.newReplyLabel} role="status" />}
                       <span className="thread-meta">
                         {running ? <span className="st-word running">{sb.statusRunning}</span> : failed ? <span className="st-word failed">{sb.statusFailed}</span> : timeAgo(lastTs(s), clockNow, lang)}
                       </span>
+                      {running && (
+                        <button
+                          className="icon-btn thread-stop"
+                          title={sb.stopRunTitle}
+                          aria-label={formatStr(sb.stopRunLabel, { title: s.title })}
+                          onClick={(e) => { e.stopPropagation(); props.onStopSession(s.id); }}
+                        >
+                          <StopIcon size={13} />
+                        </button>
+                      )}
                       <button
                         className="icon-btn thread-archive-toggle"
                         title={sb.moveToArchiveTitle}
@@ -849,6 +883,7 @@ export default function Sidebar(props: Props) {
                   <button type="button" className="thread-title" aria-current={s.id === activeId ? 'page' : undefined} aria-keyshortcuts="ArrowUp ArrowDown Home End" onKeyDown={(e) => handleSessionTitleKeyDown(e, null)}>{s.title}</button>
                   {draftSessionIdSet.has(s.id) && <span className="thread-draft-indicator" title={sb.draftTitle} aria-label={sb.draftLabel}>{sb.draftTag}</span>}
                   {!!props.queuedSessionCounts[s.id] && <span className="thread-queue-indicator" title={sb.queueTitle} aria-label={formatStr(sb.queueLabel, { count: props.queuedSessionCounts[s.id] })}>{formatStr(sb.queueTag, { count: props.queuedSessionCounts[s.id] })}</span>}
+                  {s.id !== activeId && props.unreadIds.includes(s.id) && <span className="thread-unread-dot" title={sb.newReplyTitle} aria-label={sb.newReplyLabel} role="status" />}
                   {s.pinned && <StarIcon size={12} filled />}
                   <button
                     className="icon-btn thread-unarchive"
@@ -994,6 +1029,17 @@ export default function Sidebar(props: Props) {
               >
                 <ChatIcon size={16} />
                 <span>{sb.connectCodex}</span>
+                <ChevronRightIcon size={14} />
+              </button>
+              <button
+                className="profile-row"
+                onClick={() => {
+                  setProfileOpen(false);
+                  props.onOpenClaude();
+                }}
+              >
+                <ChatIcon size={16} />
+                <span>{sb.connectClaude}</span>
                 <ChevronRightIcon size={14} />
               </button>
               <button
