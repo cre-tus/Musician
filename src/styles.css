@@ -6691,3 +6691,147 @@ button.git-branch:hover {
   color: #fff;
   background: rgba(10, 132, 255, 0.48);
 }
+
+.skills-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  overflow-y: auto;
+  height: 100%;
+}
+.skills-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skills-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+}
+.skills-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skills-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+}
+.skills-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.skills-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skills-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.skills-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.skills-row-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skills-row-desc {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skills-scope {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12px;
+}
+.skills-empty {
+  color: var(--muted);
+  padding: 8px 2px;
+}
+.skills-notice {
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.skills-notice.ok {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.skills-notice.err {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.skills-switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 56px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: #fff;
+  cursor: pointer;
+  padding: 0;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.skills-switch.on {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+.skills-switch:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.skills-knob {
+  position: absolute;
+  top: 1px;
+  left: 2px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid var(--border-soft);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  transition: left 0.15s ease;
+}
+.skills-switch.on .skills-knob {
+  left: calc(100% - 26px);
+  color: var(--ok);
+}
+.skills-switch.off .skills-knob {
+  color: var(--muted);
+}
+@media (prefers-reduced-motion: reduce) {
+  .skills-switch,
+  .skills-knob {
+    transition: none;
+  }
+}

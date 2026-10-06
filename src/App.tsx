@@ -2281,8 +2281,8 @@ export default function App() {
     );
 
   const newPaneTab = (kind: PaneTabKind, cwd?: string, url?: string) => {
-    if (kind === 'files') {
-      const existing = tabs.find((t) => t.kind === 'files');
+    if (kind === 'files' || kind === 'skills') {
+      const existing = tabs.find((t) => t.kind === kind);
       if (existing) {
         setActiveTabId(existing.id);
         setEditorVisible(true);
@@ -2292,7 +2292,7 @@ export default function App() {
     const tab: PaneTab = {
       id: uid('tab'),
       kind,
-      title: kind === 'browser' ? av.newBrowserTab : kind === 'terminal' ? (cwd ? formatStr(av.termIn, { name: basename(cwd) }) : av.termTab) : av.filesTab,
+      title: kind === 'browser' ? av.newBrowserTab : kind === 'terminal' ? (cwd ? formatStr(av.termIn, { name: basename(cwd) }) : av.termTab) : kind === 'skills' ? av.skillsTab : av.filesTab,
       ...(kind === 'terminal' ? { shell: 'powershell' as const, cwd: cwd || folder || undefined } : {}),
       ...(kind === 'browser' && url ? { url } : {}),
     };
@@ -2523,6 +2523,14 @@ export default function App() {
     if (existing) setActiveTabId(existing.id);
     else newPaneTab('files');
   };
+
+  const openSkillsTab = () => {
+    setView('thread');
+    setEditorVisible(true);
+    const existing = tabs.find((t) => t.kind === 'skills');
+    if (existing) setActiveTabId(existing.id);
+    else newPaneTab('skills');
+  };
   openFilesViewerRef.current = openFilesViewer;
   const openWorkspaceSearch = () => {
     const selection = editorApiRef.current?.getSelection()?.text;
@@ -2717,6 +2725,7 @@ export default function App() {
     { id: 'scheduled-prompts', title: STRINGS[lang].shortcuts.nl06, hint: pendingScheduledCount > 0 ? formatStr(av.palSchedCount, { n: pendingScheduledCount }) : 'Ctrl+Alt+R', keywords: ['scheduled prompt', 'reservation', 'timer', 'schedule', '예약', '스케줄', '타이머'], run: () => { setScheduleListOpen(true); setPaletteOpen(false); } },
     { id: 'tune-model', title: av.palTune, keywords: ['tune model', 'model settings', 'reasoning', 'approval', '모델 변경', '추론', '권한'], run: () => { setView('thread'); setTuneSignal((signal) => signal + 1); setPaletteOpen(false); } },
     { id: 'export-active-transcript', title: av.palExportActive, keywords: ['export transcript', 'export conversation', 'markdown', '대화 내보내기', '내보내기'], run: () => { setPaletteOpen(false); void exportSessionTranscripts([activeId]); } },
+    { id: 'cli-skills', title: av.palSkills, keywords: ['skills', 'find skills', 'install skill', 'manage skills', '스킬', '스킬 찾기', '스킬 추가'], run: () => { openSkillsTab(); setPaletteOpen(false); } },
     { id: 'focus-composer', title: av.palFocusComposer, keywords: ['focus composer', 'focus prompt', 'chat input', '메시지 입력', '프롬프트 입력'], run: () => {
       setView('thread');
       setPaletteOpen(false);
@@ -2891,6 +2900,7 @@ export default function App() {
             onGroupBy={setGroupBy}
             onSave={persistSettings}
             onBack={() => setView('thread')}
+            onOpenSkills={openSkillsTab}
           />
         )}
         <div ref={wrapRef} className={`thread-wrap${view === 'thread' ? '' : ' hidden'}${editorVisible ? ' with-editor' : ''}`}>
@@ -3042,6 +3052,7 @@ export default function App() {
             onCommitFiles={commitGitFiles}
             onPickFolder={pickFolder}
             onOpenTerminalAt={openTerminalAt}
+            onOpenUrl={openBookmark}
             onRenameEntry={renameExplorerEntry}
             onDeleteEntry={deleteExplorerEntry}
             onBrowserTitle={browserTitle}

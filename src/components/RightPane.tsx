@@ -8,7 +8,8 @@ import { pathsEqual } from '../lib/path-utils.mjs';
 import { unpinnedPaneTabIds } from '../lib/pane-tab-management.mjs';
 import BrowserTab from './BrowserTab';
 import FilesTab from './FilesTab';
-import { ChatIcon, FileIcon, FileTypeIcon, FolderIcon, GlobeIcon, PinIcon, PlusIcon, SaveIcon, TerminalIcon, WrapLinesIcon, XIcon } from './icons';
+import SkillsTab from './SkillsTab';
+import { ChatIcon, FileIcon, FileTypeIcon, FolderIcon, GlobeIcon, PinIcon, PlusIcon, SaveIcon, StarIcon, TerminalIcon, WrapLinesIcon, XIcon } from './icons';
 import { useStrings } from '../lib/lang';
 import { formatStr } from '../lib/i18n.mjs';
 
@@ -75,6 +76,7 @@ interface Props {
   onCommitFiles: (message: string) => Promise<boolean>;
   onPickFolder: () => void;
   onOpenTerminalAt: (dirPath: string) => void;
+  onOpenUrl: (url: string) => void;
   onRenameEntry: (entryPath: string, newName: string) => Promise<boolean>;
   onDeleteEntry: (entryPath: string, isDir: boolean) => Promise<boolean>;
   onBrowserTitle: (id: string, title: string) => void;
@@ -92,6 +94,7 @@ function TabIcon({ tab }: { tab: PaneTab }) {
   if (kind === 'browser') return <GlobeIcon size={13} />;
   if (kind === 'files') return <FolderIcon size={13} />;
   if (kind === 'terminal') return <TerminalIcon size={13} />;
+  if (kind === 'skills') return <StarIcon size={13} />;
   return <FileTypeIcon size={14} name={tab.file?.path || tab.title} />;
 }
 
@@ -376,6 +379,9 @@ export default function RightPane(props: Props) {
               <button role="menuitem" onClick={() => newTab('files')}>
                 <FolderIcon size={14} /> {s.pane.explorer}
               </button>
+              <button role="menuitem" onClick={() => newTab('skills')}>
+                <StarIcon size={14} /> {s.pane.newSkills}
+              </button>
               <button
                 role="menuitem"
                 onClick={() => {
@@ -547,6 +553,9 @@ export default function RightPane(props: Props) {
                   onRenameEntry={props.onRenameEntry}
                   onDeleteEntry={props.onDeleteEntry}
                 />
+              )}
+              {t.kind === 'skills' && (
+                <SkillsTab onOpenUrl={props.onOpenUrl} />
               )}
               {t.kind === 'terminal' && (
                 <Suspense fallback={<div className="editor-loading" role="status">{s.pane.loadingTerminal}</div>}>

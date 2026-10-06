@@ -67,7 +67,35 @@ export interface BrowserTabInfo {
   loading: boolean;
 }
 
-export type PaneTabKind = 'file' | 'browser' | 'files' | 'terminal';
+export type PaneTabKind = 'file' | 'browser' | 'files' | 'terminal' | 'skills';
+
+export type CliSkillAction = 'list' | 'install' | 'uninstall' | 'enable' | 'disable' | 'search' | 'agentSearch' | 'installRepo';
+
+export interface CliSkillRow {
+  id: string;
+  name: string;
+  scope: string;
+  description: string;
+  path: string;
+  activation: 'on' | 'off';
+}
+
+export interface SkillCandidate {
+  repo: string;
+  url: string;
+  stars: number;
+  description: string;
+  subdir: string;
+}
+
+export interface CliSkillsResponse {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  reset?: string;
+  skills?: CliSkillRow[];
+  results?: SkillCandidate[];
+}
 
 export interface PaneTab {
   id: string;
@@ -397,6 +425,7 @@ export interface MudexApi {
   browserTabs: () => Promise<{ ok: boolean; tabs?: BrowserTabInfo[]; error?: string }>;
   browserMcpCmd: () => Promise<{ ok: boolean; command?: string; args?: string[]; server?: string; settingsPath?: string; settingsBlock?: string; registration?: string; error?: string }>;
   browserMcpRegister: () => Promise<{ ok: boolean; status?: string; path?: string; error?: string }>;
+  skills: (action: CliSkillAction, payload?: Record<string, string>) => Promise<CliSkillsResponse>;
   browserHealth: () => Promise<{ ok: boolean; reason?: string | null; checkedAt: number; error?: string }>;
   onBrowserEvent: (fn: (p: BrowserEvent) => void) => () => void;
   onMspMcpHealth: (fn: (p: { key: string; mspSessionId: string | null; health: McpHealthEntry[] }) => void) => () => void;

@@ -20,6 +20,7 @@ interface Props {
   onGroupBy: (g: 'project' | 'status') => void;
   onSave: (settings: CliSettings) => void;
   onBack: () => void;
+  onOpenSkills: () => void;
 }
 
 type TestResult = Awaited<ReturnType<MudexApi['cliTest']>>;
@@ -917,6 +918,17 @@ export default function SettingsView(props: Props) {
                 <span className="mcp-register-msg" role="status">{st.mcpStale}</span>
               )}
             </div>
+          </div>
+        </div>
+
+        <div className="section-cap">{st.secSkills}</div>
+        <div className="panel">
+          <div className="setting-row">
+            <div>
+              <b>{st.secSkills}</b>
+              <p>{st.skillsDesc}</p>
+            </div>
+            <button className="btn" onClick={props.onOpenSkills}>{st.skillsOpen}</button>
           </div>
         </div>
 

@@ -14,6 +14,7 @@ const crypto = require('node:crypto');
 const { MspEngine } = require('./msp');
 const { checkMcpServerHealth } = require('./mcp-health');
 const { musicianBrowserEntry, registerMcpServer, registrationStatus, resolveCliSettingsPath, settingsBlockText } = require('./mcp-register');
+const { buildAgentSearchPrompt, fetchRateLimit, formatResetClock, installSkillFromRepo, parseAgentSearchResult, parseSkillsList, parseSkillsResult, runMuseSkills, searchGithubSkills, shouldRetryAgentSearch, skillsArgs, verifySkillCandidates } = require('./cli-skills');
 const { applyStateSet, loadRendererState, saveRendererState } = require('./renderer-state');
 const { pickDialogResult } = require('./pick-dialog');
 const { exportMarkdownFilename } = require('./export-markdown');
@@ -1952,6 +1953,151 @@ ipcMain.handle('browser:mcp-register', () => {
     return { ok: false, status: r.status, path: settingsPath };
   } catch (err) {
     return { ok: false, status: 'failed', error: String((err && err.message) || err) };
+  }
+});
+
+// CLI skills for the SkillsTab. Local actions shell `muse skills … --json`;
+// search/installRepo go to GitHub (no auth, rate limits are surfaced).
+// Single dispatch keeps the IPC surface small; failures return {ok:false,code}.
+// Verify cache (repo -> row|null) stretches the unauthenticated core quota
+// across searches; agents often re-offer the same popular repos.
+const skillVerifyCache = new Map();
+const MIN_CORE_FOR_AGENT_SEARCH = 10;
+ipcMain.handle('mudex:skills', async (_e, req) => {
+  const action = req && typeof req.action === 'string' ? req.action : '';
+  try {
+    if (action === 'list' || action === 'install' || action === 'uninstall' || action === 'enable' || action === 'disable') {
+      const s = loadSettings();
+      const resolved = resolveCli(s.cliPath);
+      const ran = await runMuseSkills(resolved.path, skillsArgs(action, req || {}));
+      if (!ran.ok) return { ok: false, code: ran.code || 'CLI_FAILED', error: ran.error || ran.stderr || '' };
+      return action === 'list' ? parseSkillsList(ran.stdout) : parseSkillsResult(ran.stdout, action);
+    }
+    if (action === 'search') return searchGithubSkills(req && req.query, undefined, { cache: skillVerifyCache, maxVerified: 5 });
+    if (action === 'agentSearch') {
+      const q = req && typeof req.query === 'string' ? req.query.trim() : '';
+      if (!q) return { ok: false, code: 'EMPTY_QUERY', error: 'Type what the skill should do.' };
+      // Quota preflight (free call): fail fast instead of burning a ~2min
+      // agent run when verification would hit the wall anyway.
+      try {
+        const pre = await fetchRateLimit();
+        if (pre.ok && pre.remaining < MIN_CORE_FOR_AGENT_SEARCH) {
+          const clock = formatResetClock(pre.reset);
+          const out = { ok: false, code: 'RATE_LIMITED', error: 'GitHub search rate limit reached. Try again in a minute.' };
+          if (clock) {
+            out.reset = clock;
+            out.error = `GitHub search rate limit reached. Try again after ${clock}.`;
+          }
+          return out;
+        }
+      } catch { /* preflight is best effort; verify reports real limits */ }
+      const s = loadSettings();
+      const resolved = resolveCli(s.cliPath);
+      const promptFile = writePromptFile(buildAgentSearchPrompt(q));
+      const argv = ['exec', ...splitArgs(s.extraArgs), ...(s.model ? ['--model', s.model] : []), '--prompt-file', promptFile];
+      const out = await new Promise((resolve) => {
+        let stdout = '';
+        let stderr = '';
+        let done = false;
+        let child;
+        try {
+          child = spawnCli(resolved.path, argv, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch {
+          resolve({ ok: false, code: 'CLI_NOT_FOUND', error: 'muse CLI not found.' });
+          return;
+        }
+        const timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          try { killTree(child); } catch { /* ignore */ }
+          resolve({ ok: false, code: 'TIMEOUT', error: 'Skill search timed out.' });
+        }, 240000);
+        if (timer.unref) timer.unref();
+        child.stdout.on('data', (d) => {
+          stdout += d.toString();
+          if (stdout.length > 16000) stdout = stdout.slice(-16000);
+        });
+        child.stderr.on('data', (d) => {
+          stderr += d.toString();
+          if (stderr.length > 4000) stderr = stderr.slice(-4000);
+        });
+        child.on('error', () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve({ ok: false, code: 'CLI_NOT_FOUND', error: 'muse CLI not found.' });
+        });
+        child.on('close', () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve({ ok: true, stdout, stderr });
+        });
+      });
+      if (!out.ok) return out;
+      const parsed = parseAgentSearchResult(out.stdout);
+      if (!parsed.ok) {
+        const detail = String(out.stderr || '').trim().split('\n').pop() || 'Could not read the agent result.';
+        return { ok: false, code: 'AGENT_PARSE_ERROR', error: detail.slice(0, 300) };
+      }
+      const first = await verifySkillCandidates(parsed.candidates, undefined, { cache: skillVerifyCache, maxVerified: 3 });
+      if (!shouldRetryAgentSearch(first, parsed)) return first;
+      // Agent offered repos but none had SKILL.md: one retry excluding them.
+      const excluded = parsed.candidates.map((c) => c.repo).join(', ');
+      const retryFile = writePromptFile(`${buildAgentSearchPrompt(q)}\nExclude these repositories (no usable skill found): ${excluded}.`);
+      const retryArgv = ['exec', ...splitArgs(s.extraArgs), ...(s.model ? ['--model', s.model] : []), '--prompt-file', retryFile];
+      const retry = await new Promise((resolve) => {
+        let stdout = '';
+        let done = false;
+        let child;
+        try {
+          child = spawnCli(resolved.path, retryArgv, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch {
+          resolve({ ok: false });
+          return;
+        }
+        const timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          try { killTree(child); } catch { /* ignore */ }
+          resolve({ ok: false });
+        }, 240000);
+        if (timer.unref) timer.unref();
+        child.stdout.on('data', (d) => {
+          stdout += d.toString();
+          if (stdout.length > 16000) stdout = stdout.slice(-16000);
+        });
+        child.on('error', () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve({ ok: false });
+        });
+        child.on('close', () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve({ ok: true, stdout });
+        });
+      });
+      if (!retry.ok) return first;
+      const reparsed = parseAgentSearchResult(retry.stdout);
+      if (!reparsed.ok) return first;
+      const second = await verifySkillCandidates(reparsed.candidates, undefined, { cache: skillVerifyCache, maxVerified: 3 });
+      if (!second.ok || second.results.length === 0) return first;
+      return second;
+    }
+    if (action === 'installRepo') {
+      if (!req || typeof req.repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(req.repo)) {
+        return { ok: false, code: 'BAD_REPO', error: 'Invalid repository name.' };
+      }
+      const s = loadSettings();
+      const resolved = resolveCli(s.cliPath);
+      return installSkillFromRepo(req.repo, typeof req.subdir === 'string' ? req.subdir : '', 'git', resolved.path);
+    }
+    return { ok: false, code: 'BAD_ACTION', error: `Unknown skills action: ${action}.` };
+  } catch (err) {
+    return { ok: false, code: 'SKILLS_FAILED', error: String((err && err.message) || err) };
   }
 });
 

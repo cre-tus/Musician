@@ -111,6 +111,7 @@ contextBridge.exposeInMainWorld('mudex', {
   browserTabs: () => ipcRenderer.invoke('browser:tabs'),
   browserMcpCmd: () => ipcRenderer.invoke('browser:mcp-cmd'),
   browserMcpRegister: () => ipcRenderer.invoke('browser:mcp-register'),
+  skills: (action, payload) => ipcRenderer.invoke('mudex:skills', { ...(payload || {}), action }),
   browserHealth: () => ipcRenderer.invoke('browser:health'),
   onBrowserEvent: (fn) => listen('browser:event', fn),
   termStart: (tabId, shell, cwd, seq) => ipcRenderer.invoke('term:start', { tabId, shell, cwd, seq }),
