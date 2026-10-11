@@ -3,7 +3,7 @@
 // shortcut, not a new backend.
 export const SLASH_COMMANDS = [
   { id: 'new', name: '/new', title: '새 스레드', hint: '대화 새로 시작', keywords: ['new chat', 'new thread', '새 대화'] },
-  { id: 'model', name: '/model', title: '모델·권한·추론 설정', hint: '튜닝 팝오버 열기', keywords: ['model tune', 'reasoning', 'approval', '모델 변경', '추론'] },
+  { id: 'model', name: '/model', title: '모델 선택', hint: '모델 메뉴 열기', keywords: ['model select', 'reasoning', '모델 변경', '모델 선택', '추론'] },
   { id: 'usage', name: '/usage', title: '사용량 보기', hint: '구독 할당량과 토큰', keywords: ['usage', 'quota', 'tokens', '사용량', '할당량'] },
   { id: 'settings', name: '/settings', title: '설정 열기', hint: 'CLI·테마·단축키', keywords: ['settings', 'preferences', '설정'] },
   { id: 'shortcuts', name: '/shortcuts', title: '단축키 도움말', hint: '키보드 단축키 보기', keywords: ['shortcuts', 'keys', '단축키'] },
@@ -11,6 +11,7 @@ export const SLASH_COMMANDS = [
   { id: 'export', name: '/export', title: '대화 내보내기', hint: 'Markdown으로 저장', keywords: ['export', 'markdown', '내보내기'] },
   { id: 'diff', name: '/diff', title: '변경 사항 보기', hint: '파일 탐색기 열기', keywords: ['diff', 'changes', 'git', '변경', '차이'] },
   { id: 'terminal', name: '/terminal', title: '터미널 열기', hint: '새 터미널 탭', keywords: ['terminal', 'shell', '터미널', '셸'] },
+  { id: 'goal', name: '/goal', title: '목표 관리', hint: '목표 목록과 시작', keywords: ['goal', 'goals', 'progress', '목표', '목표 관리', '진행률'] },
 ];
 
 // Fires only when the input itself starts with '/' and the caret is still
@@ -38,7 +39,7 @@ function slashScore(cmd, q) {
 
 const SLASH_TEXT_EN = {
   new: { title: 'New thread', hint: 'Start a fresh conversation' },
-  model: { title: 'Model, permissions & reasoning settings', hint: 'Open the tuning popover' },
+  model: { title: 'Select model', hint: 'Open the model menu' },
   usage: { title: 'Show usage', hint: 'Subscription quota and tokens' },
   settings: { title: 'Open settings', hint: 'CLI, theme, shortcuts' },
   shortcuts: { title: 'Shortcut help', hint: 'Show keyboard shortcuts' },
@@ -46,6 +47,7 @@ const SLASH_TEXT_EN = {
   export: { title: 'Export conversation', hint: 'Save as Markdown' },
   diff: { title: 'Show changes', hint: 'Open the file explorer' },
   terminal: { title: 'Open terminal', hint: 'New terminal tab' },
+  goal: { title: 'Manage goals', hint: 'Goals list and start' },
 };
 
 export function getSlashCommands(lang = 'ko') {

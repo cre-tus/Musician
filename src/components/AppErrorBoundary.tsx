@@ -61,7 +61,7 @@ export default class AppErrorBoundary extends React.Component<React.PropsWithChi
           </details>
           <div className="app-crash-actions">
             <button className="btn" type="button" onClick={() => void this.copyError()}>{copied ? s.crash.copied : s.crash.copyAction}</button>
-            <button className="btn-primary" type="button" onClick={() => window.location.reload()}>{s.crash.reload}</button>
+            <button className="btn" type="button" onClick={() => window.location.reload()}>{s.crash.reload}</button>
           </div>
         </section>
       </main>

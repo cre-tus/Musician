@@ -4,7 +4,8 @@ import { CheckIcon, ChevronDownIcon, ChevronRightIcon, ClockIcon, CollapseIcon, 
 import { api, hasBridge } from '../lib/mudex';
 import { normalizePinnedFilePath, pinnedFileParentDirectories, pinnedFileStorageKey, readPinnedFilePaths, reconcilePinnedFilePaths, removePinnedFilePaths, renamePinnedFilePaths } from '../lib/pinned-file-paths.mjs';
 import { normalizeCommitMessage, parseUpstreamCounts } from '../lib/git-status.mjs';
-import { commitGroupCheckState, commitInitialSelection, groupCommitFiles, partitionGroupStage } from '../lib/commit-groups.mjs';
+import { commitDirShortName, commitGroupCheckState, commitInitialSelection, groupCommitFiles, nestCommitGroups, partitionGroupStage } from '../lib/commit-groups.mjs';
+import type { CommitDirNode } from '../lib/commit-groups.mjs';
 import { readExplorerSectionState, toggleExplorerSection, writeExplorerSectionState } from '../lib/explorer-section-state.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import type { ExplorerSection } from '../lib/explorer-section-state.mjs';
@@ -179,6 +180,73 @@ export default function FilesTab(props: Props) {
     );
   };
 
+  // One directory group of the changes list; child folders render nested
+  // inside the parent's collapsible block so folding the parent folds them.
+  const renderChangeGroupNode = (node: CommitDirNode, depth: number) => {
+    const eligible = node.files.filter((f) => (changedKinds[f.replace(/\\/g, '/').toLowerCase()] || 'M') !== 'C');
+    const groupStagedCount = eligible.filter((f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()] === true).length;
+    const allStaged = eligible.length > 0 && groupStagedCount === eligible.length;
+    const collapsed = !!collapsedChangeGroups[node.dir];
+    const label = node.dir || ft.commitRootGroup;
+    const shortLabel = node.dir ? commitDirShortName(node.dir) : label;
+    return (
+      <div key={node.dir || '.'} className="changes-group" data-dir={node.dir} data-depth={depth}>
+        <div className="changes-group-head">
+          <button
+            type="button"
+            className="icon-btn changes-collapse"
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsedChangeGroups((prev) => ({ ...prev, [node.dir]: !prev[node.dir] }))}
+          >
+            {collapsed ? <ChevronRightIcon size={12} /> : <ChevronDownIcon size={12} />}
+          </button>
+          {eligible.length > 0 && (
+            <button
+              type="button"
+              className={allStaged ? 'icon-btn stage-toggle on' : 'icon-btn stage-toggle'}
+              aria-pressed={allStaged}
+              title={allStaged ? ft.unstage : ft.stage}
+              aria-label={formatStr(ft.stageLabel, { file: label, action: allStaged ? ft.unstage : ft.stage })}
+              onClick={() => void toggleGroupStaged(eligible)}
+            >
+              {allStaged ? <CheckIcon size={13} /> : <PlusIcon size={13} />}
+            </button>
+          )}
+          <span className="changes-group-name" title={label}>
+            <FolderIcon size={13} />
+            <span className="changes-group-label">{shortLabel}</span>
+          </span>
+          {node.files.length > 0 && (
+            <span className="changes-group-count">{groupStagedCount}/{node.files.length}</span>
+          )}
+          {eligible.length > 0 && (
+            <button
+              type="button"
+              className="mini-btn changes-group-commit"
+              title={formatStr(ft.commitGroupTitle, { dir: label })}
+              aria-label={formatStr(ft.commitGroupTitle, { dir: label })}
+              onClick={() => openCommit(eligible)}
+            >
+              {ft.commitBtn}
+            </button>
+          )}
+        </div>
+        {!collapsed && (
+          <>
+            <div className="changes-group-rows">
+              {node.files.map((f) => renderChangedRow(f))}
+            </div>
+            {node.children.length > 0 && (
+              <div className="changes-group-children">
+                {node.children.map((child) => renderChangeGroupNode(child, depth + 1))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
   const generateCommitMessage = async () => {
     if (genBusy || commitBusy || !folder || !hasBridge()) return;
     const selected = changedFiles.filter((f) => commitSelection[f]);
@@ -277,6 +345,37 @@ export default function FilesTab(props: Props) {
       for (const file of files) copy[file] = next;
       return copy;
     });
+  };
+
+  // One directory group of the commit dialog checklist; child folders render
+  // nested inside the parent so the hierarchy reads as a tree.
+  const renderCommitGroupNode = (node: CommitDirNode, depth: number) => {
+    const state = commitGroupCheckState(node.files, commitSelection);
+    const checkedCount = node.files.filter((f) => commitSelection[f]).length;
+    const label = node.dir || ft.commitRootGroup;
+    const shortLabel = node.dir ? commitDirShortName(node.dir) : label;
+    return (
+      <div key={node.dir || '.'} className="commit-group" data-dir={node.dir} data-depth={depth}>
+        <label className="commit-group-head">
+          {node.files.length > 0 && (
+            <input type="checkbox" checked={state === 'all'} ref={(el) => { if (el) el.indeterminate = state === 'some'; }} disabled={commitBusy} aria-label={`${label} (${checkedCount}/${node.files.length})`} onChange={() => toggleCommitGroup(node.files, state)} />
+          )}
+          <FolderIcon size={14} />
+          <span className="commit-group-name" title={label}>{shortLabel}</span>
+          {node.files.length > 0 && (
+            <span className="commit-group-count">{checkedCount}/{node.files.length}</span>
+          )}
+        </label>
+        <div className="commit-group-files">
+          {node.files.map((f) => renderCommitFileRow(f))}
+        </div>
+        {node.children.length > 0 && (
+          <div className="commit-group-children">
+            {node.children.map((child) => renderCommitGroupNode(child, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const refreshGitBranch = async () => {
@@ -1014,60 +1113,7 @@ export default function FilesTab(props: Props) {
             <div className="empty-note">{ft.noChanges}</div>
           ) : sections.changed && changesGrouped ? (
             <div className="changed-list is-grouped">
-              {groupCommitFiles(changedFiles).map((group) => {
-                const eligible = group.files.filter((f) => (changedKinds[f.replace(/\\/g, '/').toLowerCase()] || 'M') !== 'C');
-                const stagedCount = eligible.filter((f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()] === true).length;
-                const allStaged = eligible.length > 0 && stagedCount === eligible.length;
-                const collapsed = !!collapsedChangeGroups[group.dir];
-                const label = group.dir || ft.commitRootGroup;
-                return (
-                  <div key={group.dir || '.'} className="changes-group" data-dir={group.dir}>
-                    <div className="changes-group-head">
-                      <button
-                        type="button"
-                        className="icon-btn changes-collapse"
-                        aria-expanded={!collapsed}
-                        onClick={() => setCollapsedChangeGroups((prev) => ({ ...prev, [group.dir]: !prev[group.dir] }))}
-                      >
-                        {collapsed ? <ChevronRightIcon size={12} /> : <ChevronDownIcon size={12} />}
-                      </button>
-                      {eligible.length > 0 && (
-                        <button
-                          type="button"
-                          className={allStaged ? 'icon-btn stage-toggle on' : 'icon-btn stage-toggle'}
-                          aria-pressed={allStaged}
-                          title={allStaged ? ft.unstage : ft.stage}
-                          aria-label={formatStr(ft.stageLabel, { file: label, action: allStaged ? ft.unstage : ft.stage })}
-                          onClick={() => void toggleGroupStaged(eligible)}
-                        >
-                          {allStaged ? <CheckIcon size={13} /> : <PlusIcon size={13} />}
-                        </button>
-                      )}
-                      <span className="changes-group-name" title={label}>
-                        <FolderIcon size={13} />
-                        <span className="changes-group-label">{label}</span>
-                      </span>
-                      <span className="changes-group-count">{stagedCount}/{group.files.length}</span>
-                      {eligible.length > 0 && (
-                        <button
-                          type="button"
-                          className="mini-btn changes-group-commit"
-                          title={formatStr(ft.commitGroupTitle, { dir: label })}
-                          aria-label={formatStr(ft.commitGroupTitle, { dir: label })}
-                          onClick={() => openCommit(eligible)}
-                        >
-                          {ft.commitBtn}
-                        </button>
-                      )}
-                    </div>
-                    {!collapsed && (
-                      <div className="changes-group-rows">
-                        {group.files.map((f) => renderChangedRow(f))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+              {nestCommitGroups(groupCommitFiles(changedFiles)).map((node) => renderChangeGroupNode(node, 0))}
             </div>
           ) : sections.changed ? (
             <div className="changed-list">
@@ -1092,24 +1138,7 @@ export default function FilesTab(props: Props) {
               </span>
             </div>
             <div className="commit-file-list" role="group" aria-label={ft.commitFilesTitle}>
-              {commitGrouped ? groupCommitFiles(committableFiles).map((group) => {
-                const state = commitGroupCheckState(group.files, commitSelection);
-                const checkedCount = group.files.filter((f) => commitSelection[f]).length;
-                const label = group.dir || ft.commitRootGroup;
-                return (
-                  <div key={group.dir || '.'} className="commit-group" data-dir={group.dir}>
-                    <label className="commit-group-head">
-                      <input type="checkbox" checked={state === 'all'} ref={(el) => { if (el) el.indeterminate = state === 'some'; }} disabled={commitBusy} aria-label={`${label} (${checkedCount}/${group.files.length})`} onChange={() => toggleCommitGroup(group.files, state)} />
-                      <FolderIcon size={14} />
-                      <span className="commit-group-name">{label}</span>
-                      <span className="commit-group-count">{checkedCount}/{group.files.length}</span>
-                    </label>
-                    <div className="commit-group-files">
-                      {group.files.map((f) => renderCommitFileRow(f))}
-                    </div>
-                  </div>
-                );
-              }) : committableFiles.map((f) => renderCommitFileRow(f))}
+              {commitGrouped ? nestCommitGroups(groupCommitFiles(committableFiles)).map((node) => renderCommitGroupNode(node, 0)) : committableFiles.map((f) => renderCommitFileRow(f))}
             </div>
             <label className="field">{ft.msgLabel}
               <textarea value={commitMessage} disabled={commitBusy || genBusy} onChange={(event) => { setCommitMessage(event.target.value); setCommitError(''); }} placeholder={ft.msgPh} aria-label={ft.msgPh} rows={3} aria-invalid={!!commitError} />
@@ -1119,7 +1148,7 @@ export default function FilesTab(props: Props) {
           <div className="modal-footer">
             <button className="btn commit-gen" type="button" disabled={commitBusy || genBusy} title={ft.genTitle} onClick={() => void generateCommitMessage()}>{genBusy ? ft.genBusy : ft.genBtn}</button>
             <button className="btn" type="button" disabled={commitBusy || genBusy} onClick={() => setCommitOpen(false)}>{strings.common.cancel}</button>
-            <button className="btn-primary" type="button" disabled={commitBusy || genBusy || !normalizeCommitMessage(commitMessage).ok} onClick={() => void submitCommit()}>{commitBusy ? ft.committing : ft.commitBtn}</button>
+            <button className="btn" type="button" disabled={commitBusy || genBusy || !normalizeCommitMessage(commitMessage).ok} onClick={() => void submitCommit()}>{commitBusy ? ft.committing : ft.commitBtn}</button>
           </div>
         </section>
       </div>}
@@ -1139,7 +1168,7 @@ export default function FilesTab(props: Props) {
           </div>
           <div className="modal-footer">
             <button className="btn" type="button" disabled={cloneBusy} onClick={() => setCloneOpen(false)}>{strings.common.cancel}</button>
-            <button className="btn-primary" type="button" disabled={cloneBusy || !cloneUrl.trim() || !cloneTarget.trim()} onClick={() => void submitClone()}>{cloneBusy ? ft.cloning : ft.cloneBtn}</button>
+            <button className="btn" type="button" disabled={cloneBusy || !cloneUrl.trim() || !cloneTarget.trim()} onClick={() => void submitClone()}>{cloneBusy ? ft.cloning : ft.cloneBtn}</button>
           </div>
         </section>
       </div>}
@@ -1154,7 +1183,7 @@ export default function FilesTab(props: Props) {
           </div>
           <div className="modal-footer">
             <button className="btn" type="button" disabled={!!gitSyncBusy} onClick={() => setPushOpen(false)}>{strings.common.cancel}</button>
-            <button className="btn-primary" type="button" disabled={!!gitSyncBusy} onClick={() => { setPushOpen(false); void doGitSync('push'); }}>{gitSyncBusy === 'push' ? ft.pushing : ft.syncPush}</button>
+            <button className="btn" type="button" disabled={!!gitSyncBusy} onClick={() => { setPushOpen(false); void doGitSync('push'); }}>{gitSyncBusy === 'push' ? ft.pushing : ft.syncPush}</button>
           </div>
         </section>
       </div>}
@@ -1183,7 +1212,7 @@ export default function FilesTab(props: Props) {
             <label className="field">{ft.branchNewLabel}
               <span className="branch-create-row">
                 <input value={newBranchName} disabled={!!branchBusy || branchCreateBusy} onChange={(event) => { setNewBranchName(event.target.value); setBranchError(''); }} onKeyDown={(event) => { if (event.key === 'Enter' && newBranchName.trim()) void createBranch(); }} placeholder={ft.branchNewPh} aria-label={ft.branchNewPh} spellCheck={false} />
-                <button type="button" className="btn-primary" disabled={!!branchBusy || branchCreateBusy || !newBranchName.trim()} onClick={() => void createBranch()}>{branchCreateBusy ? ft.branchCreating : ft.createBtn}</button>
+                <button type="button" className="btn" disabled={!!branchBusy || branchCreateBusy || !newBranchName.trim()} onClick={() => void createBranch()}>{branchCreateBusy ? ft.branchCreating : ft.createBtn}</button>
               </span>
             </label>
             {branchError && <div className="tree-error explorer-entry-error" role="alert">{branchError}</div>}
@@ -1295,7 +1324,7 @@ export default function FilesTab(props: Props) {
           </div>
           <div className="modal-footer">
             <button className="btn" type="button" disabled={entryDialogBusy} onClick={() => closeEntryDialog()}>{strings.common.cancel}</button>
-            <button className={entryDialog.mode === 'delete' ? 'btn-danger' : 'btn-primary'} type="button" disabled={entryDialogBusy || (entryDialog.mode !== 'delete' && !entryDialog.name.trim())} onClick={() => void submitEntryDialog()}>{entryDialogBusy ? ft.processing : entryDialog.mode === 'delete' ? ft.dlgTrash : entryDialog.mode === 'rename' ? ft.dlgRename : ft.createBtn}</button>
+            <button className={entryDialog.mode === 'delete' ? 'btn-danger' : 'btn'} type="button" disabled={entryDialogBusy || (entryDialog.mode !== 'delete' && !entryDialog.name.trim())} onClick={() => void submitEntryDialog()}>{entryDialogBusy ? ft.processing : entryDialog.mode === 'delete' ? ft.dlgTrash : entryDialog.mode === 'rename' ? ft.dlgRename : ft.createBtn}</button>
           </div>
         </section>
       </div>}

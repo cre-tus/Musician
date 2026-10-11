@@ -4,6 +4,7 @@ import { agentBadgeState } from '../lib/browser-agent-badge.mjs';
 import type { BrowserBookmark } from '../lib/browser-bookmarks.mjs';
 import { isBrowserBookmarked } from '../lib/browser-bookmarks.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
+import { formatBrowserSectionPrompt } from '../lib/browser-section-prompt.mjs';
 import type { BrowserShortcut } from '../types';
 import { BackIcon, ChevronDownIcon, CopyIcon, ForwardIcon, GlobeIcon, HomeIcon, RefreshIcon, SearchIcon, StarIcon, StopIcon, XIcon } from './icons';
 import { useLang, useStrings } from '../lib/lang';
@@ -175,6 +176,17 @@ export default function BrowserTab(props: Props) {
       } else if (ev.type === 'find-result' && ev.query === findQueryRef.current) {
         setFindMatches(ev.matches);
         setActiveMatchOrdinal(ev.activeMatchOrdinal);
+      } else if (ev.type === 'ask-section') {
+        const prompt = formatBrowserSectionPrompt({
+          pageTitle: ev.pageTitle,
+          pageUrl: ev.pageUrl,
+          tagPath: ev.tagPath,
+          text: ev.text,
+          linkUrl: ev.linkUrl,
+        }, lang);
+        if (prompt) window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text: prompt } }));
+      } else if (ev.type === 'ask-section-empty') {
+        props.onNotice(s.browser.askSectionEmpty);
       }
     });
     // Opportunistic health: session pre-flight results feed the same badge.

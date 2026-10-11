@@ -446,6 +446,14 @@ export default function FileEditor(props: Props) {
                   precondition: 'editorHasSelection',
                   run: onSearchSelection,
                 });
+                ed.getModifiedEditor().addAction({
+                  id: 'musician.askSelection',
+                  label: s.editor.askSelectionCtx,
+                  contextMenuGroupId: 'navigation',
+                  contextMenuOrder: 1.6,
+                  precondition: 'editorHasSelection',
+                  run: () => addSelectionToPrompt(),
+                });
                 ed.getModifiedEditor().onDidChangeModelContent(() => {
                   onChange(ed.getModifiedEditor().getValue());
                 });
@@ -471,6 +479,14 @@ export default function FileEditor(props: Props) {
                   contextMenuOrder: 1.5,
                   precondition: 'editorHasSelection',
                   run: onSearchSelection,
+                });
+                ed.addAction({
+                  id: 'musician.askSelection',
+                  label: s.editor.askSelectionCtx,
+                  contextMenuGroupId: 'navigation',
+                  contextMenuOrder: 1.6,
+                  precondition: 'editorHasSelection',
+                  run: () => addSelectionToPrompt(),
                 });
               }}
               onChange={(v) => onChange(v ?? '')}

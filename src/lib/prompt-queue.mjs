@@ -13,6 +13,12 @@ export function enqueuePrompt(queue, prompt, limit = MAX_QUEUED_PROMPTS) {
   return [...current, prompt.trim()];
 }
 
+export function prependPrompt(queue, prompt, limit = MAX_QUEUED_PROMPTS) {
+  const current = normalizePromptQueue(queue, limit);
+  if (typeof prompt !== 'string' || !prompt.trim()) return current;
+  return [prompt.trim(), ...current].slice(0, Math.max(0, limit));
+}
+
 export function removeQueuedPrompt(queue, index) {
   return extractQueuedPrompt(queue, index).remaining;
 }

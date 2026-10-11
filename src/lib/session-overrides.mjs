@@ -1,6 +1,6 @@
 // Per-session model / reasoning-effort overrides. Empty string means
-// "follow the global setting". Pure + unit-tested; the tune dialog, the
-// composer pill, and the send path all resolve through here.
+// "follow the global setting". Pure + unit-tested; the model menu, the
+// reasoning modal, and the send path all resolve through here.
 export const EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
 export function sanitizeEffort(value) {

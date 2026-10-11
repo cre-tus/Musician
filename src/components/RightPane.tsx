@@ -6,6 +6,7 @@ import { parseEditorPosition } from '../lib/editor-position.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { pathsEqual } from '../lib/path-utils.mjs';
 import { unpinnedPaneTabIds } from '../lib/pane-tab-management.mjs';
+import { MAX_EDITOR_FONT_SIZE, MIN_EDITOR_FONT_SIZE } from '../lib/editor-font-size.mjs';
 import BrowserTab from './BrowserTab';
 import FilesTab from './FilesTab';
 import SkillsTab from './SkillsTab';
@@ -350,9 +351,9 @@ export default function RightPane(props: Props) {
           <WrapLinesIcon size={14} />
         </button>}
         {selectedFileTab?.file && !selectedFileTab.file.preview && <div className="editor-font-controls" aria-label={s.pane.fontSizeLabel}>
-          <button type="button" className="icon-btn" title={s.pane.fontSmaller} aria-label={s.pane.fontSmallerLabel} disabled={props.editorFontSize <= 10} onClick={() => props.onChangeEditorFontSize(-1)}>A−</button>
+          <button type="button" className="icon-btn" title={s.pane.fontSmaller} aria-label={s.pane.fontSmallerLabel} disabled={props.editorFontSize <= MIN_EDITOR_FONT_SIZE} onClick={() => props.onChangeEditorFontSize(-1)}>A−</button>
           <span aria-live="polite">{props.editorFontSize}px</span>
-          <button type="button" className="icon-btn" title={s.pane.fontBigger} aria-label={s.pane.fontBiggerLabel} disabled={props.editorFontSize >= 24} onClick={() => props.onChangeEditorFontSize(1)}>A+</button>
+          <button type="button" className="icon-btn" title={s.pane.fontBigger} aria-label={s.pane.fontBiggerLabel} disabled={props.editorFontSize >= MAX_EDITOR_FONT_SIZE} onClick={() => props.onChangeEditorFontSize(1)}>A+</button>
         </div>}
         <button
           type="button"

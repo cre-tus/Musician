@@ -629,3 +629,10 @@ export const PlanIcon = ({ size }: P) => (
     <path d="M9 7.5h6" />
   </svg>
 );
+export const TargetIcon = ({ size }: P) => (
+  <svg {...svgProps(size)}>
+    <circle cx="12" cy="12" r="9" />
+    <circle cx="12" cy="12" r="5" />
+    <circle cx="12" cy="12" r="1.2" fill="currentColor" />
+  </svg>
+);

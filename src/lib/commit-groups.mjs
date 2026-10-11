@@ -31,6 +31,84 @@ export function groupCommitFiles(files) {
   return order.map((dir) => ({ dir, files: byDir.get(dir) }));
 }
 
+// Nests flat { dir, files } groups into a directory tree so a child folder
+// renders inside its parent: collapsing the parent hides the whole subtree.
+// Root ('') stays a top-level leaf. Missing ancestors are synthesized as
+// empty-file headers (e.g. 'pkg' for 'pkg/alpha' + 'pkg/beta') so siblings
+// read under their parent instead of scattering top-level; a synthesized
+// header with a single child is folded away so a lone deep group gains no
+// empty level. Matching is on slash boundaries so 'src2' never nests under
+// 'src'. Input order is kept, input objects are not mutated.
+export function nestCommitGroups(groups) {
+  if (!Array.isArray(groups)) return [];
+  const nodes = [];
+  const byDir = new Map();
+  for (const group of groups) {
+    if (!group || typeof group !== 'object' || typeof group.dir !== 'string') continue;
+    const dir = group.dir.replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/\/+$/, '');
+    if (byDir.has(dir)) continue;
+    const node = { dir, files: Array.isArray(group.files) ? group.files : [], children: [] };
+    byDir.set(dir, node);
+    nodes.push(node);
+  }
+  const implicit = new Set();
+  const ancestorsOf = (dir) => {
+    const out = [];
+    let rest = dir;
+    for (;;) {
+      const slash = rest.lastIndexOf('/');
+      if (slash <= 0) break;
+      rest = rest.slice(0, slash);
+      out.unshift(rest);
+    }
+    return out;
+  };
+  const roots = [];
+  for (const node of nodes) {
+    if (!node.dir) {
+      roots.push(node);
+      continue;
+    }
+    let holder = null;
+    for (const ancestor of ancestorsOf(node.dir)) {
+      let parent = byDir.get(ancestor);
+      if (!parent) {
+        parent = { dir: ancestor, files: [], children: [] };
+        byDir.set(ancestor, parent);
+        implicit.add(ancestor);
+      }
+      if (holder) {
+        if (!holder.children.includes(parent)) holder.children.push(parent);
+      } else if (!roots.includes(parent)) {
+        roots.push(parent);
+      }
+      holder = parent;
+    }
+    if (holder) holder.children.push(node);
+    else if (!roots.includes(node)) roots.push(node);
+  }
+  const foldSingles = (list) => {
+    const out = [];
+    for (const node of list) {
+      node.children = foldSingles(node.children);
+      if (implicit.has(node.dir) && node.children.length === 1) out.push(node.children[0]);
+      else out.push(node);
+    }
+    return out;
+  };
+  return foldSingles(roots);
+}
+
+// Display label for a directory group header: the last segment only
+// ('src/lib' -> 'lib') so nested trees don't repeat ancestor paths.
+// The full path stays available for tooltips and accessible names.
+export function commitDirShortName(dir) {
+  const value = String(dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!value) return '';
+  const slash = value.lastIndexOf('/');
+  return slash < 0 ? value : value.slice(slash + 1);
+}
+
 // Toggle-all batches for one directory group in the changes list: when every
 // eligible file is already staged the whole group unstages, otherwise the
 // unstaged remainder stages (staged files stay staged).

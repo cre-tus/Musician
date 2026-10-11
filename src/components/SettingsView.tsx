@@ -739,7 +739,7 @@ export default function SettingsView(props: Props) {
               >
                 {st.customAdd}
               </button>
-              <button type="button" className="btn-primary" onClick={saveCustomCmds}>
+              <button type="button" className="btn" onClick={saveCustomCmds}>
                 {st.customSave}
               </button>
               {customMsg && <span className="custom-cmd-msg" role="status">{customMsg}</span>}
@@ -844,7 +844,7 @@ export default function SettingsView(props: Props) {
               >
                 {st.hookAdd}
               </button>
-              <button type="button" className="btn-primary" onClick={saveHooks}>
+              <button type="button" className="btn" onClick={saveHooks}>
                 {st.hookSave}
               </button>
               {hookMsg && <span className="custom-cmd-msg" role="status">{hookMsg}</span>}

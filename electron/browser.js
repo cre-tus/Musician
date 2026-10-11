@@ -372,6 +372,65 @@ function handleFoundInPage(rec, emit, result) {
   return true;
 }
 
+// "Ask about this section" capture: the element under the right-click,
+// climbed past inline wrappers until the block carries real text.
+const SECTION_JS = `/*MX-SECTION*/({ x, y }) => {
+  const cap = (s, n) => String(s || '').slice(0, n);
+  let el = null;
+  try { el = document.elementFromPoint(x, y); } catch { el = null; }
+  if (!el || el === document.body || el === document.documentElement) return { tagPath: '', text: '', href: '', mediaSrc: '' };
+  let node = el;
+  for (let i = 0; i < 6; i += 1) {
+    const carried = (node.innerText || '').trim().length;
+    if (carried >= 40 || !node.parentElement || node.parentElement === document.body) break;
+    node = node.parentElement;
+  }
+  const chain = [];
+  for (let n = node; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+    let token = String(n.tagName || '').toLowerCase();
+    if (n.id) token += '#' + String(n.id).slice(0, 40);
+    else if (typeof n.className === 'string' && n.className.trim()) token += '.' + n.className.trim().split(/\\s+/)[0].slice(0, 40);
+    chain.unshift(token);
+    if (chain.length >= 6) break;
+  }
+  let href = '';
+  try {
+    const link = el.closest ? el.closest('a[href]') : null;
+    if (link) href = String(link.href || '').slice(0, 500);
+  } catch { href = ''; }
+  let mediaSrc = '';
+  try {
+    if (el.tagName === 'IMG' || el.tagName === 'VIDEO' || el.tagName === 'AUDIO') mediaSrc = String(el.currentSrc || el.src || '').slice(0, 500);
+  } catch { mediaSrc = ''; }
+  return { tagPath: chain.join(' > ').slice(0, 240), text: cap((node.innerText || '').trim(), 2000), href, mediaSrc };
+}`;
+
+// Native context-menu labels for browser tabs. The main process cannot read
+// the renderer's i18n bundle (CJS vs ESM), so the three labels live here,
+// keyed by the saved UI language.
+function askSectionMenuLabels(lang) {
+  if (lang === 'en') return { ask: 'Ask about this section', copy: 'Copy', paste: 'Paste' };
+  return { ask: '이 부분에 대해 질문하기', copy: '복사', paste: '붙여넣기' };
+}
+
+// Merges the right-click params with the captured section into the
+// ask-section event payload. A pre-selection wins over the element text;
+// null means there is nothing worth asking about (empty margin click).
+function buildAskSectionPayload(params, extracted, page) {
+  const p = params && typeof params === 'object' ? params : {};
+  const x = extracted && typeof extracted === 'object' ? extracted : {};
+  const selection = String(p.selectionText || '').trim();
+  const text = (selection || String(x.text || '').trim()).slice(0, 4000);
+  if (!text) return null;
+  return {
+    pageTitle: String((page && page.title) || ''),
+    pageUrl: String((page && page.url) || ''),
+    tagPath: String(x.tagPath || ''),
+    text,
+    linkUrl: String(p.linkURL || x.href || x.mediaSrc || ''),
+  };
+}
+
 // ---------------------------------------------------------------- engine
 class BrowserEngine {
   constructor({ getWindow, send, userDataDir, getSettings }) {
@@ -484,6 +543,49 @@ class BrowserEngine {
     });
     wc.on('found-in-page', (_event, result) => {
       handleFoundInPage(this.views.get(id), emit, result);
+    });
+    // Right-click in a browser tab: native menu with "ask about this
+    // section" plus copy/paste (the default menu is replaced, so the edit
+    // basics are re-added explicitly). Asking captures the clicked section
+    // and hands it to the composer via an ask-section event.
+    wc.on('context-menu', (_event, params) => {
+      _event.preventDefault();
+      let lang = 'ko';
+      try {
+        const saved = this.getSettings ? this.getSettings() : null;
+        if (saved && saved.lang === 'en') lang = 'en';
+      } catch {
+        /* default Korean */
+      }
+      const labels = askSectionMenuLabels(lang);
+      const { Menu } = require('electron');
+      const flags = (params && params.editFlags) || {};
+      const menu = Menu.buildFromTemplate([
+        {
+          label: labels.ask,
+          click: () => {
+            void (async () => {
+              let extracted = null;
+              try {
+                extracted = await wc.executeJavaScript(`(${SECTION_JS})(${JSON.stringify({ x: params.x, y: params.y })})`);
+              } catch {
+                extracted = null;
+              }
+              const payload = buildAskSectionPayload(params, extracted, { title: safeGet(wc, 'getTitle'), url: safeGet(wc, 'getURL') });
+              emit(payload ? { type: 'ask-section', ...payload } : { type: 'ask-section-empty' });
+            })();
+          },
+        },
+        { type: 'separator' },
+        { label: labels.copy, enabled: !!flags.canCopy, click: () => { try { wc.copy(); } catch { /* view gone */ } } },
+        { label: labels.paste, enabled: !!flags.canPaste, click: () => { try { wc.paste(); } catch { /* view gone */ } } },
+      ]);
+      try {
+        const win = this.getWindow ? this.getWindow() : null;
+        menu.popup({ window: win && !win.isDestroyed() ? win : undefined });
+      } catch {
+        /* menu unavailable */
+      }
     });
     view.setBounds(this.bounds);
     this.views.set(id, { view, home: '', findQueries, findSettled, findFallback: null });
@@ -995,4 +1097,4 @@ function safeGet(wc, method) {
   }
 }
 
-module.exports = { BrowserEngine, createBridgeServer, normalizeUrl, resolveAddressInput, resolveBrowserStartUrl, isNavigableBrowserUrl, BRIDGE_FILE, staleRefError, shouldReportLoadFailure, handleFoundInPage };
+module.exports = { BrowserEngine, createBridgeServer, normalizeUrl, resolveAddressInput, resolveBrowserStartUrl, isNavigableBrowserUrl, BRIDGE_FILE, staleRefError, shouldReportLoadFailure, handleFoundInPage, SECTION_JS, buildAskSectionPayload, askSectionMenuLabels };

@@ -5,7 +5,9 @@ import MspUserInputCard from './MspUserInputCard';
 import type { ConfirmOptions, ConfirmResult } from './ConfirmDialog';
 import { api, buildCmdPreview, hasBridge, porcelainPath, uid } from '../lib/mudex';
 import { baseName } from '../lib/path-utils.mjs';
-import { enqueuePrompt, extractQueuedPrompt, MAX_QUEUED_PROMPTS, moveQueuedPrompt, normalizePromptQueue, removeQueuedPrompt, shouldAutoRunQueuedPrompt, takeNextPrompt } from '../lib/prompt-queue.mjs';
+import { enqueuePrompt, extractQueuedPrompt, MAX_QUEUED_PROMPTS, moveQueuedPrompt, normalizePromptQueue, prependPrompt, removeQueuedPrompt, shouldAutoRunQueuedPrompt, takeNextPrompt } from '../lib/prompt-queue.mjs';
+import { armInterruptChain, buildResumePrompt, emptyInterruptChain, flattenInterruptChain, normalizeInterruptChain, popInterruptChain } from '../lib/interrupt-turn.mjs';
+import type { InterruptChain } from '../lib/interrupt-turn.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { runNotificationStatus, shouldShowBackgroundNotification } from '../lib/notification-rules.mjs';
 import { clampChatScrollTop, parseChatScrollState } from '../lib/chat-scroll-state.mjs';
@@ -13,9 +15,12 @@ import { formatSessionTranscript } from '../lib/session-transcript.mjs';
 import { findPromptFileMention, insertPromptFileMention } from '../lib/prompt-file-mention.mjs';
 import { findSlashCommand, matchSlashCommands, SLASH_COMMANDS } from '../lib/slash-commands.mjs';
 import type { SlashCommand } from '../lib/slash-commands.mjs';
+import type { Goal } from '../lib/goals.mjs';
+import remarkGfm from 'remark-gfm';
 import { expandCustomSlash, findCustomSlash, matchCustomSlashCommands, readCustomSlashCommands } from '../lib/custom-slash.mjs';
 import type { CustomSlashCommand, CustomSlashMatch } from '../lib/custom-slash.mjs';
 import { formatCompactTokens, summarizeSessionContext } from '../lib/session-context.mjs';
+import { latestChangeSummary } from '../lib/run-change-summary.mjs';
 import { buildExecutePrompt, buildPlanPrompt, planThreadKey, readPlanMode, writePlanMode } from '../lib/plan-mode.mjs';
 import { hasOverride, resolveEffort, resolveModel, sanitizeEffort, sanitizeModel, sendOverrides } from '../lib/session-overrides.mjs';
 import { mcpChatNotice } from '../lib/mcp-chat-notice.mjs';
@@ -45,6 +50,7 @@ import {
   SendIcon,
   SlidersIcon,
   StopIcon,
+  TargetIcon,
   TerminalIcon,
   XIcon,
 } from './icons';
@@ -79,12 +85,15 @@ interface Props {
   onDraftStatus: (sessionId: string, hasDraft: boolean) => void;
   onQueueStatus: (sessionId: string, count: number) => void;
   onSchedulePrompt: (text: string) => void;
+  onOpenGoals: () => void;
+  goalGauge: Goal | null;
+  onStopGoal: () => void;
   scheduledFire: { sessionId: string; text: string; nonce: number } | null;
   onScheduledConsumed: (nonce: number) => void;
   onSlashCommand: (id: string) => void;
   codexSignal: number;
   claudeSignal: number;
-  tuneSignal: number;
+  modelPickerSignal: number;
   paneStyle?: React.CSSProperties;
   tokenWin: { h5: TokenWindow; wk: TokenWindow };
   quota: SubscriptionUsage | null;
@@ -361,18 +370,12 @@ export default function ChatView(props: Props) {
   const lang = useLang();
   const strings = useStrings();
   const cv = strings.chat;
+  const gt = strings.goals;
   // The chat-event subscription below mounts once; handlers read the live
   // language through this ref (same pattern as cbRef for props).
   const langRef = useRef(lang);
   langRef.current = lang;
   const examples = [cv.ex0, cv.ex1, cv.ex2];
-  const approvalModes: [string, string][] = [
-    ['', strings.settings.cliDefault],
-    ['allowAll', strings.settings.approvalAllowAll],
-    ['promptUnmatched', strings.settings.approvalPromptUnmatched],
-    ['onRequest', strings.settings.approvalOnRequest],
-    ['denyUnmatched', strings.settings.approvalDenyUnmatched],
-  ];
   const reasoningEfforts: [string, string][] = [
     ['', strings.settings.cliDefault],
     ['none', cv.effNone],
@@ -392,9 +395,13 @@ export default function ChatView(props: Props) {
   const wRem = typeof wUsed === 'number' ? Math.max(0, 100 - wUsed) : null;
   const kRem = typeof kUsed === 'number' ? Math.max(0, 100 - kUsed) : null;
   const ctxSummary = useMemo(() => summarizeSessionContext(session.messages), [session.messages]);
+  const runSummary = useMemo(() => latestChangeSummary(session.messages), [session.messages]);
+  const [runStripOpen, setRunStripOpen] = useState(false);
+  useEffect(() => { setRunStripOpen(false); }, [runSummary?.messageId]);
   const draftKey = `mudex:draft:${session.id}`;
   const queueKey = `mudex:queue:${session.id}`;
   const queuePausedKey = `mudex:queue-paused:${session.id}`;
+  const interruptKey = `mudex:interrupt:${session.id}`;
   const scrollPositionKey = `mudex:chat-scroll:v1:${session.id}`;
   const initialChatScroll = useMemo(() => {
     try { return parseChatScrollState(localStorage.getItem(scrollPositionKey) || ''); } catch { return null; }
@@ -459,6 +466,9 @@ export default function ChatView(props: Props) {
   const previousRunRef = useRef(false);
   const queueDrainAllowedRef = useRef(false);
   const cancelRequestedRef = useRef(false);
+  const turnPromptRef = useRef('');
+  const lastTurnEndRef = useRef<{ completed: boolean; partial: string }>({ completed: false, partial: '' });
+  const interruptChainRef = useRef(emptyInterruptChain());
   const [run, setRun] = useState<{ reqId: string; cmd: string; cwd: string } | null>(null);
   const [streamText, setStreamText] = useState('');
   const [streamStderr, setStreamStderr] = useState('');
@@ -485,6 +495,11 @@ export default function ChatView(props: Props) {
   const [dropPathActive, setDropPathActive] = useState(false);
   const dragDepthRef = useRef(0);
   const [micOn, setMicOn] = useState(false);
+  const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const modelPickerRef = useRef<HTMLDivElement | null>(null);
+  const [sessionOnlyModel, setSessionOnlyModel] = useState(true);
   const recogRef = useRef<SpeechRecog | null>(null);
   const reqRef = useRef<string | null>(null);
   const runRef = useRef<{ reqId: string; cmd: string; cwd: string; turnId?: string; mspSessionId?: string } | null>(null);
@@ -646,7 +661,7 @@ export default function ChatView(props: Props) {
   }, [session.messages, messageFindQuery]);
   const messageMatchSet = useMemo(() => new Set(messageMatches), [messageMatches]);
   const promptHistory = useMemo(
-    () => session.messages.filter((message) => message.role === 'user').map((message) => message.text).filter((text) => text.trim()),
+    () => session.messages.filter((message) => message.role === 'user' && !message.auto).map((message) => message.text).filter((text) => text.trim()),
     [session.messages],
   );
   const retryPrompts = useMemo(() => {
@@ -928,6 +943,31 @@ export default function ChatView(props: Props) {
     } catch { /* The queue remains usable if this preference cannot be stored. */ }
   }, [queuePausedKey, queuePaused]);
 
+  const persistInterruptChain = (chain: InterruptChain) => {
+    try {
+      if (chain.pending || chain.stack.length > 0) localStorage.setItem(interruptKey, JSON.stringify(chain));
+      else localStorage.removeItem(interruptKey);
+    } catch { /* The in-memory chain remains usable if storage is unavailable. */ }
+  };
+
+  // A background pane unmounts the moment its run ends, starving the drain
+  // effect — recover any orphaned chain into the visible queue on remount.
+  useEffect(() => {
+    let chain = emptyInterruptChain();
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(interruptKey) || 'null');
+      if (saved) chain = normalizeInterruptChain(saved);
+    } catch { /* A corrupt backup reads as empty. */ }
+    if (!chain.pending && chain.stack.length === 0) return;
+    try { localStorage.removeItem(interruptKey); } catch { /* The backup is consumed below regardless. */ }
+    const items = flattenInterruptChain(chain, langRef.current);
+    if (items.length > 0) {
+      setQueuedPrompts((current) => [...items, ...normalizePromptQueue(current)].slice(0, MAX_QUEUED_PROMPTS));
+      setNotice(cv.interruptQueued);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (props.paneStyle?.display === 'none') return;
     const adjustComposerHeight = () => {
@@ -1129,16 +1169,15 @@ export default function ChatView(props: Props) {
     if (props.claudeSignal > 0) void openHandoff('claude');
   }, [props.claudeSignal]);
 
-  // Slash "/model" → App signal → open the tune popover here (idle only,
-  // mirroring the composer tune button).
+  // Slash "/model" → App signal → open the model menu here (idle only).
   useEffect(() => {
-    if (props.tuneSignal <= 0) return;
+    if (props.modelPickerSignal <= 0) return;
     if (runRef.current) {
       setNotice(cv.tuneBusy);
       return;
     }
-    setTuneOpen(true);
-  }, [props.tuneSignal]);
+    setModelPickerOpen(true);
+  }, [props.modelPickerSignal]);
 
   // Keep latest callbacks without re-subscribing.
   const cbRef = useRef(props);
@@ -1177,6 +1216,7 @@ export default function ChatView(props: Props) {
       const wasCancelled = cancelRequestedRef.current;
       const completedSuccessfully = !wasCancelled && !error && (code === 0 || code === null || code === undefined);
       queueDrainAllowedRef.current = completedSuccessfully;
+      lastTurnEndRef.current = { completed: completedSuccessfully, partial: bodyText || '' };
       cancelRequestedRef.current = false;
       setStreamText('');
       setStreamStderr('');
@@ -1407,37 +1447,91 @@ export default function ChatView(props: Props) {
       .catch(() => {});
   }, [folder]);
 
-  const [tuneOpen, setTuneOpen] = useState(false);
-  const tuneCardRef = useRef<HTMLElement | null>(null);
-  const tuneReturnFocusRef = useRef<HTMLElement | null>(null);
+  const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [reasonPos, setReasonPos] = useState<{ left: number; top: number } | null>(null);
+  const reasonRootRef = useRef<HTMLDivElement | null>(null);
+  const reasonTriggerRef = useRef<HTMLElement | null>(null);
+  const suppressReasonFocusRef = useRef(false);
 
-  useEffect(() => {
-    if (!tuneOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setTuneOpen(false);
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [tuneOpen]);
-
-  useEffect(() => {
-    if (!tuneOpen) {
-      const returnTarget = tuneReturnFocusRef.current;
-      tuneReturnFocusRef.current = null;
-      if (returnTarget?.isConnected) scheduleAfterPaint(() => returnTarget.focus({ preventScroll: true }));
+  const openReasoning = (anchor: HTMLElement | null) => {
+    if (suppressReasonFocusRef.current) {
+      suppressReasonFocusRef.current = false;
       return;
     }
-    tuneReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    return scheduleAfterPaint(() => {
-      const firstControl = tuneCardRef.current?.querySelector<HTMLElement>('button:not(:disabled)');
-      (firstControl || tuneCardRef.current)?.focus({ preventScroll: true });
-    });
-  }, [tuneOpen]);
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      const menu = modelPickerRef.current?.querySelector('.composer-model-menu');
+      const menuLeft = menu?.getBoundingClientRect().left ?? rect.left;
+      const width = 208;
+      let left = rect.right + 8;
+      if (left + width > window.innerWidth - 8) {
+        left = Math.max(8, menuLeft - width - 8);
+      }
+      const top = Math.min(Math.max(8, rect.top - 8), Math.max(8, window.innerHeight - 330));
+      setReasonPos({ left, top });
+      reasonTriggerRef.current = anchor;
+    }
+    setReasoningOpen(true);
+  };
+
+  const closeReasoning = (restoreFocus: boolean) => {
+    setReasoningOpen(false);
+    const trigger = reasonTriggerRef.current;
+    reasonTriggerRef.current = null;
+    if (restoreFocus && trigger?.isConnected && document.activeElement !== trigger) {
+      suppressReasonFocusRef.current = true;
+      scheduleAfterPaint(() => {
+        if (trigger.isConnected) trigger.focus({ preventScroll: true });
+        else suppressReasonFocusRef.current = false;
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (!modelPickerOpen) {
+      setReasoningOpen(false);
+      reasonTriggerRef.current = null;
+    }
+  }, [modelPickerOpen]);
+
+  useEffect(() => {
+    if (!actionMenuOpen && !modelPickerOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (reasoningOpen && reasonRootRef.current?.contains(target)) return;
+      if (actionMenuOpen && !actionMenuRef.current?.contains(target)) {
+        setActionMenuOpen(false);
+      }
+      if (modelPickerOpen && !modelPickerRef.current?.contains(target)) {
+        setModelPickerOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (reasoningOpen) {
+          closeReasoning(true);
+          return;
+        }
+        if (actionMenuOpen) setActionMenuOpen(false);
+        if (modelPickerOpen) setModelPickerOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [actionMenuOpen, modelPickerOpen, reasoningOpen]);
+
+  useEffect(() => {
+    if (run) {
+      setActionMenuOpen(false);
+      setModelPickerOpen(false);
+      setReasoningOpen(false);
+    }
+  }, [run]);
 
   const modelOptions = (() => {
     const ids = [...hostModels.map((m) => m.modelId), ...CHAT_MODELS].filter(
@@ -1447,14 +1541,11 @@ export default function ChatView(props: Props) {
     return ids;
   })();
   const modelLabel = (id: string) => hostModels.find((m) => m.modelId === id)?.displayLabel || id;
-  const approvalLabel = (v: string) => approvalModes.find(([x]) => x === v)?.[1] || v || strings.settings.cliDefault;
   const reasoningLabel = (v: string) => reasoningEfforts.find(([x]) => x === v)?.[1] || v || strings.settings.cliDefault;
-  const effortIdx = effortLevels.findIndex(([x]) => x === settings.reasoningEffort);
   const effModel = resolveModel(session, settings);
   const effEffort = resolveEffort(session, settings);
   const sessionOverridden = hasOverride(session);
   const sessionEffortValue = sanitizeEffort(session.effortOverride);
-  const sessionEffortIdx = effortLevels.findIndex(([x]) => x === sessionEffortValue);
   const sessionModelValue = sanitizeModel(session.modelOverride);
 
   const changeModel = (v: string) => {
@@ -1463,13 +1554,6 @@ export default function ChatView(props: Props) {
     // to other sessions, never clobbers this one.
     if (v && session.mspSessionId && hasBridge() && !sanitizeModel(session.modelOverride)) {
       api().mspSetModel(session.id, v).catch(() => setNotice(cv.modelSetFailed));
-    }
-  };
-
-  const changeApproval = (v: string) => {
-    cbRef.current.onPatchSettings({ approvalMode: v });
-    if (v && session.mspSessionId && hasBridge()) {
-      api().mspSetApprovalMode(session.id, v).catch(() => setNotice(cv.approvalSetFailed));
     }
   };
 
@@ -1493,6 +1577,13 @@ export default function ChatView(props: Props) {
     if (v && session.mspSessionId && hasBridge()) {
       api().mspSetReasoning(session.id, v).catch(() => setNotice(cv.reasoningSetFailed));
     }
+  };
+
+  const reasoningValue = sessionOnlyModel ? sessionEffortValue : settings.reasoningEffort || '';
+  const reasoningLevelLabel = reasoningValue ? reasoningLabel(reasoningValue) : strings.settings.cliDefault;
+  const applyReasoning = (v: string) => {
+    if (sessionOnlyModel) changeSessionEffort(v);
+    else changeReasoning(v);
   };
 
   const attachFiles = async (paths: string[]) => {
@@ -1649,7 +1740,7 @@ export default function ChatView(props: Props) {
     void send(buildExecutePrompt(planText, lang), { ignoreAttachments: true, normal: true });
   };
 
-  const send = async (raw?: string, options: { preserveDraft?: boolean; ignoreAttachments?: boolean; normal?: boolean } = {}) => {
+  const send = async (raw?: string, options: { preserveDraft?: boolean; ignoreAttachments?: boolean; normal?: boolean; displayText?: string; auto?: boolean } = {}) => {
     const text = (raw ?? input).trim();
     const attachments = options.ignoreAttachments ? [] : attach;
     if ((!text && attachments.length === 0) || run) return;
@@ -1664,7 +1755,7 @@ export default function ChatView(props: Props) {
     liveTodosRef.current = [];
     setLiveTodos([]);
     const names = attachments.map((a) => a.name).join(', ');
-    const display = attachments.length > 0 ? (text ? `${text}\n\n[첨부: ${names}]` : `[첨부: ${names}]`) : text;
+    const display = options.displayText ?? (attachments.length > 0 ? (text ? `${text}\n\n[첨부: ${names}]` : `[첨부: ${names}]`) : text);
     const fileAttach = attachments.filter((a) => !a.image);
     const imgAttach = attachments.filter((a) => a.image);
     const full =
@@ -1677,10 +1768,11 @@ export default function ChatView(props: Props) {
       (imgAttach.length > 0
         ? `\n\n--- 첨부 이미지 (아래 경로의 파일을 직접 열어서 확인해줘) ---\n${imgAttach.map((a) => `- ${a.path}`).join('\n')}`
         : '');
-    cbRef.current.onAppendUser({ id: uid('m'), role: 'user', text: display, ts: Date.now(), done: true });
+    turnPromptRef.current = full;
+    cbRef.current.onAppendUser({ id: uid('m'), role: 'user', text: display, ts: Date.now(), done: true, auto: options.auto });
     followScrollRef.current = true;
     setShowScrollBottom(false);
-    cbRef.current.onTitleMaybe(text || names);
+    cbRef.current.onTitleMaybe(options.displayText ?? (text || names));
     promptHistoryIndexRef.current = null;
     if (!options.preserveDraft) {
       setInput('');
@@ -1823,6 +1915,44 @@ export default function ChatView(props: Props) {
     }
     if (!previousRunRef.current) return;
     previousRunRef.current = false;
+    // An interrupt chain owns the handoff: the new question (or the resume
+    // of the interrupted work) goes before the visible queue.
+    const chain = interruptChainRef.current;
+    if (chain.pending || chain.stack.length > 0) {
+      if (!props.isActiveSession) {
+        const items = flattenInterruptChain(chain, langRef.current);
+        if (items.length > 0) {
+          setQueuedPrompts((current) => [...items, ...normalizePromptQueue(current)].slice(0, MAX_QUEUED_PROMPTS));
+        }
+        interruptChainRef.current = emptyInterruptChain();
+        persistInterruptChain(emptyInterruptChain());
+        setNotice(cv.interruptQueued);
+        return;
+      }
+      const handoff = popInterruptChain(chain, queueDrainAllowedRef.current, lastTurnEndRef.current.partial);
+      interruptChainRef.current = handoff.chain;
+      persistInterruptChain(handoff.chain);
+      if (handoff.dropped) {
+        setNotice(cv.interruptChainDropped);
+        return;
+      }
+      if (handoff.sendKind === 'question' && handoff.send) {
+        void send(handoff.send, { preserveDraft: true, ignoreAttachments: true });
+        return;
+      }
+      if (handoff.sendKind === 'resume' && handoff.sendEntry) {
+        setNotice(cv.resumeNotice);
+        void send(buildResumePrompt(handoff.sendEntry.prompt, handoff.sendEntry.partial, langRef.current, handoff.isFinal), {
+          preserveDraft: true,
+          ignoreAttachments: true,
+          normal: true,
+          displayText: cv.resumeNotice,
+          auto: true,
+        });
+        return;
+      }
+      return;
+    }
     if (!props.isActiveSession || !shouldAutoRunQueuedPrompt({
       wasRunning: true,
       completedSuccessfully: queueDrainAllowedRef.current,
@@ -1846,11 +1976,47 @@ export default function ChatView(props: Props) {
     await send(prompt);
   };
 
+  // A plain stop during an interrupt handoff aborts the handoff: the typed
+  // question is preserved at the front of the visible queue instead.
+  const abortInterruptHandoff = () => {
+    const pending = interruptChainRef.current.pending;
+    if (!pending) return;
+    interruptChainRef.current = emptyInterruptChain();
+    persistInterruptChain(emptyInterruptChain());
+    setQueuedPrompts((current) => prependPrompt(current, pending));
+    setNotice(cv.interruptAborted);
+  };
+
   const cancel = () => {
     if (run && window.mudex) {
+      abortInterruptHandoff();
       cancelRequestedRef.current = true;
       window.mudex.chatCancel(run.reqId).catch(() => {});
     }
+  };
+
+  const interrupt = () => {
+    const text = input.trim();
+    if (!text) return;
+    if (!runRef.current) {
+      void send();
+      return;
+    }
+    if (interruptChainRef.current.pending) return;
+    interruptChainRef.current = armInterruptChain(interruptChainRef.current, text, turnPromptRef.current);
+    persistInterruptChain(interruptChainRef.current);
+    setInput('');
+    setFileMention(null);
+    promptHistoryIndexRef.current = null;
+    cancelRequestedRef.current = true;
+    if (window.mudex) window.mudex.chatCancel(runRef.current.reqId).catch(() => {});
+    setNotice(cv.interruptNotice);
+  };
+
+  const cancelInterruptDraft = () => {
+    setInput('');
+    setFileMention(null);
+    promptHistoryIndexRef.current = null;
   };
 
   // Let the sidebar stop this pane's run without switching to it first.
@@ -2116,166 +2282,7 @@ export default function ChatView(props: Props) {
             </section>}
             <div className="handoff-actions">
               <button type="button" className="btn" disabled={!selectedHoSessionVisible || handoffBusy} onClick={() => void (isClaudeHandoff ? importFromClaude() : importFromCodex())}>{isClaudeHandoff ? cv.handoffImportClaude : cv.handoffImport}</button>
-              <button type="button" className="btn btn-primary" disabled={!selectedHoSessionVisible || handoffBusy || !!run} onClick={() => void (isClaudeHandoff ? sendToClaude() : sendToCodex())}>{isClaudeHandoff ? cv.handoffSendClaude : cv.handoffSend}</button>
-            </div>
-          </section>
-        </div>
-      )}
-
-      {tuneOpen && (
-        <div className="tune-backdrop" onClick={() => setTuneOpen(false)}>
-          <section
-            ref={tuneCardRef}
-            className="tune-card"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="tune-dialog-title"
-            tabIndex={-1}
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(event) => {
-              if (event.key === 'Tab') {
-                const controls = Array.from(tuneCardRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])') || [])
-                  .filter((element) => element.offsetParent !== null);
-                const first = controls[0];
-                const last = controls[controls.length - 1];
-                if (!first || !last) {
-                  event.preventDefault();
-                  tuneCardRef.current?.focus();
-                } else if (event.shiftKey && (document.activeElement === first || !tuneCardRef.current?.contains(document.activeElement))) {
-                  event.preventDefault();
-                  last.focus();
-                } else if (!event.shiftKey && (document.activeElement === last || !tuneCardRef.current?.contains(document.activeElement))) {
-                  event.preventDefault();
-                  first.focus();
-                }
-              }
-            }}
-          >
-            <div className="tune-head">
-              <b id="tune-dialog-title">{cv.tuneTitle}</b>
-              <button type="button" className="icon-btn" onClick={() => setTuneOpen(false)} title={strings.common.close} aria-label={cv.tuneClose}>
-                <XIcon size={15} />
-              </button>
-            </div>
-            <div className="tune-group tune-session-group">
-              <div className="tune-title">{cv.tuneSession}</div>
-              <p className="tune-desc">{cv.tuneSessionDesc}</p>
-              <div className="tune-subtitle">{cv.tuneSessionModel}</div>
-              {[['', cv.tuneFollowGlobal], ...modelOptions.map((m): [string, string] => [m, modelLabel(m)])].map(
-                ([v, text]) => (
-                  <button
-                    key={`sess-model-${v || '(global)'}`}
-                    className={v === sessionModelValue ? 'tune-row active' : 'tune-row'}
-                    title={v || cv.tuneFollowGlobal}
-                    onClick={() => {
-                      if (v !== sessionModelValue) changeSessionModel(v);
-                    }}
-                  >
-                    <span className="tune-check">{v === sessionModelValue ? <CheckIcon size={13} /> : null}</span>
-                    <span className="tune-text">{text}</span>
-                  </button>
-                ),
-              )}
-              <div className="tune-subtitle">{cv.tuneSessionEffort}<span className="tune-meter-value">{sessionEffortValue ? reasoningLabel(sessionEffortValue) : cv.tuneFollowGlobal}</span></div>
-              <div className="tune-meter" role="radiogroup" aria-label={cv.tuneSessionEffort}>
-                {effortLevels.map(([v, text], i) => (
-                  <button
-                    key={`sess-effort-${v}`}
-                    type="button"
-                    role="radio"
-                    aria-checked={v === sessionEffortValue}
-                    aria-label={text}
-                    title={formatStr(cv.tuneEffortTitle, { text })}
-                    className={v === sessionEffortValue ? 'tune-bar on' : sessionEffortIdx >= 0 && i < sessionEffortIdx ? 'tune-bar lit' : 'tune-bar'}
-                    style={{ height: 8 + i * 3 }}
-                    onClick={() => {
-                      if (v !== sessionEffortValue) changeSessionEffort(v);
-                    }}
-                  />
-                ))}
-              </div>
-              <button
-                type="button"
-                className={sessionEffortValue === '' ? 'tune-meter-reset active' : 'tune-meter-reset'}
-                aria-label={cv.tuneFollowGlobal}
-                title={cv.tuneFollowGlobal}
-                onClick={() => {
-                  if (sessionEffortValue !== '') changeSessionEffort('');
-                }}
-              >
-                {cv.tuneFollowGlobal}
-              </button>
-            </div>
-            <div className="tune-group">
-              <div className="tune-title">{cv.tuneModel}</div>
-              {[['', strings.settings.cliDefault], ...modelOptions.map((m): [string, string] => [m, modelLabel(m)])].map(
-                ([v, text]) => (
-                  <button
-                    key={v || '(cli)'}
-                    className={v === settings.model ? 'tune-row active' : 'tune-row'}
-                    title={v || cv.tuneModelDefaultTitle}
-                    onClick={() => {
-                      if (v !== settings.model) changeModel(v);
-                    }}
-                  >
-                    <span className="tune-check">{v === settings.model ? <CheckIcon size={13} /> : null}</span>
-                    <span className="tune-text">{text}</span>
-                  </button>
-                ),
-              )}
-            </div>
-            <div className="tune-group">
-              <div className="tune-title">{cv.tunePerm}</div>
-              {approvalModes.map(([v, text]) => (
-                <button
-                  key={v || '(cli)'}
-                  className={v === settings.approvalMode ? 'tune-row active' : 'tune-row'}
-                  title={cv.tunePermTitle}
-                  onClick={() => {
-                    if (v !== settings.approvalMode) changeApproval(v);
-                  }}
-                >
-                  <span className="tune-check">{v === settings.approvalMode ? <CheckIcon size={13} /> : null}</span>
-                  <span className="tune-text">{text}</span>
-                </button>
-              ))}
-            </div>
-            <div className="tune-group">
-              <div className="tune-title">{cv.tuneReasoning}<span className="tune-meter-value">{reasoningLabel(settings.reasoningEffort)}</span></div>
-              <div className="tune-meter" role="radiogroup" aria-label={cv.tuneReasoningLabel}>
-                {effortLevels.map(([v, text], i) => (
-                  <button
-                    key={v}
-                    type="button"
-                    role="radio"
-                    aria-checked={v === settings.reasoningEffort}
-                    aria-label={text}
-                    title={formatStr(cv.tuneEffortTitle, { text })}
-                    className={v === settings.reasoningEffort ? 'tune-bar on' : effortIdx >= 0 && i < effortIdx ? 'tune-bar lit' : 'tune-bar'}
-                    style={{ height: 8 + i * 3 }}
-                    onClick={() => {
-                      if (v !== settings.reasoningEffort) changeReasoning(v);
-                    }}
-                  />
-                ))}
-              </div>
-              <div className="tune-meter-scale" aria-hidden="true"><span>{cv.effNone}</span><span>{cv.effUltra}</span></div>
-              <button
-                type="button"
-                className={settings.reasoningEffort === '' ? 'tune-meter-reset active' : 'tune-meter-reset'}
-                aria-label={cv.tuneResetLabel}
-                title={cv.tuneResetTitle}
-                onClick={() => {
-                  if (settings.reasoningEffort !== '') changeReasoning('');
-                }}
-              >
-                {strings.settings.cliDefault}
-              </button>
-            </div>
-            <div className="tune-foot">
-              <button className="btn btn-primary" onClick={() => setTuneOpen(false)}>
-                {cv.tuneDone}
-              </button>
+              <button type="button" className="btn" disabled={!selectedHoSessionVisible || handoffBusy || !!run} onClick={() => void (isClaudeHandoff ? sendToClaude() : sendToCodex())}>{isClaudeHandoff ? cv.handoffSendClaude : cv.handoffSend}</button>
             </div>
           </section>
         </div>
@@ -2301,6 +2308,33 @@ export default function ChatView(props: Props) {
       {notice && (
         <div className="banner">
           <span>{notice}</span>
+        </div>
+      )}
+      {props.goalGauge && (
+        <div className="goal-gauge" role="status" aria-label={`${gt.progress} ${props.goalGauge.progress}%`}>
+          <button
+            type="button"
+            className="goal-gauge-main"
+            onClick={props.onOpenGoals}
+            title={gt.gaugeOpen}
+            aria-label={`${gt.gaugeOpen}: ${props.goalGauge.title}`}
+          >
+            <TargetIcon size={13} />
+            <span className="goal-gauge-title">{props.goalGauge.title}</span>
+            <span className="goal-gauge-bar" aria-hidden="true">
+              <span className="goal-gauge-fill" style={{ width: `${props.goalGauge.progress}%` }} />
+            </span>
+            <span className="goal-gauge-pct">{props.goalGauge.progress}%</span>
+          </button>
+          <button
+            type="button"
+            className="icon-btn goal-gauge-stop"
+            onClick={props.onStopGoal}
+            title={gt.stop}
+            aria-label={gt.stop}
+          >
+            <XIcon size={12} />
+          </button>
         </div>
       )}
 
@@ -2386,6 +2420,7 @@ export default function ChatView(props: Props) {
                 <div className="md">
                   <React.Suspense fallback={<div className="md-pending">{linkifyFiles(m.text)}</div>}>
                     <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
                       components={{
                       pre({ children }: { children?: React.ReactNode }) {
                         const arr = React.Children.toArray(children);
@@ -2609,7 +2644,7 @@ export default function ChatView(props: Props) {
               {streamText ? (
                 <div className="md">
                   <React.Suspense fallback={<div className="md-pending">{linkifyFiles(streamText)}</div>}>
-                    <ReactMarkdown>{linkifyFiles(streamText)}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{linkifyFiles(streamText)}</ReactMarkdown>
                   </React.Suspense>
                 </div>
               ) : (
@@ -2679,20 +2714,53 @@ export default function ChatView(props: Props) {
         />
       )}
       <footer className="composer">
-        <details className="cmd-preview">
-          <summary>
-            <TerminalIcon size={13} /> {cv.cmdPreview}
-          </summary>
-          <code>
-            {buildCmdPreview(
-              settings,
-              input.trim() || cv.cmdPromptPh,
-              props.cliResolved || settings.cliPath || 'muse',
-              planMode,
+        {run && input.trim() && (
+          <div className="interrupt-bar" role="group" aria-label={cv.interruptBarLabel}>
+            <span className="interrupt-bar-head">{cv.interruptBarHead}</span>
+            <span className="interrupt-bar-text" title={input.trim()}>{input.trim()}</span>
+            <span className="interrupt-bar-actions">
+              <button type="button" className="btn btn-primary interrupt-go" onClick={interrupt} title={cv.interruptTitle}>{cv.interruptBtn}</button>
+              <button type="button" className="btn interrupt-cancel" onClick={cancelInterruptDraft} title={cv.interruptCancelTitle}>{strings.common.cancel}</button>
+            </span>
+          </div>
+        )}
+        {runSummary && (
+          <div className={runStripOpen ? 'run-strip open' : 'run-strip'} role="status" aria-label={cv.runStripTitle}>
+            <button
+              type="button"
+              className={runStripOpen ? 'run-strip-toggle open' : 'run-strip-toggle'}
+              aria-expanded={runStripOpen}
+              title={runStripOpen ? cv.runStripCollapse : cv.runStripExpand}
+              aria-label={runStripOpen ? cv.runStripCollapse : cv.runStripExpand}
+              onClick={() => setRunStripOpen((v) => !v)}
+            >
+              <DiffIcon size={13} />
+              <span className="run-strip-title">{cv.runStripTitle}</span>
+              <span className="code-ok">+{runSummary.added}</span>
+              {' '}
+              <span className="code-bad">−{runSummary.deleted}</span>
+              <ChevronDownIcon size={12} className="chevron" />
+            </button>
+            {runStripOpen && (
+              <div className="run-strip-list" role="group" aria-label={cv.runStripTitle}>
+                {runSummary.files.map((f) => (
+                  <button
+                    key={f.file}
+                    type="button"
+                    className="run-strip-row"
+                    title={formatStr(cv.runStripOpen, { file: f.file })}
+                    aria-label={formatStr(cv.runStripOpen, { file: f.file })}
+                    onClick={() => cbRef.current.onOpenGitDiff(f.file, runSummary.cwd || folder)}
+                  >
+                    <span className="run-strip-file">{f.file}</span>
+                    <span className="code-ok">+{f.added}</span>
+                    <span className="code-bad">−{f.deleted}</span>
+                  </button>
+                ))}
+              </div>
             )}
-          </code>
-          <div className="cmd-cwd">{formatStr(cv.cmdCwd, { folder: folder || cv.cmdCwdDefault })}</div>
-        </details>
+          </div>
+        )}
         <div
           className={dropActive || dropPathActive ? 'composer-box composer-drop-active' : 'composer-box'}
           onDragEnter={(event) => {
@@ -2748,6 +2816,20 @@ export default function ChatView(props: Props) {
           }}
         >
           {(dropActive || dropPathActive) && <div className="composer-drop-overlay">{dropPathActive ? <FileIcon size={18} /> : <ClipIcon size={18} />} {dropPathActive ? cv.dropInsert : cv.dropAttach}</div>}
+          <details className="cmd-preview">
+            <summary>
+              <TerminalIcon size={13} /> {cv.cmdPreview}
+            </summary>
+            <code>
+              {buildCmdPreview(
+                settings,
+                input.trim() || cv.cmdPromptPh,
+                props.cliResolved || settings.cliPath || 'muse',
+                planMode,
+              )}
+            </code>
+            <div className="cmd-cwd">{formatStr(cv.cmdCwd, { folder: folder || cv.cmdCwdDefault })}</div>
+          </details>
           {fileMention && <div className="composer-file-mention" id="composer-file-mention-results" role="listbox" aria-label={cv.mentionLabel} aria-busy={fileMentionLoading}>
             <div className="composer-file-mention-heading">{cv.mentionHead} <span>{cv.mentionKeys}</span></div>
             {!props.folder ? <div className="composer-file-mention-empty">{cv.mentionNoFolder}</div>
@@ -2834,7 +2916,7 @@ export default function ChatView(props: Props) {
             <div className="plan-bar" role="group" aria-label={cv.planTag}>
               <PlanIcon size={14} />
               <span className="plan-bar-text">{cv.planDoneNotice}</span>
-              <button type="button" className="btn-primary plan-execute" onClick={executePlan}>{cv.planExecute}</button>
+              <button type="button" className="btn plan-execute" onClick={executePlan}>{cv.planExecute}</button>
               <button type="button" className="btn plan-dismiss" onClick={() => setPendingPlan(null)}>{cv.planDismiss}</button>
             </div>
           )}
@@ -2928,63 +3010,357 @@ export default function ChatView(props: Props) {
             rows={3}
           />
           <div className="composer-bar">
-            <button
-              type="button"
-              className="icon-btn tool-btn"
-              onClick={() => void pickFiles()}
-              title={cv.attachBtn}
-              aria-label={cv.attachBtn}
-              disabled={!!run}
-            >
-              <ClipIcon size={17} />
-            </button>
-            <button
-              type="button"
-              className={micOn ? 'icon-btn tool-btn mic on' : 'icon-btn tool-btn mic'}
-              onClick={toggleMic}
-              title={micOn ? cv.micStop : cv.micBtn}
-              aria-label={micOn ? cv.micStop : cv.micBtn}
-              disabled={!!run}
-            >
-              <MicIcon size={17} />
-            </button>
-            <button
-              type="button"
-              className="icon-btn tool-btn"
-              onClick={() => props.onSchedulePrompt(input)}
-              title={attach.length > 0 ? cv.schedBlockedTitle : cv.schedTitle}
-              aria-label={cv.schedLabel}
-              disabled={!!run || !input.trim() || attach.length > 0}
-            >
-              <ClockIcon size={17} />
-            </button>
-            <button
-              type="button"
-              className={planMode ? 'icon-btn tool-btn plan on' : 'icon-btn tool-btn plan'}
-              onClick={togglePlanMode}
-              title={cv.planToggleTitle}
-              aria-label={cv.planToggle}
-              aria-pressed={planMode}
-              disabled={!!run}
-            >
-              <PlanIcon size={17} />
-            </button>
-            {planMode && !run && <span className="plan-badge" role="status">{cv.planBadge}</span>}
+            <div className="composer-action-anchor" ref={actionMenuRef}>
+              <button
+                type="button"
+                className={`icon-btn tool-btn composer-plus-btn ${actionMenuOpen ? 'open' : ''}`}
+                onClick={() => setActionMenuOpen((prev) => !prev)}
+                title={cv.actionsTitle || cv.actionsBtn}
+                aria-label={cv.actionsTitle || cv.actionsBtn}
+                aria-haspopup="menu"
+                aria-expanded={actionMenuOpen}
+                disabled={!!run}
+              >
+                <PlusIcon size={16} />
+              </button>
+
+              {actionMenuOpen && (
+                <div
+                  className="composer-action-menu"
+                  role="menu"
+                  aria-label={cv.actionsTitle}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setActionMenuOpen(false);
+                    }
+                  }}
+                >
+                  <div className="composer-action-heading">
+                    <span>{cv.actionsTitle}</span>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="composer-action-row"
+                    role="menuitem"
+                    onClick={() => {
+                      setActionMenuOpen(false);
+                      void pickFiles();
+                    }}
+                    disabled={!!run}
+                  >
+                    <span className="action-row-icon"><ClipIcon size={15} /></span>
+                    <span className="action-row-main">
+                      <span className="action-row-title">{cv.attachBtn}</span>
+                      <span className="action-row-desc">{cv.actionsAttachDesc}</span>
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`composer-action-row ${planMode ? 'active' : ''}`}
+                    role="menuitem"
+                    onClick={() => {
+                      togglePlanMode();
+                    }}
+                    disabled={!!run}
+                  >
+                    <span className="action-row-icon"><PlanIcon size={15} /></span>
+                    <span className="action-row-main">
+                      <span className="action-row-title">{cv.planToggle}</span>
+                      <span className="action-row-desc">{cv.planToggleTitle}</span>
+                    </span>
+                    <span className={`action-row-badge ${planMode ? 'on' : ''}`}>
+                      {planMode ? cv.actionsPlanOn : cv.actionsPlanOff}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`composer-action-row ${micOn ? 'active' : ''}`}
+                    role="menuitem"
+                    onClick={() => {
+                      toggleMic();
+                      setActionMenuOpen(false);
+                    }}
+                    disabled={!!run}
+                  >
+                    <span className="action-row-icon"><MicIcon size={15} /></span>
+                    <span className="action-row-main">
+                      <span className="action-row-title">{cv.micBtn}</span>
+                      <span className="action-row-desc">{micOn ? cv.micStop : cv.actionsMicDesc}</span>
+                    </span>
+                    <span className={`action-row-badge ${micOn ? 'on' : ''}`}>
+                      {micOn ? cv.actionsMicOn : cv.actionsMicOff}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="composer-action-row"
+                    role="menuitem"
+                    onClick={() => {
+                      setActionMenuOpen(false);
+                      props.onSchedulePrompt(input);
+                    }}
+                    disabled={!!run || !input.trim() || attach.length > 0}
+                    title={attach.length > 0 ? cv.schedBlockedTitle : cv.schedTitle}
+                    aria-label={cv.schedLabel}
+                  >
+                    <span className="action-row-icon"><ClockIcon size={15} /></span>
+                    <span className="action-row-main">
+                      <span className="action-row-title">{cv.schedLabel}</span>
+                      <span className="action-row-desc">{cv.schedTitle}</span>
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`composer-action-row${props.goalGauge ? ' active' : ''}`}
+                    role="menuitem"
+                    onClick={() => {
+                      setActionMenuOpen(false);
+                      props.onOpenGoals();
+                    }}
+                    aria-label={gt.menuBtn}
+                  >
+                    <span className="action-row-icon"><TargetIcon size={15} /></span>
+                    <span className="action-row-main">
+                      <span className="action-row-title">{gt.menuBtn}</span>
+                      <span className="action-row-desc">{gt.menuDesc}</span>
+                    </span>
+                    {props.goalGauge && (
+                      <span className="action-row-badge on">{props.goalGauge.progress}%</span>
+                    )}
+                  </button>
+
+                  {folder && (
+                    <button
+                      type="button"
+                      className="composer-action-row"
+                      role="menuitem"
+                      onClick={() => {
+                        setActionMenuOpen(false);
+                        void openHandoff('codex');
+                      }}
+                      disabled={!!run}
+                    >
+                      <span className="action-row-icon"><ForkIcon size={15} /></span>
+                      <span className="action-row-main">
+                        <span className="action-row-title">{cv.actionsHandoff}</span>
+                        <span className="action-row-desc">{cv.actionsHandoffDesc}</span>
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {planMode && !run && (
+              <button
+                type="button"
+                className="composer-pill plan"
+                onClick={togglePlanMode}
+                title={cv.planToggleTitle}
+                aria-label={cv.planToggle}
+              >
+                <PlanIcon size={12} />
+                <span>{cv.planBadge}</span>
+                <span className="pill-x"><XIcon size={10} /></span>
+              </button>
+            )}
+
+            {micOn && (
+              <button
+                type="button"
+                className="composer-pill mic"
+                onClick={toggleMic}
+                title={cv.micStop}
+                aria-label={cv.micStop}
+              >
+                <MicIcon size={12} />
+                <span className="mic-pulse-dot" />
+                <span>{cv.micStop}</span>
+                <span className="pill-x"><XIcon size={10} /></span>
+              </button>
+            )}
+
             {run && input.trim() && <span className="composer-draft-hint" role="status">{cv.draftHint}</span>}
             <span className="bar-spacer" />
-            <button
-              className="tune-btn"
-              onClick={() => setTuneOpen(true)}
-              disabled={!!run}
-              title={cv.tuneBtnTitle}
-            >
-              <SlidersIcon size={14} />
-              <span className="tune-btn-text">
-                {effModel.value ? modelLabel(effModel.value) : strings.settings.cliDefault}
-                {effEffort.value ? ` · ${reasoningLabel(effEffort.value)}` : ''}
-                {sessionOverridden ? ` · ${cv.tuneSessionMark}` : ''}
-              </span>
-            </button>
+
+            <div className="composer-model-anchor" ref={modelPickerRef}>
+              <button
+                type="button"
+                className={`model-picker-btn ${modelPickerOpen ? 'open' : ''}`}
+                onClick={() => setModelPickerOpen((prev) => !prev)}
+                disabled={!!run}
+                title={cv.modelPickerTitle}
+                aria-haspopup="listbox"
+                aria-expanded={modelPickerOpen}
+              >
+                <span className="model-picker-name">
+                  {effModel.value ? modelLabel(effModel.value) : strings.settings.cliDefault}
+                </span>
+                {sessionOverridden && (
+                  <span className="model-picker-dot" title={cv.tuneSessionMark} />
+                )}
+                <ChevronDownIcon size={11} className="chevron" />
+              </button>
+
+              {modelPickerOpen && (
+                <div
+                  className="composer-model-menu"
+                  role="dialog"
+                  aria-label={cv.modelPickerTitle}
+                >
+                  <div className="model-menu-head">
+                    <span className="model-menu-title">{cv.modelPickerTitle}</span>
+                    <button
+                      type="button"
+                      className="model-menu-scope"
+                      onClick={() => setSessionOnlyModel((prev) => !prev)}
+                      title={cv.tuneSessionDesc}
+                    >
+                      <span className={`model-menu-scope-dot ${sessionOnlyModel ? 'on' : ''}`} />
+                      <span>{cv.modelPickerScopeSession}</span>
+                    </button>
+                  </div>
+
+                  <div className="model-menu-list" role="listbox">
+                    <div
+                      className="model-menu-item"
+                      role="option"
+                      aria-selected={!sessionModelValue && (sessionOnlyModel ? true : !settings.model)}
+                    >
+                      <button
+                        type="button"
+                        className={`model-menu-row ${(!sessionModelValue && (sessionOnlyModel ? true : !settings.model)) || !effModel.value ? 'active' : ''}`}
+                        onClick={() => {
+                          if (sessionOnlyModel) {
+                            changeSessionModel('');
+                          } else {
+                            changeModel('');
+                            changeSessionModel('');
+                          }
+                          setModelPickerOpen(false);
+                        }}
+                      >
+                        <span className="model-menu-check">
+                          {(!sessionModelValue && sessionOnlyModel) || !effModel.value ? <CheckIcon size={12} /> : null}
+                        </span>
+                        <span className="model-menu-name">{strings.settings.cliDefault}</span>
+                        <span className="model-menu-tag">{cv.tuneFollowGlobal}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="model-menu-effort"
+                        title={formatStr(cv.modelEffortTitle, { level: reasoningLevelLabel })}
+                        aria-label={cv.modelEffortBtn}
+                        onFocus={(e) => openReasoning(e.currentTarget)}
+                        onClick={(e) => openReasoning(e.currentTarget)}
+                      >
+                        <SlidersIcon size={12} />
+                      </button>
+                    </div>
+
+                    {modelOptions.map((m) => {
+                      const isSelected = effModel.value === m;
+                      return (
+                        <div
+                          key={`model-item-${m}`}
+                          className="model-menu-item"
+                          role="option"
+                          aria-selected={isSelected}
+                        >
+                          <button
+                            type="button"
+                            className={`model-menu-row ${isSelected ? 'active' : ''}`}
+                            onClick={() => {
+                              if (sessionOnlyModel) {
+                                changeSessionModel(m);
+                              } else {
+                                changeModel(m);
+                                changeSessionModel('');
+                              }
+                              setModelPickerOpen(false);
+                            }}
+                            title={m}
+                          >
+                            <span className="model-menu-check">
+                              {isSelected ? <CheckIcon size={12} /> : null}
+                            </span>
+                            <span className="model-menu-name">{modelLabel(m)}</span>
+                            {m !== modelLabel(m) && <span className="model-menu-sub">{m}</span>}
+                          </button>
+                          <button
+                            type="button"
+                            className="model-menu-effort"
+                            title={formatStr(cv.modelEffortTitle, { level: reasoningLevelLabel })}
+                            aria-label={cv.modelEffortBtn}
+                            onFocus={(e) => openReasoning(e.currentTarget)}
+                            onClick={(e) => openReasoning(e.currentTarget)}
+                          >
+                            <SlidersIcon size={12} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {modelPickerOpen && reasoningOpen && (
+                <div
+                  ref={reasonRootRef}
+                  className="reason-pop"
+                  role="dialog"
+                  aria-label={cv.reasoningTitle}
+                  style={reasonPos ? { left: reasonPos.left, top: reasonPos.top } : undefined}
+                >
+                  <div className="model-menu-head">
+                    <span className="model-menu-title">{cv.reasoningTitle}</span>
+                    <span className="model-menu-tag">{sessionOnlyModel ? cv.tuneSession : cv.reasoningGlobal}</span>
+                  </div>
+                  <div className="model-menu-list" role="listbox" aria-label={cv.reasoningTitle}>
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={reasoningValue === ''}
+                      className={`model-menu-row ${reasoningValue === '' ? 'active' : ''}`}
+                      onClick={() => {
+                        if (reasoningValue !== '') applyReasoning('');
+                        closeReasoning(true);
+                      }}
+                    >
+                      <span className="model-menu-check">
+                        {reasoningValue === '' ? <CheckIcon size={12} /> : null}
+                      </span>
+                      <span className="model-menu-name">{sessionOnlyModel ? cv.tuneFollowGlobal : strings.settings.cliDefault}</span>
+                    </button>
+                    {effortLevels.map(([v, text]) => (
+                      <button
+                        key={v}
+                        type="button"
+                        role="option"
+                        aria-selected={v === reasoningValue}
+                        className={`model-menu-row ${v === reasoningValue ? 'active' : ''}`}
+                        onClick={() => {
+                          if (v !== reasoningValue) applyReasoning(v);
+                          closeReasoning(true);
+                        }}
+                      >
+                        <span className="model-menu-check">
+                          {v === reasoningValue ? <CheckIcon size={12} /> : null}
+                        </span>
+                        <span className="model-menu-name">{text}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {session.engine === 'msp' ? <span className="tag tag-msp">MSP</span> : <span className="tag">exec</span>}
             {run ? (
               <>

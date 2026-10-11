@@ -7,6 +7,18 @@ export function commitParentDir(file: string): string;
 
 export function groupCommitFiles(files: string[]): CommitFileGroup[];
 
+export interface CommitDirNode {
+  dir: string;
+  files: string[];
+  children: CommitDirNode[];
+}
+
+export function nestCommitGroups(
+  groups: CommitFileGroup[],
+): CommitDirNode[];
+
+export function commitDirShortName(dir: string): string;
+
 export function partitionGroupStage(
   files: string[],
   isStaged: (file: string) => boolean,

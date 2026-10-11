@@ -172,6 +172,23 @@ async function createWindow() {
   } catch {
     /* fall back to defaults */
   }
+  // Explicit window icon: without one the taskbar falls back to a generic
+  // glyph once an explicit AUMID is set (see the window-icon contract).
+  let windowIcon;
+  let appUserModelId = 'com.musician.app';
+  try {
+    const { resolveWindowIcon, resolveAppUserModelId } = require('./window-icon');
+    windowIcon = resolveWindowIcon({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+      platform: process.platform,
+      exists: (candidate) => fs.existsSync(candidate),
+    });
+    appUserModelId = resolveAppUserModelId({ isPackaged: app.isPackaged, appId: 'com.musician.app' });
+  } catch {
+    windowIcon = undefined;
+  }
   win = new BrowserWindow({
     x: restored.x,
     y: restored.y,
@@ -179,12 +196,24 @@ async function createWindow() {
     height: restored.height,
     autoHideMenuBar: true,
     backgroundColor: '#1c1c1e',
+    icon: windowIcon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+  // Taskbar identity: the button icon does not follow the window icon once
+  // an explicit AUMID is set (dev falls back to electron.exe's glyph, the
+  // portable build to a generic one), so pin the button to the app icon too.
+  // The appId mirrors build.appId (see the startup AUMID above).
+  try {
+    if (process.platform === 'win32' && windowIcon) {
+      win.setAppDetails({ appId: appUserModelId, appIconPath: windowIcon, appIconIndex: 0 });
+    }
+  } catch {
+    /* taskbar falls back to the window icon */
+  }
   if (startMaximized) win.maximize();
   // The app window carries the full IPC bridge: never let it navigate away
   // from the bundled UI (dropped files, remote URLs) or spawn windows.
@@ -235,44 +264,57 @@ ipcMain.handle('mudex:show-notification', async (event, payload = {}) => {
   const body = notifyLang === 'en'
     ? status === 'success' ? 'Task completed.' : status === 'stopped' ? 'Task stopped.' : status === 'scheduled' ? 'Scheduled prompt ran.' : 'Task failed.'
     : status === 'success' ? '작업이 완료됐습니다.' : status === 'stopped' ? '작업이 중지됐습니다.' : status === 'scheduled' ? '예약된 프롬프트가 실행됐습니다.' : '작업이 실패했습니다.';
-  if (process.platform === 'win32') {
-    const toastIcon = app.isPackaged
-      ? path.join(process.resourcesPath, 'icon.ico')
-      : path.join(app.getAppPath(), 'build', 'icon.ico');
-    const sent = await showWindowsToastAsync(sessionTitle ? `Musician · ${sessionTitle}` : 'Musician', body, toastIcon);
-    return { ok: sent === true };
+  const title = sessionTitle ? `Musician · ${sessionTitle}` : 'Musician';
+  // Real toast first: Action Center on Windows (AUMID set at startup),
+  // native center elsewhere. Click focuses the app and jumps to the session.
+  if (Notification.isSupported()) {
+    try {
+      const notification = new Notification({ title, body });
+      notification.on('click', () => {
+        if (!win || win.isDestroyed()) return;
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+        win.webContents.send('mudex:notification-click', { sessionId });
+      });
+      notification.show();
+      return { ok: true };
+    } catch {
+      /* fall through to the tray balloon */
+    }
   }
-  if (!Notification.isSupported()) return { ok: false };
-  const notification = new Notification({
-    title: sessionTitle ? `Musician · ${sessionTitle}` : 'Musician',
-    body,
-  });
-  notification.on('click', () => {
-    if (!win || win.isDestroyed()) return;
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-    win.webContents.send('mudex:notification-click', { sessionId });
-  });
-  notification.show();
-  return { ok: true };
+  // Last resort on Windows: the tray balloon needs no AUMID or center.
+  if (process.platform !== 'win32') return { ok: false };
+  const toastIcon = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.ico')
+    : path.join(app.getAppPath(), 'build', 'icon.ico');
+  const sent = await showWindowsToastAsync(title, body, toastIcon);
+  return { ok: sent === true };
 });
 
 // Keep the pre-rename data dir so settings/sessions survive the rebrand.
+// E2E rigs isolate via MUSICIAN_E2E_USERDATA (see electron/resolve-user-data).
 try {
-  const base = app.getPath('appData');
-  const legacy = ['Mudex', 'mudex']
-    .map((n) => path.join(base, n))
-    .find((p) => {
-      try {
-        return fs.statSync(p).isDirectory();
-      } catch {
-        return false;
-      }
-    });
-  app.setPath('userData', legacy || path.join(base, 'Mudex'));
+  const { resolveUserDataDir } = require('./resolve-user-data');
+  app.setPath('userData', resolveUserDataDir({
+    env: process.env,
+    appData: app.getPath('appData'),
+    isDirectory: (p) => fs.statSync(p).isDirectory(),
+  }));
 } catch {
   /* use the default */
+}
+// Action Center identity: Windows files toasts under the app's AUMID —
+// without an explicit one the portable build's toasts land under a generic
+// host or never arrive. Must run before app.ready. Packaged builds mirror
+// build.appId; dev builds take a suffixed identity (see window-icon).
+try {
+  if (process.platform === 'win32') {
+    const { resolveAppUserModelId } = require('./window-icon');
+    app.setAppUserModelId(resolveAppUserModelId({ isPackaged: app.isPackaged, appId: 'com.musician.app' }));
+  }
+} catch {
+  /* toasts fall back to the tray balloon */
 }
 // Distributed builds run single-instance: a second launch focuses the
 // running app instead of splitting userData between two writers.

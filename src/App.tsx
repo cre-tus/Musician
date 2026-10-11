@@ -9,6 +9,7 @@ import QuickOpen from './components/QuickOpen';
 import ConfirmDialog, { type ConfirmOptions, type ConfirmResult } from './components/ConfirmDialog';
 import KeyboardShortcutsDialog from './components/KeyboardShortcutsDialog';
 import { SchedulePromptDialog, ScheduledPromptListDialog } from './components/ScheduledPrompts';
+import GoalsDialog from './components/GoalsDialog';
 import { SidebarIcon, XIcon } from './components/icons';
 import { editorDraftStorageKey, findEditorDraft, readEditorDrafts, restoreEditorDraft, writeEditorDrafts } from './lib/editor-drafts.mjs';
 import { mirrorStoredKey, seedDurableKeys } from './lib/durable-state.mjs';
@@ -30,6 +31,8 @@ import { bookmarkHost, isBrowserBookmarked, normalizeBookmarkUrl, readBrowserBoo
 import { duplicateSession } from './lib/session-duplicate.mjs';
 import type { BrowserBookmark } from './lib/browser-bookmarks.mjs';
 import type { ScheduledPrompt } from './lib/scheduled-prompts.mjs';
+import { activeGoal, readGoalStore, stopGoal, writeGoalStore } from './lib/goals.mjs';
+import type { GoalStore } from './lib/goals.mjs';
 import { resolveBootSessions } from './lib/session-boot-guard.mjs';
 import { saveFilesSequentially } from './lib/save-file-batch.mjs';
 import { isSameOrDescendantPath, normalizePathForComparison, pathsEqual } from './lib/path-utils.mjs';
@@ -43,6 +46,7 @@ import { readPinnedProjects, togglePinnedProject, writePinnedProjects } from './
 import { prefillWorkspaceSearchQuery } from './lib/workspace-search-query.mjs';
 import { scheduleAfterPaint } from './lib/after-paint.mjs';
 import { editorNavigationStorageKey, pushEditorLocation, readEditorNavigationHistory, remapEditorNavigationPaths, removeEditorNavigationPaths, stepEditorLocation, toggleEditorLocationBookmark as toggleLocationBookmark, writeEditorNavigationHistory } from './lib/editor-navigation-history.mjs';
+import { adjustEditorFontSize, DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_FIELD_SELECTOR, editorFontZoomDelta, resolveEditorFontSize, shouldHandleEditorFontZoom } from './lib/editor-font-size.mjs';
 import type { BrowserShortcut, ChatMessage, CliSettings, CliStatus, EditorApi, GitStatusKind, HostSession, MspStatus, PaneTab, PaneTabKind, Session, SubscriptionUsage } from './types';
 import {
   addProject,
@@ -286,7 +290,7 @@ export default function App() {
   const [goToLineRequest, setGoToLineRequest] = useState(0);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [wordWrap, setWordWrap] = useState(() => loadBool('mudex:editor-word-wrap:v1', false));
-  const [editorFontSize, setEditorFontSize] = useState(() => clamp(Math.round(loadNum('mudex:editor-font-size:v1', 13)), 10, 24));
+  const [editorFontSize, setEditorFontSize] = useState(() => resolveEditorFontSize(loadNum('mudex:editor-font-size:v1', Number.NaN)));
   const [fileSearchMode, setFileSearchMode] = useState<'name' | 'content'>('name');
   const [fileSearchFocusRequest, setFileSearchFocusRequest] = useState(0);
   const [fileSearchQuery, setFileSearchQuery] = useState('');
@@ -311,6 +315,9 @@ export default function App() {
   const scheduledFiringRef = useRef<{ id: string; sessionId: string; nonce: number; since: number } | null>(null);
   const scheduledNonceRef = useRef(0);
   useEffect(() => writeScheduledPrompts(scheduled), [scheduled]);
+  const [goalStore, setGoalStore] = useState<GoalStore>(() => readGoalStore());
+  const [goalsOpen, setGoalsOpen] = useState(false);
+  useEffect(() => writeGoalStore(goalStore), [goalStore]);
   const [bookmarks, setBookmarks] = useState<BrowserBookmark[]>(() => readBrowserBookmarks());
   const bookmarksRef = useRef(bookmarks);
   bookmarksRef.current = bookmarks;
@@ -341,7 +348,7 @@ export default function App() {
   const [mspStatus, setMspStatus] = useState<MspStatus>({ state: 'idle' });
   const [codexSignal, setCodexSignal] = useState(0);
   const [claudeSignal, setClaudeSignal] = useState(0);
-  const [tuneSignal, setTuneSignal] = useState(0);
+  const [modelPickerSignal, setModelPickerSignal] = useState(0);
   const [quota, setQuota] = useState<SubscriptionUsage | null>(() => loadLastUsage(localStorage));
   const [sideW, setSideW] = useState(() => clamp(loadNum('mudex:sidew', 284), 200, 480));
   const [chatRatio, setChatRatio] = useState(() => clamp(loadNum('mudex:chatratio', 0.45), 0.25, 0.75));
@@ -1136,27 +1143,25 @@ export default function App() {
   useEffect(() => {
     const adjustEditorFont = (e: KeyboardEvent) => {
       if (e.defaultPrevented || document.querySelector('.shortcuts-dialog') || !(e.ctrlKey || e.metaKey)) return;
+      const delta = editorFontZoomDelta(e.key, e.code);
+      if (delta === null) return;
       const target = e.target instanceof HTMLElement ? e.target : null;
-      if (!target?.closest('.monaco-editor')) return;
-      const key = e.key.toLowerCase();
-      if (key === '+' || key === '=' || e.code === 'NumpadAdd') {
-        e.preventDefault();
-        e.stopPropagation();
-        setEditorFontSize((size) => clamp(size + 1, 10, 24));
-      } else if (key === '-' || key === '_' || e.code === 'NumpadSubtract') {
-        e.preventDefault();
-        e.stopPropagation();
-        setEditorFontSize((size) => clamp(size - 1, 10, 24));
-      } else if (key === '0') {
-        e.preventDefault();
-        e.stopPropagation();
-        setEditorFontSize(13);
-      }
+      const activeTab = latestTabsRef.current.find((tab) => tab.id === latestActiveTabRef.current);
+      if (!shouldHandleEditorFontZoom({
+        inMonaco: !!target?.closest('.monaco-editor'),
+        activeFileTab: activeTab?.kind === 'file' && !!activeTab.file,
+        inRightPane: !!target?.closest('.right-pane'),
+        inField: !!target?.closest(EDITOR_FONT_FIELD_SELECTOR),
+      })) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (delta === 0) setEditorFontSize(DEFAULT_EDITOR_FONT_SIZE);
+      else setEditorFontSize((size) => adjustEditorFontSize(size, delta));
     };
     const toggleWrap = (e: KeyboardEvent) => {
       if (e.defaultPrevented || document.querySelector('.shortcuts-dialog') || !e.altKey || e.ctrlKey || e.metaKey || e.key.toLowerCase() !== 'z') return;
       const target = e.target instanceof HTMLElement ? e.target : null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"], .xterm-helper-textarea')
+      if (target?.closest(EDITOR_FONT_FIELD_SELECTOR)
         && !target.closest('.monaco-editor')) return;
       e.preventDefault();
       e.stopPropagation();
@@ -2445,7 +2450,8 @@ export default function App() {
     });
   };
 
-  const monacoTheme = settings.codeTheme === 'auto' ? (dark ? 'vs-dark' : 'vs') : settings.codeTheme;
+  const codeTheme = settings.codeTheme === 'auto' ? (dark ? 'vs-dark' : 'vs') : settings.codeTheme;
+  const monacoTheme = codeTheme === 'vs-dark' ? 'musician-dark' : codeTheme === 'vs' ? 'musician-light' : codeTheme;
 
   const gotoThread = (id: string) => {
     const targetSession = sessions.find((session) => session.id === id);
@@ -2531,6 +2537,8 @@ export default function App() {
     if (existing) setActiveTabId(existing.id);
     else newPaneTab('skills');
   };
+
+
   openFilesViewerRef.current = openFilesViewer;
   const openWorkspaceSearch = () => {
     const selection = editorApiRef.current?.getSelection()?.text;
@@ -2684,7 +2692,7 @@ export default function App() {
       case 'model':
         setActiveId(sessionId);
         setView('thread');
-        setTuneSignal((signal) => signal + 1);
+        setModelPickerSignal((signal) => signal + 1);
         break;
       case 'usage':
         setView('usage');
@@ -2697,6 +2705,9 @@ export default function App() {
         break;
       case 'schedule':
         setScheduleListOpen(true);
+        break;
+      case 'goal':
+        setGoalsOpen(true);
         break;
       case 'export':
         void exportSessionTranscripts([sessionId]);
@@ -2723,9 +2734,10 @@ export default function App() {
   const paletteActions: PaletteAction[] = [
     { id: 'new', title: common.newThread, hint: 'Ctrl+N', keywords: ['new chat', 'new thread'], run: () => { newChat(); setView('thread'); setPaletteOpen(false); } },
     { id: 'scheduled-prompts', title: STRINGS[lang].shortcuts.nl06, hint: pendingScheduledCount > 0 ? formatStr(av.palSchedCount, { n: pendingScheduledCount }) : 'Ctrl+Alt+R', keywords: ['scheduled prompt', 'reservation', 'timer', 'schedule', '예약', '스케줄', '타이머'], run: () => { setScheduleListOpen(true); setPaletteOpen(false); } },
-    { id: 'tune-model', title: av.palTune, keywords: ['tune model', 'model settings', 'reasoning', 'approval', '모델 변경', '추론', '권한'], run: () => { setView('thread'); setTuneSignal((signal) => signal + 1); setPaletteOpen(false); } },
+    { id: 'model-picker', title: av.palTune, keywords: ['select model', 'model settings', 'reasoning', '모델 변경', '모델 선택', '추론'], run: () => { setView('thread'); setModelPickerSignal((signal) => signal + 1); setPaletteOpen(false); } },
     { id: 'export-active-transcript', title: av.palExportActive, keywords: ['export transcript', 'export conversation', 'markdown', '대화 내보내기', '내보내기'], run: () => { setPaletteOpen(false); void exportSessionTranscripts([activeId]); } },
     { id: 'cli-skills', title: av.palSkills, keywords: ['skills', 'find skills', 'install skill', 'manage skills', '스킬', '스킬 찾기', '스킬 추가'], run: () => { openSkillsTab(); setPaletteOpen(false); } },
+    { id: 'goals', title: av.palGoals, keywords: ['goals', 'manage goals', 'progress', '목표', '목표 관리', '진행률'], run: () => { setGoalsOpen(true); setPaletteOpen(false); } },
     { id: 'focus-composer', title: av.palFocusComposer, keywords: ['focus composer', 'focus prompt', 'chat input', '메시지 입력', '프롬프트 입력'], run: () => {
       setView('thread');
       setPaletteOpen(false);
@@ -2774,9 +2786,9 @@ export default function App() {
       { id: 'unfold-all', title: av.palUnfoldAll, hint: 'Ctrl+K Ctrl+J', keywords: ['unfold all', 'expand all', '코드 펼치기', '모두 펼치기'], run: () => { setPaletteOpen(false); setView('thread'); setEditorVisible(true); scheduleAfterPaint(() => editorApiRef.current?.runCommand('editor.unfoldAll')); } },
     ] : []),
     ...(activeEditableFileTab ? [{ id: 'toggle-word-wrap', title: wordWrap ? av.palWrapOff : av.palWrapOn, hint: 'Alt+Z', keywords: ['word wrap', 'toggle wrap', '줄바꿈', '긴 줄'], run: () => { setWordWrap((enabled) => !enabled); setPaletteOpen(false); setEditorVisible(true); } }] : []),
-    ...(activeEditableFileTab ? [{ id: 'editor-font-increase', title: av.palFontBigger, hint: 'Ctrl+=', keywords: ['font size', 'zoom in', '글자 크기 키우기'], run: () => { setEditorFontSize((size) => clamp(size + 1, 10, 24)); setPaletteOpen(false); } }] : []),
-    ...(activeEditableFileTab ? [{ id: 'editor-font-decrease', title: av.palFontSmaller, hint: 'Ctrl+-', keywords: ['font size', 'zoom out', '글자 크기 줄이기'], run: () => { setEditorFontSize((size) => clamp(size - 1, 10, 24)); setPaletteOpen(false); } }] : []),
-    ...(activeEditableFileTab && editorFontSize !== 13 ? [{ id: 'editor-font-reset', title: av.palFontReset, hint: 'Ctrl+0', keywords: ['font size', 'reset zoom', '글자 크기 초기화'], run: () => { setEditorFontSize(13); setPaletteOpen(false); } }] : []),
+    ...(activeEditableFileTab ? [{ id: 'editor-font-increase', title: av.palFontBigger, hint: 'Ctrl+=', keywords: ['font size', 'zoom in', '글자 크기 키우기'], run: () => { setEditorFontSize((size) => adjustEditorFontSize(size, 1)); setPaletteOpen(false); } }] : []),
+    ...(activeEditableFileTab ? [{ id: 'editor-font-decrease', title: av.palFontSmaller, hint: 'Ctrl+-', keywords: ['font size', 'zoom out', '글자 크기 줄이기'], run: () => { setEditorFontSize((size) => adjustEditorFontSize(size, -1)); setPaletteOpen(false); } }] : []),
+    ...(activeEditableFileTab && editorFontSize !== DEFAULT_EDITOR_FONT_SIZE ? [{ id: 'editor-font-reset', title: av.palFontReset, hint: 'Ctrl+0', keywords: ['font size', 'reset zoom', '글자 크기 초기화'], run: () => { setEditorFontSize(DEFAULT_EDITOR_FONT_SIZE); setPaletteOpen(false); } }] : []),
     ...tabSelectionActions,
     ...(activeEditableFileTab ? [{ id: 'save-current-file', title: av.palSaveFile, hint: 'Ctrl+S', keywords: ['save file', 'save current file', '파일 저장'], run: () => { setPaletteOpen(false); void saveFile(activeEditableFileTab.id); } }] : []),
     { id: 'save-all-files', title: av.palSaveAll, hint: 'Ctrl+Shift+S', keywords: ['save all', 'save files', '모두 저장'], run: () => { setPaletteOpen(false); void saveAllFiles(); } },
@@ -2934,6 +2946,9 @@ export default function App() {
             onDraftStatus={updateDraftSessionStatus}
             onQueueStatus={updateQueuedSessionCount}
             onSchedulePrompt={(text) => setScheduleDraft({ sessionId: s.id, text })}
+            onOpenGoals={() => setGoalsOpen(true)}
+            goalGauge={activeGoal(goalStore)}
+            onStopGoal={() => setGoalStore((prev) => stopGoal(prev))}
             scheduledFire={scheduledFire && scheduledFire.sessionId === s.id ? scheduledFire : null}
             onScheduledConsumed={(nonce) => {
               const firing = scheduledFiringRef.current;
@@ -2950,7 +2965,7 @@ export default function App() {
             onSlashCommand={(id) => runSlashCommand(s.id, id)}
             codexSignal={s.id === activeId ? codexSignal : 0}
             claudeSignal={s.id === activeId ? claudeSignal : 0}
-            tuneSignal={s.id === activeId ? tuneSignal : 0}
+            modelPickerSignal={s.id === activeId ? modelPickerSignal : 0}
             tokenWin={tokenWin}
             quota={quota}
             paneStyle={s.id !== activeId ? { display: 'none' } : editorVisible ? { flex: `0 0 ${Math.round(chatRatio * 1000) / 10}%`, minWidth: 340 } : undefined}
@@ -3009,7 +3024,7 @@ export default function App() {
             wordWrap={wordWrap}
             editorFontSize={editorFontSize}
             onToggleWordWrap={() => setWordWrap((enabled) => !enabled)}
-            onChangeEditorFontSize={(delta) => setEditorFontSize((size) => clamp(size + delta, 10, 24))}
+            onChangeEditorFontSize={(delta) => setEditorFontSize((size) => adjustEditorFontSize(size, delta))}
             onSelectTab={setActiveTabId}
             onBackToChat={() => setEditorVisible(false)}
             onReorderTabs={reorderTabs}
@@ -3148,6 +3163,16 @@ export default function App() {
             if (item) setEditingSchedule(item);
           }}
           onClose={() => setScheduleListOpen(false)}
+        />
+      )}
+      {goalsOpen && (
+        <GoalsDialog
+          store={goalStore}
+          onStoreChange={setGoalStore}
+          sessions={sessions}
+          activeSessionId={active?.id ?? ''}
+          onJumpToSession={gotoThread}
+          onClose={() => setGoalsOpen(false)}
         />
       )}
       {editingSchedule && (

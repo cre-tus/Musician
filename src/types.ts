@@ -53,7 +53,9 @@ export type BrowserEvent =
   | { type: 'shortcut'; tabId: string; shortcut: BrowserShortcut }
   | { type: 'find-result'; tabId: string; requestId: number; query: string; matches: number; activeMatchOrdinal: number; finalUpdate: boolean }
   | { type: 'agent'; tabId: string | null; method: string; params: string }
-  | { type: 'agent-switch'; tabId: string };
+  | { type: 'agent-switch'; tabId: string }
+  | { type: 'ask-section'; tabId: string; pageTitle: string; pageUrl: string; tagPath: string; text: string; linkUrl: string }
+  | { type: 'ask-section-empty'; tabId: string };
 
 export type TermEvent =
   | { type: 'output'; tabId: string; text: string; seq?: number }
@@ -144,6 +146,8 @@ export interface ChatMessage {
   plan?: boolean;
   checkpointId?: string;
   todos?: MspTodo[];
+  // System-generated user turns (e.g. interrupt resume) hidden from ↑ history.
+  auto?: boolean;
 }
 
 export interface TokenUsage {

@@ -51,7 +51,7 @@ export default function ConfirmDialog({ title, message, confirmLabel, alternateL
         <div className="modal-footer">
           <button ref={cancelRef} className="btn" type="button" onClick={() => onResolve('cancel')}>{s.common.cancel}</button>
           {alternateLabel && <button className="btn" type="button" onClick={() => onResolve('alternate')}>{alternateLabel}</button>}
-          <button className={destructive ? 'btn-danger' : 'btn-primary'} type="button" onClick={() => onResolve('confirm')}>{confirmLabel}</button>
+          <button className={destructive ? 'btn-danger' : 'btn'} type="button" onClick={() => onResolve('confirm')}>{confirmLabel}</button>
         </div>
       </section>
     </div>

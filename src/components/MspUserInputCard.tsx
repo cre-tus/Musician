@@ -155,7 +155,7 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
           {error && <div id={`msp-user-input-error-${prompt.key}`} className="msp-input-error" role="alert">{error}</div>}
           <div className="msp-user-input-actions">
             <button className="btn" type="button" onClick={() => void skip()} disabled={busy}>{s.msp.skip}</button>
-            <button className="btn btn-primary" type="submit" disabled={busy}>{busy ? s.msp.sending : s.msp.send}</button>
+            <button className="btn" type="submit" disabled={busy}>{busy ? s.msp.sending : s.msp.send}</button>
           </div>
         </form>
       )}

@@ -152,7 +152,7 @@ export function SchedulePromptDialog({ draft, sessionTitle, mode, initialFireAt,
         </div>
         <div className="modal-footer">
           <button className="btn" type="button" onClick={onClose}>{s.common.cancel}</button>
-          <button ref={confirmRef} className="btn-primary" type="button" disabled={!valid} onClick={() => onSchedule(picked, repeat, edit ? text : undefined)}>
+          <button ref={confirmRef} className="btn" type="button" disabled={!valid} onClick={() => onSchedule(picked, repeat, edit ? text : undefined)}>
             {valid ? formatStr(edit ? s.schedule.confirmEdit : s.schedule.confirmCreate, { time: formatScheduledFireTime(picked, undefined, lang) }) + (repeat === 'once' ? '' : formatStr(s.schedule.confirmRepeat, { repeat: formatRepeat(repeat, lang) })) : (edit ? s.schedule.applyEdit : s.schedule.applyCreate)}
           </button>
         </div>
@@ -232,7 +232,7 @@ export function ScheduledPromptListDialog({ items, sessionTitleOf, onCancel, onE
           )}
         </div>
         <div className="modal-footer">
-          <button ref={closeRef} className="btn-primary" type="button" onClick={onClose}>{s.common.close}</button>
+          <button ref={closeRef} className="btn" type="button" onClick={onClose}>{s.common.close}</button>
         </div>
       </section>
     </div>
