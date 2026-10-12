@@ -9,7 +9,6 @@ import QuickOpen from './components/QuickOpen';
 import ConfirmDialog, { type ConfirmOptions, type ConfirmResult } from './components/ConfirmDialog';
 import KeyboardShortcutsDialog from './components/KeyboardShortcutsDialog';
 import { SchedulePromptDialog, ScheduledPromptListDialog } from './components/ScheduledPrompts';
-import GoalsDialog from './components/GoalsDialog';
 import { SidebarIcon, XIcon } from './components/icons';
 import { editorDraftStorageKey, findEditorDraft, readEditorDrafts, restoreEditorDraft, writeEditorDrafts } from './lib/editor-drafts.mjs';
 import { mirrorStoredKey, seedDurableKeys } from './lib/durable-state.mjs';
@@ -25,13 +24,14 @@ import { LangContext } from './lib/lang';
 import { hideHostSessionId, readHiddenHostSessionIds, visibleHostSessions } from './lib/host-session-filter.mjs';
 import { shouldShowBackgroundNotification } from './lib/notification-rules.mjs';
 import { clearUnread, createStopRegistry, markUnread } from './lib/session-alerts.mjs';
+import { visibleRunningSessions } from './lib/running-sessions.mjs';
 import { addScheduledPrompt, cancelScheduledPrompt, createScheduledPrompt, dueScheduledPrompts, fireableScheduledPrompt, formatRepeat, formatScheduledFireTime, markScheduledPrompt, readScheduledPrompts, rescheduleScheduledPrompt, rollRepeatingPrompt, staleScheduledPrompts, writeScheduledPrompts } from './lib/scheduled-prompts.mjs';
 import { shouldParkBrowserForOverlays } from './lib/browser-overlay-park.mjs';
 import { bookmarkHost, isBrowserBookmarked, normalizeBookmarkUrl, readBrowserBookmarks, toggleBrowserBookmark, writeBrowserBookmarks } from './lib/browser-bookmarks.mjs';
 import { duplicateSession } from './lib/session-duplicate.mjs';
 import type { BrowserBookmark } from './lib/browser-bookmarks.mjs';
 import type { ScheduledPrompt } from './lib/scheduled-prompts.mjs';
-import { activeGoal, readGoalStore, stopGoal, writeGoalStore } from './lib/goals.mjs';
+import { activeGoal, bumpGoalProgress, linkGoalSession, normalizeGoalStore, readGoalStore, stopGoal, writeGoalStore } from './lib/goals.mjs';
 import type { GoalStore } from './lib/goals.mjs';
 import { resolveBootSessions } from './lib/session-boot-guard.mjs';
 import { saveFilesSequentially } from './lib/save-file-batch.mjs';
@@ -78,6 +78,7 @@ const DEFAULT_SETTINGS: CliSettings = {
   engine: 'auto',
   approvalMode: '',
   reasoningEffort: '',
+  contributorMode: true,
   browserAgent: true,
   browserHome: '',
   backgroundNotifications: true,
@@ -317,7 +318,30 @@ export default function App() {
   useEffect(() => writeScheduledPrompts(scheduled), [scheduled]);
   const [goalStore, setGoalStore] = useState<GoalStore>(() => readGoalStore());
   const [goalsOpen, setGoalsOpen] = useState(false);
+  // Goal-setup mode: the chat takes the next line as a fresh goal and
+  // starts it at once. Entering always puts the management panel away.
+  const [goalSetup, setGoalSetup] = useState(false);
+  const enterGoalSetup = () => {
+    setGoalsOpen(false);
+    setGoalSetup(true);
+  };
   useEffect(() => writeGoalStore(goalStore), [goalStore]);
+  // Heal started goals that never linked a session (older starts): the
+  // current chat picks up the goal so injection works immediately.
+  useEffect(() => {
+    const current = activeGoal(goalStore);
+    if (!current || current.sessionIds.length > 0) return;
+    if (typeof activeId !== 'string' || activeId.length === 0) return;
+    if (!sessions.some((session) => session.id === activeId)) return;
+    setGoalStore((prev) => {
+      const target = prev.goals.find((item) => item.id === prev.activeGoalId);
+      if (!target || target.sessionIds.length > 0) return prev;
+      return normalizeGoalStore({
+        goals: linkGoalSession(prev.goals, target.id, activeId),
+        activeGoalId: prev.activeGoalId,
+      });
+    });
+  }, [goalStore, activeId, sessions]);
   const [bookmarks, setBookmarks] = useState<BrowserBookmark[]>(() => readBrowserBookmarks());
   const bookmarksRef = useRef(bookmarks);
   bookmarksRef.current = bookmarks;
@@ -2707,7 +2731,7 @@ export default function App() {
         setScheduleListOpen(true);
         break;
       case 'goal':
-        setGoalsOpen(true);
+        enterGoalSetup();
         break;
       case 'export':
         void exportSessionTranscripts([sessionId]);
@@ -2737,7 +2761,7 @@ export default function App() {
     { id: 'model-picker', title: av.palTune, keywords: ['select model', 'model settings', 'reasoning', '모델 변경', '모델 선택', '추론'], run: () => { setView('thread'); setModelPickerSignal((signal) => signal + 1); setPaletteOpen(false); } },
     { id: 'export-active-transcript', title: av.palExportActive, keywords: ['export transcript', 'export conversation', 'markdown', '대화 내보내기', '내보내기'], run: () => { setPaletteOpen(false); void exportSessionTranscripts([activeId]); } },
     { id: 'cli-skills', title: av.palSkills, keywords: ['skills', 'find skills', 'install skill', 'manage skills', '스킬', '스킬 찾기', '스킬 추가'], run: () => { openSkillsTab(); setPaletteOpen(false); } },
-    { id: 'goals', title: av.palGoals, keywords: ['goals', 'manage goals', 'progress', '목표', '목표 관리', '진행률'], run: () => { setGoalsOpen(true); setPaletteOpen(false); } },
+    { id: 'goals', title: av.palGoals, keywords: ['goals', 'set goal', 'progress', '목표', '목표 설정', '진행률'], run: () => { setView('thread'); enterGoalSetup(); setPaletteOpen(false); scheduleAfterPaint(() => document.querySelector<HTMLTextAreaElement>('.composer-input')?.focus()); } },
     { id: 'focus-composer', title: av.palFocusComposer, keywords: ['focus composer', 'focus prompt', 'chat input', '메시지 입력', '프롬프트 입력'], run: () => {
       setView('thread');
       setPaletteOpen(false);
@@ -2946,9 +2970,21 @@ export default function App() {
             onDraftStatus={updateDraftSessionStatus}
             onQueueStatus={updateQueuedSessionCount}
             onSchedulePrompt={(text) => setScheduleDraft({ sessionId: s.id, text })}
+            onToggleGoals={() => setGoalsOpen((v) => !v)}
             onOpenGoals={() => setGoalsOpen(true)}
+            goalsOpen={goalsOpen}
+            goalSetup={goalSetup}
+            onGoalSetupChange={(v) => { if (v) setGoalsOpen(false); setGoalSetup(v); }}
+            goalStore={goalStore}
+            onGoalStoreChange={setGoalStore}
+            goalSessions={sessions}
+            runningSessions={visibleRunningSessions(sessions, runningIds, activeId)}
+            onJumpToSession={gotoThread}
             goalGauge={activeGoal(goalStore)}
             onStopGoal={() => setGoalStore((prev) => stopGoal(prev))}
+            onBumpGoal={(delta) => setGoalStore((prev) => (prev.activeGoalId
+              ? { goals: bumpGoalProgress(prev.goals, prev.activeGoalId, delta), activeGoalId: prev.activeGoalId }
+              : prev))}
             scheduledFire={scheduledFire && scheduledFire.sessionId === s.id ? scheduledFire : null}
             onScheduledConsumed={(nonce) => {
               const firing = scheduledFiringRef.current;
@@ -3163,16 +3199,6 @@ export default function App() {
             if (item) setEditingSchedule(item);
           }}
           onClose={() => setScheduleListOpen(false)}
-        />
-      )}
-      {goalsOpen && (
-        <GoalsDialog
-          store={goalStore}
-          onStoreChange={setGoalStore}
-          sessions={sessions}
-          activeSessionId={active?.id ?? ''}
-          onJumpToSession={gotoThread}
-          onClose={() => setGoalsOpen(false)}
         />
       )}
       {editingSchedule && (

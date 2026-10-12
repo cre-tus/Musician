@@ -11,7 +11,7 @@ export const SLASH_COMMANDS = [
   { id: 'export', name: '/export', title: '대화 내보내기', hint: 'Markdown으로 저장', keywords: ['export', 'markdown', '내보내기'] },
   { id: 'diff', name: '/diff', title: '변경 사항 보기', hint: '파일 탐색기 열기', keywords: ['diff', 'changes', 'git', '변경', '차이'] },
   { id: 'terminal', name: '/terminal', title: '터미널 열기', hint: '새 터미널 탭', keywords: ['terminal', 'shell', '터미널', '셸'] },
-  { id: 'goal', name: '/goal', title: '목표 관리', hint: '목표 목록과 시작', keywords: ['goal', 'goals', 'progress', '목표', '목표 관리', '진행률'] },
+  { id: 'goal', name: '/goal', title: '목표 설정', hint: '채팅으로 입력·바로 시작', keywords: ['goal', 'goals', 'progress', '목표', '목표 설정', '진행률'] },
 ];
 
 // Fires only when the input itself starts with '/' and the caret is still
@@ -47,7 +47,7 @@ const SLASH_TEXT_EN = {
   export: { title: 'Export conversation', hint: 'Save as Markdown' },
   diff: { title: 'Show changes', hint: 'Open the file explorer' },
   terminal: { title: 'Open terminal', hint: 'New terminal tab' },
-  goal: { title: 'Manage goals', hint: 'Goals list and start' },
+  goal: { title: 'Set goal', hint: 'Type in chat, starts right away' },
 };
 
 export function getSlashCommands(lang = 'ko') {

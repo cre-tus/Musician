@@ -34,6 +34,7 @@ export function updateGoal(
   now?: number,
 ): Goal[];
 export function setGoalProgress(list: unknown, id: unknown, progress: unknown, now?: number): Goal[];
+export function bumpGoalProgress(list: unknown, id: unknown, delta: unknown, now?: number): Goal[];
 export function toggleGoalDone(list: unknown, id: unknown, now?: number): Goal[];
 export function linkGoalSession(list: unknown, id: unknown, sessionId: unknown, now?: number): Goal[];
 export function unlinkGoalSession(list: unknown, id: unknown, sessionId: unknown, now?: number): Goal[];
@@ -45,6 +46,7 @@ export interface GoalStore {
 }
 export function normalizeGoalStore(value: unknown): GoalStore;
 export function startGoal(store: unknown, id: unknown): GoalStore;
+export function startGoalInSession(store: unknown, id: unknown, sessionId: unknown, now?: number): GoalStore;
 export function stopGoal(store: unknown): GoalStore;
 export function activeGoal(store: unknown): Goal | null;
 export function readGoalStore(storage?: {

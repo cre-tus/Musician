@@ -1,15 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import type { Goal, GoalStore } from '../lib/goals.mjs';
 import {
-  MAX_GOALS,
-  addGoal,
-  createGoal,
   linkGoalSession,
   normalizeGoalStore,
   pruneGoalSessions,
   removeGoal,
-  setGoalProgress,
-  startGoal,
+  startGoalInSession,
   stopGoal,
   summarizeGoals,
   toggleGoalDone,
@@ -18,7 +14,7 @@ import {
 } from '../lib/goals.mjs';
 import { formatStr } from '../lib/i18n.mjs';
 import { useStrings } from '../lib/lang';
-import { CheckIcon, PlusIcon, TrashIcon, XIcon } from './icons';
+import { CheckIcon, TrashIcon, XIcon } from './icons';
 
 interface Props {
   store: GoalStore;
@@ -26,17 +22,20 @@ interface Props {
   sessions: Array<{ id: string; title: string }>;
   activeSessionId: string;
   onJumpToSession: (id: string) => void;
+  onGoalStarted: (goal: Goal) => boolean;
 }
 
-// Long-term goals across sessions: a plain list with manual progress,
-// notes, links to the sessions working toward each goal, and one global
-// current goal (started) shown as a gauge above the chat. The store lives
-// in App so the chat gauge and this list stay in sync.
-export default function GoalsTab({ store, onStoreChange, sessions, activeSessionId, onJumpToSession }: Props) {
+// Long-term goals across sessions: done state flips by checkbox (no
+// slider), progress reads from the slim bar, plus notes and links to
+// the sessions working toward each goal, and one global current goal
+// (started) shown as a gauge attached to the chat. New goals are typed in
+// the chat while goal-setup mode is on — this list only manages what
+// already exists. The store lives in App so the gauge and list stay in
+// sync.
+export default function GoalsTab({ store, onStoreChange, sessions, activeSessionId, onJumpToSession, onGoalStarted }: Props) {
   const strings = useStrings();
   const t = strings.goals;
   const goals = store.goals;
-  const [draft, setDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
@@ -62,19 +61,6 @@ export default function GoalsTab({ store, onStoreChange, sessions, activeSession
   const summary = summarizeGoals(goals);
   const titles = new Map(sessions.map((session) => [session.id, session.title]));
 
-  const submitDraft = (event?: React.FormEvent) => {
-    event?.preventDefault();
-    const created = createGoal({ title: draft });
-    if (!created) return;
-    if (goals.length >= MAX_GOALS) {
-      setNotice(formatStr(t.full, { n: MAX_GOALS }));
-      return;
-    }
-    setNotice('');
-    updateGoals(addGoal(goals, created));
-    setDraft('');
-  };
-
   const expand = (goal: Goal) => {
     if (expandedId === goal.id) {
       setExpandedId(null);
@@ -97,26 +83,26 @@ export default function GoalsTab({ store, onStoreChange, sessions, activeSession
     }
   };
 
+  // Starting links the current chat and kicks off the agent at once;
+  // stopping keeps the links for a later restart.
+  const toggleStart = (goal: Goal, started: boolean) => {
+    if (started) {
+      onStoreChange(stopGoal(store));
+      return;
+    }
+    setNotice('');
+    onStoreChange(startGoalInSession(store, goal.id, activeSessionId));
+    if (activeSessionId.length === 0) return;
+    setNotice(onGoalStarted(goal) ? t.startedRun : t.started);
+  };
+
   return (
     <div className="goals-tab">
       <div className="goals-head">
         <span className="goals-summary">
-          {formatStr(t.summary, { active: summary.active, done: summary.done, avg: summary.avgProgress })}
+          {formatStr(t.summary, { active: summary.active, done: summary.done })}
         </span>
       </div>
-      <form className="goals-new" onSubmit={submitDraft}>
-        <input
-          className="goals-new-input"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder={t.newPlaceholder}
-          maxLength={200}
-          aria-label={t.newPlaceholder}
-        />
-        <button type="submit" className="btn goals-add" disabled={!draft.trim()}>
-          <PlusIcon size={13} /> {t.add}
-        </button>
-      </form>
       {notice && <div className="goals-notice" role="status">{notice}</div>}
       {goals.length === 0 && <div className="goals-empty">{t.empty}</div>}
       <div className="goals-list">
@@ -146,7 +132,7 @@ export default function GoalsTab({ store, onStoreChange, sessions, activeSession
                   className="btn goals-start"
                   aria-pressed={started}
                   title={started ? t.stop : t.start}
-                  onClick={() => onStoreChange(started ? stopGoal(store) : startGoal(store, goal.id))}
+                  onClick={() => toggleStart(goal, started)}
                 >
                   {started ? t.stop : t.start}
                 </button>
@@ -161,8 +147,8 @@ export default function GoalsTab({ store, onStoreChange, sessions, activeSession
                   <TrashIcon size={13} />
                 </button>
               </div>
-              <div className="goals-bar" aria-hidden="true">
-                <div className="goals-fill" style={{ width: `${goal.progress}%` }} />
+              <div className="goal-bar goals-bar" aria-hidden="true">
+                <div className="goal-bar-fill" style={{ width: `${goal.progress}%` }} />
               </div>
               {expanded && (
                 <div className="goals-detail">
@@ -174,19 +160,6 @@ export default function GoalsTab({ store, onStoreChange, sessions, activeSession
                       maxLength={200}
                       onChange={(event) => setTitleDraft(event.target.value)}
                       onBlur={() => commitTitle(goal)}
-                    />
-                  </label>
-                  <label className="goals-field">
-                    <span className="goals-label">{t.progress}</span>
-                    <input
-                      type="range"
-                      className="goals-progress"
-                      min={0}
-                      max={100}
-                      step={1}
-                      value={goal.progress}
-                      aria-label={t.progress}
-                      onChange={(event) => updateGoals(setGoalProgress(goals, goal.id, Number(event.target.value)))}
                     />
                   </label>
                   <label className="goals-field">

@@ -134,6 +134,14 @@ export function setGoalProgress(list, id, progress, now) {
   )));
 }
 
+export function bumpGoalProgress(list, id, delta, now) {
+  const current = normalizeGoals(list);
+  if (typeof id !== 'string' || !Number.isFinite(delta) || delta === 0) return current;
+  const target = current.find((item) => item.id === id);
+  if (!target) return current;
+  return setGoalProgress(current, id, target.progress + delta, now);
+}
+
 export function toggleGoalDone(list, id, now) {
   const current = normalizeGoals(list);
   if (typeof id !== 'string') return current;
@@ -202,6 +210,16 @@ export function startGoal(store, id) {
   const current = normalizeGoalStore(store);
   if (typeof id !== 'string' || !current.goals.some((item) => item.id === id)) return current;
   return { goals: current.goals, activeGoalId: id };
+}
+
+export function startGoalInSession(store, id, sessionId, now) {
+  const current = normalizeGoalStore(store);
+  if (typeof id !== 'string' || !current.goals.some((item) => item.id === id)) return current;
+  const at = Number.isFinite(now) ? now : Date.now();
+  const linked = typeof sessionId === 'string' && sessionId.length > 0
+    ? linkGoalSession(current.goals, id, sessionId, at)
+    : current.goals;
+  return { goals: linked, activeGoalId: id };
 }
 
 export function stopGoal(store) {

@@ -99,6 +99,7 @@ const DEFAULT_SETTINGS = {
   engine: 'auto',
   approvalMode: '',
   reasoningEffort: '',
+  contributorMode: true,
   browserAgent: true,
   browserHome: '',
   hooks: [],
@@ -1192,10 +1193,13 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
   let promptFile = null;
   const modelFlag = effModel ? ['--model', effModel] : [];
   const effortFlag = effEffort ? ['--reasoning-effort', effEffort] : [];
-  let argv = ['exec', ...splitArgs(s.extraArgs), ...modelFlag, ...effortFlag, promptText];
+  // Contributor mode (Muse 1.4.6+): a separate per-run knob, no longer
+  // implied by model selection. Legacy settings without the key read as on.
+  const contributorFlag = ['--contributor-mode', s.contributorMode === false ? 'off' : 'on'];
+  let argv = ['exec', ...splitArgs(s.extraArgs), ...modelFlag, ...effortFlag, ...contributorFlag, promptText];
   if (needsShell(resolved.path)) {
     promptFile = writePromptFile(promptText);
-    argv = ['exec', ...splitArgs(s.extraArgs), ...modelFlag, ...effortFlag, '--prompt-file', promptFile];
+    argv = ['exec', ...splitArgs(s.extraArgs), ...modelFlag, ...effortFlag, ...contributorFlag, '--prompt-file', promptFile];
   }
   // Plan mode is enforced by the engine, not the prompt: no workspace
   // writes, no shell. Flags go right after 'exec', prompt stays last.

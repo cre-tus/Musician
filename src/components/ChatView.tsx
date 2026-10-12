@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ChangedStat, ChatMessage, ClaudeSessionInfo, CliSettings, CliStatus, CodexSessionInfo, MspApproval, MspItem, MspTodo, MspUserInputPrompt, Session, SubscriptionUsage, TokenWindow } from '../types';
 import ApprovalPanel from './ApprovalPanel';
+import GoalsPanel from './GoalsPanel';
 import MspUserInputCard from './MspUserInputCard';
 import type { ConfirmOptions, ConfirmResult } from './ConfirmDialog';
 import { api, buildCmdPreview, hasBridge, porcelainPath, uid } from '../lib/mudex';
@@ -15,14 +16,17 @@ import { formatSessionTranscript } from '../lib/session-transcript.mjs';
 import { findPromptFileMention, insertPromptFileMention } from '../lib/prompt-file-mention.mjs';
 import { findSlashCommand, matchSlashCommands, SLASH_COMMANDS } from '../lib/slash-commands.mjs';
 import type { SlashCommand } from '../lib/slash-commands.mjs';
-import type { Goal } from '../lib/goals.mjs';
+import type { Goal, GoalStore } from '../lib/goals.mjs';
+import { MAX_GOALS, addGoal, createGoal, normalizeGoalStore, startGoalInSession } from '../lib/goals.mjs';
+import { activeLinkedGoal, applyGoalContext, buildGoalKick } from '../lib/goal-prompt.mjs';
 import remarkGfm from 'remark-gfm';
 import { expandCustomSlash, findCustomSlash, matchCustomSlashCommands, readCustomSlashCommands } from '../lib/custom-slash.mjs';
 import type { CustomSlashCommand, CustomSlashMatch } from '../lib/custom-slash.mjs';
 import { formatCompactTokens, summarizeSessionContext } from '../lib/session-context.mjs';
 import { latestChangeSummary } from '../lib/run-change-summary.mjs';
 import { buildExecutePrompt, buildPlanPrompt, planThreadKey, readPlanMode, writePlanMode } from '../lib/plan-mode.mjs';
-import { hasOverride, resolveEffort, resolveModel, sanitizeEffort, sanitizeModel, sendOverrides } from '../lib/session-overrides.mjs';
+import { resolveEffort, resolveModel, sanitizeEffort, sanitizeModel, sendOverrides } from '../lib/session-overrides.mjs';
+import { APPROVAL_MODE_VALUES, approvalModeLabel, sanitizeApprovalMode } from '../lib/approval-modes.mjs';
 import { mcpChatNotice } from '../lib/mcp-chat-notice.mjs';
 import { formatStr, STRINGS } from '../lib/i18n.mjs';
 import { useLang, useStrings } from '../lib/lang';
@@ -85,9 +89,19 @@ interface Props {
   onDraftStatus: (sessionId: string, hasDraft: boolean) => void;
   onQueueStatus: (sessionId: string, count: number) => void;
   onSchedulePrompt: (text: string) => void;
+  onToggleGoals: () => void;
   onOpenGoals: () => void;
+  goalsOpen: boolean;
+  goalSetup: boolean;
+  onGoalSetupChange: (v: boolean) => void;
+  goalStore: GoalStore;
+  onGoalStoreChange: (next: GoalStore) => void;
+  goalSessions: Array<{ id: string; title: string }>;
+  runningSessions: Array<{ id: string; title: string; current: boolean }>;
+  onJumpToSession: (id: string) => void;
   goalGauge: Goal | null;
   onStopGoal: () => void;
+  onBumpGoal: (delta: number) => void;
   scheduledFire: { sessionId: string; text: string; nonce: number } | null;
   onScheduledConsumed: (nonce: number) => void;
   onSlashCommand: (id: string) => void;
@@ -499,6 +513,8 @@ export default function ChatView(props: Props) {
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement | null>(null);
+  const [approvalMenuOpen, setApprovalMenuOpen] = useState(false);
+  const approvalMenuRef = useRef<HTMLDivElement | null>(null);
   const [sessionOnlyModel, setSessionOnlyModel] = useState(true);
   const recogRef = useRef<SpeechRecog | null>(null);
   const reqRef = useRef<string | null>(null);
@@ -1495,7 +1511,7 @@ export default function ChatView(props: Props) {
   }, [modelPickerOpen]);
 
   useEffect(() => {
-    if (!actionMenuOpen && !modelPickerOpen) return;
+    if (!actionMenuOpen && !modelPickerOpen && !approvalMenuOpen) return;
     const onPointerDown = (e: PointerEvent) => {
       const target = e.target as Node | null;
       if (!target) return;
@@ -1506,6 +1522,9 @@ export default function ChatView(props: Props) {
       if (modelPickerOpen && !modelPickerRef.current?.contains(target)) {
         setModelPickerOpen(false);
       }
+      if (approvalMenuOpen && !approvalMenuRef.current?.contains(target)) {
+        setApprovalMenuOpen(false);
+      }
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -1515,6 +1534,7 @@ export default function ChatView(props: Props) {
         }
         if (actionMenuOpen) setActionMenuOpen(false);
         if (modelPickerOpen) setModelPickerOpen(false);
+        if (approvalMenuOpen) setApprovalMenuOpen(false);
       }
     };
     document.addEventListener('pointerdown', onPointerDown);
@@ -1523,12 +1543,13 @@ export default function ChatView(props: Props) {
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKey);
     };
-  }, [actionMenuOpen, modelPickerOpen, reasoningOpen]);
+  }, [actionMenuOpen, modelPickerOpen, approvalMenuOpen, reasoningOpen]);
 
   useEffect(() => {
     if (run) {
       setActionMenuOpen(false);
       setModelPickerOpen(false);
+      setApprovalMenuOpen(false);
       setReasoningOpen(false);
     }
   }, [run]);
@@ -1544,7 +1565,6 @@ export default function ChatView(props: Props) {
   const reasoningLabel = (v: string) => reasoningEfforts.find(([x]) => x === v)?.[1] || v || strings.settings.cliDefault;
   const effModel = resolveModel(session, settings);
   const effEffort = resolveEffort(session, settings);
-  const sessionOverridden = hasOverride(session);
   const sessionEffortValue = sanitizeEffort(session.effortOverride);
   const sessionModelValue = sanitizeModel(session.modelOverride);
 
@@ -1562,6 +1582,16 @@ export default function ChatView(props: Props) {
     // Same ownership rule as the model: an overridden thread keeps its own.
     if (v && session.mspSessionId && hasBridge() && !sanitizeEffort(session.effortOverride)) {
       api().mspSetReasoning(session.id, v).catch(() => setNotice(cv.reasoningSetFailed));
+    }
+  };
+
+  const approvalLabel = (v: string) => approvalModeLabel(v, strings.settings);
+  const changeApproval = (v: string) => {
+    const mode = sanitizeApprovalMode(v);
+    cbRef.current.onPatchSettings({ approvalMode: mode });
+    // Empty means CLI default: nothing to push, the thread keeps its mode.
+    if (mode && session.mspSessionId && hasBridge()) {
+      api().mspSetApprovalMode(session.id, mode).catch(() => setNotice(cv.approvalSetFailed));
     }
   };
 
@@ -1740,7 +1770,14 @@ export default function ChatView(props: Props) {
     void send(buildExecutePrompt(planText, lang), { ignoreAttachments: true, normal: true });
   };
 
-  const send = async (raw?: string, options: { preserveDraft?: boolean; ignoreAttachments?: boolean; normal?: boolean; displayText?: string; auto?: boolean } = {}) => {
+  const send = async (raw?: string, options: { preserveDraft?: boolean; ignoreAttachments?: boolean; normal?: boolean; displayText?: string; auto?: boolean; rawWire?: boolean } = {}) => {
+    // Goal-setup mode hijacks composer-originated submits (Enter / send
+    // button / idle interrupt): the typed line becomes a goal and starts
+    // it immediately instead of going out as a chat message.
+    if (raw === undefined && props.goalSetup && !run) {
+      submitGoalSetup();
+      return;
+    }
     const text = (raw ?? input).trim();
     const attachments = options.ignoreAttachments ? [] : attach;
     if ((!text && attachments.length === 0) || run) return;
@@ -1791,9 +1828,12 @@ export default function ChatView(props: Props) {
       } catch { /* checkpoint best-effort */ }
     }
     planTurnRef.current = planTurn;
-    // The bubble shows the user's own words; the plan contract travels on
-    // the wire only.
-    const wire = planTurn ? buildPlanPrompt(full, lang) : full;
+    // The bubble shows the user's own words; the plan contract and the
+    // linked goal context travel on the wire only. rawWire callers (goal
+    // kickoff) already built the exact wire — wrapping again would inject
+    // the goal twice or drag in a stale previously-active goal.
+    const base = planTurn ? buildPlanPrompt(full, lang) : full;
+    const wire = options.rawWire ? base : applyGoalContext(base, activeLinkedGoal(props.goalStore, session.id), lang);
     try {
       const ov = sendOverrides(cbRef.current.session);
       const res = await api().chatStart(wire, folder, cbRef.current.session.id, cbRef.current.session.mspSessionId, planTurn || undefined, Object.keys(ov).length > 0 ? ov : undefined);
@@ -1841,6 +1881,57 @@ export default function ChatView(props: Props) {
         done: true,
       });
     }
+  };
+
+  // Goal kickoff: starting a goal runs the agent immediately — no extra
+  // user message needed. The composer's draft is preserved. When a turn
+  // is already running (or no CLI bridge), report false so the panel says
+  // the goal rides along from the next message instead.
+  const runGoalNow = (goal: Goal) => {
+    if (run || !hasBridge()) return false;
+    const wire = buildGoalKick(goal, lang);
+    if (!wire) return false;
+    void send(wire, {
+      displayText: formatStr(cv.goalKickBubble, { title: goal.title }),
+      auto: true,
+      ignoreAttachments: true,
+      normal: true,
+      preserveDraft: true,
+      rawWire: true,
+    });
+    return true;
+  };
+
+  // Goal-setup mode: the next composer submit becomes the goal title —
+  // the goal is created, linked to this session, and started at once.
+  const enterGoalSetup = () => {
+    setActionMenuOpen(false);
+    props.onGoalSetupChange(true);
+    composerInputRef.current?.focus();
+  };
+
+  const submitGoalSetup = () => {
+    const title = input.trim();
+    if (!title) return;
+    const created = createGoal({ title });
+    if (!created) return;
+    if (props.goalStore.goals.length >= MAX_GOALS) {
+      setNotice(formatStr(gt.full, { n: MAX_GOALS }));
+      return;
+    }
+    const next = startGoalInSession(
+      normalizeGoalStore({ goals: addGoal(props.goalStore.goals, created), activeGoalId: props.goalStore.activeGoalId }),
+      created.id,
+      session.id,
+    );
+    props.onGoalStoreChange(next);
+    props.onGoalSetupChange(false);
+    setInput('');
+    setFileMention(null);
+    promptHistoryIndexRef.current = null;
+    setNotice('');
+    const startedGoal = next.goals.find((item) => item.id === created.id) || created;
+    setNotice(runGoalNow(startedGoal) ? gt.startedRun : gt.started);
   };
 
   const queuePrompt = () => {
@@ -2310,21 +2401,60 @@ export default function ChatView(props: Props) {
           <span>{notice}</span>
         </div>
       )}
+      {props.paneActive && props.runningSessions.length > 0 && (
+        <div className="run-status" role="status" aria-label={cv.runStripLabel}>
+          <span className="t-dot running" aria-hidden="true" />
+          <div className="run-status-list">
+            {props.runningSessions.map((item) => item.current ? (
+              <span key={item.id} className="run-status-self">{item.title} · {cv.runStripCurrent}</span>
+            ) : (
+              <button
+                key={item.id}
+                type="button"
+                className="run-status-jump"
+                title={formatStr(cv.runStripJump, { title: item.title })}
+                aria-label={formatStr(cv.runStripJump, { title: item.title })}
+                onClick={() => props.onJumpToSession(item.id)}
+              >
+                {item.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {props.goalGauge && (
-        <div className="goal-gauge" role="status" aria-label={`${gt.progress} ${props.goalGauge.progress}%`}>
+        <div className={`goal-gauge${props.goalGauge.status === 'done' ? ' is-done' : ''}`} role="status" aria-label={`${gt.gaugeOpen}: ${props.goalGauge.title} ${props.goalGauge.progress}%`}>
           <button
             type="button"
             className="goal-gauge-main"
-            onClick={props.onOpenGoals}
+            onClick={props.onToggleGoals}
             title={gt.gaugeOpen}
             aria-label={`${gt.gaugeOpen}: ${props.goalGauge.title}`}
           >
             <TargetIcon size={13} />
             <span className="goal-gauge-title">{props.goalGauge.title}</span>
-            <span className="goal-gauge-bar" aria-hidden="true">
-              <span className="goal-gauge-fill" style={{ width: `${props.goalGauge.progress}%` }} />
-            </span>
-            <span className="goal-gauge-pct">{props.goalGauge.progress}%</span>
+          </button>
+          <span className="goal-bar goal-gauge-bar" aria-hidden="true">
+            <span className="goal-bar-fill" style={{ width: `${props.goalGauge.progress}%` }} />
+          </span>
+          <button
+            type="button"
+            className="goal-gauge-bump"
+            onClick={() => props.onBumpGoal(-10)}
+            title={gt.bumpDown}
+            aria-label={gt.bumpDown}
+          >
+            −10
+          </button>
+          <span className="goal-gauge-pct">{props.goalGauge.progress}%</span>
+          <button
+            type="button"
+            className="goal-gauge-bump"
+            onClick={() => props.onBumpGoal(10)}
+            title={gt.bumpUp}
+            aria-label={gt.bumpUp}
+          >
+            +10
           </button>
           <button
             type="button"
@@ -2713,7 +2843,7 @@ export default function ChatView(props: Props) {
           }}
         />
       )}
-      <footer className="composer">
+      <footer className={`composer${props.paneActive && props.goalsOpen ? ' composer-has-panel' : ''}${props.paneActive && props.goalSetup ? ' composer-has-setup' : ''}`}>
         {run && input.trim() && (
           <div className="interrupt-bar" role="group" aria-label={cv.interruptBarLabel}>
             <span className="interrupt-bar-head">{cv.interruptBarHead}</span>
@@ -2761,8 +2891,45 @@ export default function ChatView(props: Props) {
             )}
           </div>
         )}
+        {props.paneActive && props.goalsOpen && (
+          <GoalsPanel
+            store={props.goalStore}
+            onStoreChange={props.onGoalStoreChange}
+            sessions={props.goalSessions}
+            activeSessionId={session.id}
+            onJumpToSession={props.onJumpToSession}
+            onGoalStarted={runGoalNow}
+            onNewViaChat={enterGoalSetup}
+            onClose={() => { props.onToggleGoals(); composerInputRef.current?.focus(); }}
+          />
+        )}
+        {props.paneActive && props.goalSetup && (
+          <div className="goal-setup" role="status">
+            <TargetIcon size={13} />
+            <span className="goal-setup-main">
+              <b>{gt.setupTitle}</b>
+              <span>{gt.setupHint}</span>
+            </span>
+            <button
+              type="button"
+              className="btn goal-setup-list"
+              onClick={() => { props.onOpenGoals(); props.onGoalSetupChange(false); }}
+            >
+              {gt.setupList}
+            </button>
+            <button
+              type="button"
+              className="icon-btn goal-setup-cancel"
+              onClick={() => props.onGoalSetupChange(false)}
+              title={gt.setupCancel}
+              aria-label={gt.setupCancel}
+            >
+              <XIcon size={12} />
+            </button>
+          </div>
+        )}
         <div
-          className={dropActive || dropPathActive ? 'composer-box composer-drop-active' : 'composer-box'}
+          className={`composer-box${dropActive || dropPathActive ? ' composer-drop-active' : ''}${props.paneActive && props.goalsOpen ? ' composer-panel-above' : ''}${props.paneActive && props.goalSetup ? ' composer-setup-above' : ''}`}
           onDragEnter={(event) => {
             const types = Array.from(event.dataTransfer.types);
             const isProjectPath = types.includes('application/x-musician-file-path');
@@ -2968,6 +3135,11 @@ export default function ChatView(props: Props) {
                 setFileMention(null);
                 return;
               }
+              if (props.goalSetup && !composing && e.key === 'Escape') {
+                e.preventDefault();
+                props.onGoalSetupChange(false);
+                return;
+              }
               if (fileMention && !composing && fileMentionResults.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
                 e.preventDefault();
                 const delta = e.key === 'ArrowDown' ? 1 : -1;
@@ -3006,7 +3178,7 @@ export default function ChatView(props: Props) {
               }
               void attachPastedImage(file);
             }}
-            placeholder={run ? (awaitingUserInput ? cv.composerPhWait : cv.composerPhRun) : cv.composerPh}
+            placeholder={props.goalSetup ? gt.setupPlaceholder : (run ? (awaitingUserInput ? cv.composerPhWait : cv.composerPhRun) : cv.composerPh)}
             rows={3}
           />
           <div className="composer-bar">
@@ -3117,12 +3289,9 @@ export default function ChatView(props: Props) {
 
                   <button
                     type="button"
-                    className={`composer-action-row${props.goalGauge ? ' active' : ''}`}
+                    className={`composer-action-row${props.goalSetup || props.goalGauge ? ' active' : ''}`}
                     role="menuitem"
-                    onClick={() => {
-                      setActionMenuOpen(false);
-                      props.onOpenGoals();
-                    }}
+                    onClick={enterGoalSetup}
                     aria-label={gt.menuBtn}
                   >
                     <span className="action-row-icon"><TargetIcon size={15} /></span>
@@ -3130,9 +3299,6 @@ export default function ChatView(props: Props) {
                       <span className="action-row-title">{gt.menuBtn}</span>
                       <span className="action-row-desc">{gt.menuDesc}</span>
                     </span>
-                    {props.goalGauge && (
-                      <span className="action-row-badge on">{props.goalGauge.progress}%</span>
-                    )}
                   </button>
 
                   {folder && (
@@ -3153,6 +3319,51 @@ export default function ChatView(props: Props) {
                       </span>
                     </button>
                   )}
+                </div>
+              )}
+            </div>
+
+            <div className="composer-approval-anchor" ref={approvalMenuRef}>
+              <button
+                type="button"
+                className={`approval-picker-btn ${approvalMenuOpen ? 'open' : ''}`}
+                onClick={() => setApprovalMenuOpen((prev) => !prev)}
+                disabled={!!run}
+                title={cv.approvalPickerTitle}
+                aria-label={cv.approvalPickerTitle}
+                aria-haspopup="listbox"
+                aria-expanded={approvalMenuOpen}
+              >
+                <span className="approval-picker-name">
+                  {approvalLabel(settings.approvalMode)}
+                </span>
+                <ChevronDownIcon size={11} className="chevron" />
+              </button>
+
+              {approvalMenuOpen && (
+                <div
+                  className="composer-approval-menu"
+                  role="listbox"
+                  aria-label={cv.approvalPickerTitle}
+                >
+                  {APPROVAL_MODE_VALUES.map((v) => {
+                    const selected = sanitizeApprovalMode(settings.approvalMode) === v;
+                    return (
+                      <button
+                        key={v || '(cli)'}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={`model-menu-row ${selected ? 'active' : ''}`}
+                        onClick={() => { changeApproval(v); setApprovalMenuOpen(false); }}
+                      >
+                        <span className="model-menu-check">
+                          {selected ? <CheckIcon size={12} /> : null}
+                        </span>
+                        <span className="model-menu-name">{approvalLabel(v)}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -3202,8 +3413,8 @@ export default function ChatView(props: Props) {
                 <span className="model-picker-name">
                   {effModel.value ? modelLabel(effModel.value) : strings.settings.cliDefault}
                 </span>
-                {sessionOverridden && (
-                  <span className="model-picker-dot" title={cv.tuneSessionMark} />
+                {session.engine === 'msp' && (
+                  <span className="model-picker-msp" role="status" title={strings.settings.engineMsp} aria-label={strings.settings.engineMsp} />
                 )}
                 <ChevronDownIcon size={11} className="chevron" />
               </button>
@@ -3361,7 +3572,11 @@ export default function ChatView(props: Props) {
               )}
             </div>
 
-            {session.engine === 'msp' ? <span className="tag tag-msp">MSP</span> : <span className="tag">exec</span>}
+            {activeLinkedGoal(props.goalStore, session.id) && (
+              <span className="goal-wire-chip" role="status" title={cv.goalAttached} aria-label={cv.goalAttached}>
+                <TargetIcon size={11} />
+              </span>
+            )}
             {run ? (
               <>
                 <button

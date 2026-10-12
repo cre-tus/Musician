@@ -11,6 +11,7 @@ export interface CliSettings {
   engine: 'auto' | 'msp' | 'exec';
   approvalMode: string;
   reasoningEffort: string;
+  contributorMode: boolean;
   browserAgent: boolean;
   browserHome: string;
   backgroundNotifications: boolean;

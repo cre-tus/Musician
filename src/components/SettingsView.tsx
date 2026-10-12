@@ -8,6 +8,7 @@ import type { CustomSlashCommand } from '../lib/custom-slash.mjs';
 import { mirrorStoredKey } from '../lib/durable-state.mjs';
 import { cleanHooks, normalizeHookTimeout, validateHooks } from '../lib/hooks.mjs';
 import { formatStr } from '../lib/i18n.mjs';
+import { APPROVAL_MODE_VALUES, approvalModeLabel } from '../lib/approval-modes.mjs';
 import { useLang, useStrings } from '../lib/lang';
 import { BackIcon, CopyIcon, SearchIcon, XIcon } from './icons';
 
@@ -39,13 +40,7 @@ export default function SettingsView(props: Props) {
   const lang = useLang();
   const strings = useStrings();
   const st = strings.settings;
-  const approvalModes: [string, string][] = [
-    ['', st.cliDefault],
-    ['allowAll', st.approvalAllowAll],
-    ['promptUnmatched', st.approvalPromptUnmatched],
-    ['onRequest', st.approvalOnRequest],
-    ['denyUnmatched', st.approvalDenyUnmatched],
-  ];
+  const approvalModes: [string, string][] = APPROVAL_MODE_VALUES.map((v) => [v, approvalModeLabel(v, st)]);
   const [modelText, setModelText] = useState(settings.model);
   const [extraArgs, setExtraArgs] = useState(settings.extraArgs);
   const [workdir, setWorkdir] = useState(settings.workdir);
@@ -428,6 +423,24 @@ export default function SettingsView(props: Props) {
               placeholder={st.modelPlaceholder}
               spellCheck={false}
             />
+          </div>
+          <div className="setting-row">
+            <div>
+              <b>{st.contributorLabel}</b>
+              <p>{st.contributorDesc}</p>
+            </div>
+            <div className="segmented" role="group" aria-label={st.contributorLabel}>
+              <button
+                className={settings.contributorMode !== false ? 'seg active' : 'seg'}
+                aria-pressed={settings.contributorMode !== false}
+                onClick={() => commit({ contributorMode: true })}
+              >{st.onBtn}</button>
+              <button
+                className={settings.contributorMode === false ? 'seg active' : 'seg'}
+                aria-pressed={settings.contributorMode === false}
+                onClick={() => commit({ contributorMode: false })}
+              >{st.offBtn}</button>
+            </div>
           </div>
           <div className="setting-row col">
             <div>

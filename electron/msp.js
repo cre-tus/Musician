@@ -297,7 +297,10 @@ class MspEngine {
     };
     let spawned;
     let sessionMcp = true;
-    const extraArgs = readonly ? ['--disable-write', '--disable-shell'] : null;
+    // Contributor mode (Muse 1.4.6+): per-process override, fixed for the
+    // host's lifetime. Legacy settings without the key read as on.
+    const contributorArgs = ['--contributor-mode', settings && settings.contributorMode === false ? 'off' : 'on'];
+    const extraArgs = [...(readonly ? ['--disable-write', '--disable-shell'] : []), ...contributorArgs];
     try {
       spawned = await this._handshake(bin, cwd, FULL_CAPS, onStderr, extraArgs);
     } catch (firstErr) {
