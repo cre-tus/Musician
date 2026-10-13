@@ -496,9 +496,10 @@ class MspEngine {
     // id, no new listeners. The running turn's own stream carries the
     // steered items (flagged `steered`) through to its single completion,
     // so spawning a second listener pair would double-report and corrupt
-    // the turnId bookkeeping. If the old turn ended mid-submit and this
-    // started a fresh one instead, fall through to the normal lane rather
-    // than dropping the fresh turn's output.
+    // the turnId bookkeeping. If the old turn ended mid-submit, this call
+    // already opened a fresh turn carrying the prompt — track it instead
+    // of resubmitting, which would run the same request twice and drop
+    // the fresh turn's output.
     if (o.steer && t.turnId) {
       const liveId = t.turnId;
       const steered = await t.session.sendUserTurn({ input: [{ type: 'text', text: String(text) }], displayText: short, ifBusy: 'steer' });
@@ -506,12 +507,17 @@ class MspEngine {
         if (steered && steered.completed && typeof steered.completed.catch === 'function') steered.completed.catch(() => {});
         return { turnId: liveId, steered: true, mspSessionId: t.mspSessionId, mcpHealth: mcpHealth || null };
       }
-      return this.sendTurn(threadKey, text, { ...o, steer: false });
+      return this._trackTurn(t, mcpHealth, steered, o);
     }
     const turn = await t.session.sendUserTurn({ input: [{ type: 'text', text: String(text) }], displayText: short });
+    return this._trackTurn(t, mcpHealth, turn, o);
+  }
+
+  // Track a freshly opened turn on its thread: stream items in the
+  // background while completion settles separately, so the ack returns
+  // promptly and the UI can show progress + cancel.
+  _trackTurn(t, mcpHealth, turn, o) {
     t.turnId = turn.turnId;
-    // Stream items in the background; completion settles separately so the
-    // ack returns promptly and the UI can show progress + cancel.
     void (async () => {
       try {
         for await (const item of turn.items()) {

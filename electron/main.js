@@ -1680,6 +1680,14 @@ async function startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, r
     running.delete(reqId);
     throw err;
   }
+  if (turn && turn.steered) {
+    // Folded into the live turn: the original running entry owns the
+    // lifecycle (its own completion clears it). Keeping this second entry
+    // would leave its timer armed past the turn's end, firing into — and
+    // cancelling — the next task on the same thread.
+    clearTimeout(timer);
+    running.delete(reqId);
+  }
   return { ok: true, reqId, engine: 'msp', mspSessionId: turn.mspSessionId, turnId: turn.turnId, steered: turn.steered || undefined, cmd: `msp turn ${turn.turnId}`, cwd: workdir, mcpHealth: turn.mcpHealth || null };
 }
 
