@@ -37,6 +37,8 @@ const TRANSCRIPT_TEXT = {
     fail: '실패',
     none: '없음',
     workLog: '작업 로그',
+    toolHistory: '도구 실행 이력',
+    compaction: '압축 기록',
     fileChanges: '파일 변경',
     reverted: '되돌림',
     emptyBody: '*(내용 없음)*',
@@ -62,6 +64,8 @@ const TRANSCRIPT_TEXT = {
     fail: 'Failed',
     none: 'none',
     workLog: 'Work log',
+    toolHistory: 'Tool history',
+    compaction: 'Compaction',
     fileChanges: 'File changes',
     reverted: 'Reverted',
     emptyBody: '*(empty)*',
@@ -96,6 +100,15 @@ export function formatSessionTranscript(session, options = {}) {
     if (message?.verify?.length) details.push(`**${t.verify}:**\n${message.verify.map((item) => `- ${item.ok ? t.pass : t.fail} · \`${item.script}\` · ${t.exitCode} ${item.code ?? t.none}${item.ts ? ` · ${isoTimestamp(item.ts)}` : ''}${item.tail ? `\n\n${fenced(item.tail)}` : ''}`).join('\n')}`);
     if (message?.stderr) details.push(`**stderr**\n\n${fenced(message.stderr)}`);
     if (message?.work?.length) details.push(`**${t.workLog}**\n\n${fenced(message.work.join('\n'))}`);
+    if (message?.tools?.length) details.push(`**${t.toolHistory}**\n${message.tools.map((tool) => {
+      const exit = tool?.exitCode === null || tool?.exitCode === undefined ? '' : `, exit ${tool.exitCode}`;
+      return `- \`${tool?.tool || ''}\`${tool?.target ? ` ${tool.target}` : ''} (${tool?.status || ''}${exit})${tool?.error ? ` — ${tool.error}` : ''}${tool?.output ? `\n\n${fenced(tool.output)}` : ''}`;
+    }).join('\n')}`);
+    if (message?.compaction) {
+      const c = message.compaction;
+      const delta = c?.tokensBefore != null && c?.tokensAfter != null ? ` ${c.tokensBefore} → ${c.tokensAfter}` : '';
+      details.push(`**${t.compaction}:** ${c?.outcome || ''}${delta}${c?.trigger ? ` · ${c.trigger}` : ''}${c?.reason ? ` (${c.reason})` : ''}${c?.summary ? `\n\n${fenced(c.summary)}` : ''}`);
+    }
     if (message?.reverted) details.push(`**${t.fileChanges}:** ${t.reverted}`);
     return `## ${role}${date}\n\n${text || t.emptyBody}${details.length ? `\n\n${details.join('\n\n')}` : ''}`;
   });

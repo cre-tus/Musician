@@ -34,6 +34,7 @@ const { isSafeBranchName, isSafeCloneSource, isSafeRepoRelativePath, redactRemot
 const { createProjectSessionCache } = require('./codex-session-cache');
 const { createProjectPathMatcher } = require('./project-path');
 const { projectClaudeSessions, readClaudeContext, claudeQueueArgs } = require('./claude-sessions');
+const { createPr, findOpenPr, getCheckRuns, getDefaultBranch, getRepoContext, listPrComments, updatePr } = require('./github');
 const { showWindowsToastAsync } = require('../scripts/windows-toast');
 
 let win = null;
@@ -94,12 +95,15 @@ const DEFAULT_SETTINGS = {
   extraArgs: '',
   workdir: '',
   timeoutMs: 0,
+  maxTurnTokens: 0,
+  maxAutoRuns: 0,
   theme: 'dark',
   codeTheme: 'auto',
   engine: 'auto',
   approvalMode: '',
   reasoningEffort: '',
   contributorMode: true,
+  githubToken: '',
   browserAgent: true,
   browserHome: '',
   hooks: [],
@@ -923,6 +927,7 @@ ipcMain.handle('mudex:save-settings', (_e, patch) => {
   const next = { ...loadSettings(), ...(patch || {}) };
   next.theme = sanitizeTheme(next.theme);
   next.lang = sanitizeLang(next.lang);
+  next.githubToken = typeof next.githubToken === 'string' ? next.githubToken.trim().slice(0, 200) : '';
   return { ok: true, settings: persistSettings(next) };
 });
 
@@ -1157,9 +1162,11 @@ ipcMain.handle('mudex:cli-test', async () => {
   };
 });
 
-ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessionId, plan, overrides }) => {
+ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessionId, plan, review, steer, overrides }) => {
   const s = loadSettings();
   const planMode = plan === true;
+  const reviewMode = review === true;
+  const steerMode = steer === true;
   const want = s.engine || 'auto';
   // Per-session overrides (sanitized; keep in sync with REASONING_EFFORTS in
   // msp.js and EFFORT_VALUES in src/lib/session-overrides.mjs).
@@ -1173,9 +1180,12 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
   const sendOv = { ...(ovModel ? { model: ovModel } : {}), ...(ovEffort ? { effort: ovEffort } : {}) };
   // turn-start hooks run first (awaited, bounded); failures notify only.
   await fireHooks('turn-start', { cwd: cwd || s.workdir || app.getPath('home'), engine: want, reqId: threadKey || 'start', settings: s });
+  if (steerMode && want !== 'msp' && want !== 'auto') {
+    return { ok: false, error: 'STEER_UNSUPPORTED', engine: 'exec', cmd: '', cwd: cwd || s.workdir || app.getPath('home') };
+  }
   if (want === 'msp' || want === 'auto') {
     try {
-      return await startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, sendOv);
+      return await startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, reviewMode, steerMode, sendOv);
     } catch (err) {
       const msg = String((err && err.message) || err);
       if (want === 'msp' || !/CLI_NOT_FOUND|SERVE_NEEDS_EXE|SERVE_HANDSHAKE_FAIL|ENOENT/.test(msg)) {
@@ -1185,6 +1195,11 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
       }
       // auto + serve unavailable → fall through to exec below
     }
+  }
+  // Steering needs the live MSP turn: an exec fallback cannot absorb the
+  // instruction, and running it as a fresh turn would mislead. Fail loudly.
+  if (steerMode) {
+    return { ok: false, error: 'STEER_UNSUPPORTED', engine: 'exec', cmd: '', cwd: cwd || s.workdir || app.getPath('home') };
   }
   // Prompt is ALWAYS the last positional arg: `muse exec [options] <prompt>`.
   // A bare `muse "<prompt>"` would seed the interactive TUI and hang — never do that.
@@ -1201,9 +1216,10 @@ ipcMain.handle('mudex:chat-start', async (_e, { prompt, cwd, threadKey, mspSessi
     promptFile = writePromptFile(promptText);
     argv = ['exec', ...splitArgs(s.extraArgs), ...modelFlag, ...effortFlag, ...contributorFlag, '--prompt-file', promptFile];
   }
-  // Plan mode is enforced by the engine, not the prompt: no workspace
-  // writes, no shell. Flags go right after 'exec', prompt stays last.
-  if (planMode) argv.splice(1, 0, '--disable-write', '--disable-shell');
+  // Plan/review turns are enforced by the engine, not the prompt: no
+  // workspace writes, no shell. Flags go right after 'exec', prompt stays
+  // last.
+  if (planMode || reviewMode) argv.splice(1, 0, '--disable-write', '--disable-shell');
   const workdir = cwd || s.workdir || app.getPath('home');
   const cmd = [quoteArg(resolved.path), ...argv.map(quoteArg)].join(' ');
   const reqId = `r${Date.now()}-${(reqSeq += 1)}`;
@@ -1512,6 +1528,76 @@ ipcMain.handle('mudex:git-push', async (_e, { cwd }) => {
   return { ok: true };
 });
 
+// ---------------------------------------------------------------- GitHub PR/CI (no gh CLI: git CLI + REST)
+function ghDeps() {
+  const s = loadSettings();
+  return { runGit, fetchFn: (...args) => fetch(...args), token: typeof s.githubToken === 'string' && s.githubToken ? s.githubToken : null };
+}
+
+async function ghContext(cwd) {
+  if (!cwd) return { ok: false, error: 'NO_CWD' };
+  const deps = ghDeps();
+  const ctx = await getRepoContext(deps, cwd);
+  if (!ctx.ok) return ctx;
+  return { ok: true, ctx, token: deps.token };
+}
+
+ipcMain.handle('mudex:gh-pr-status', async (_e, { cwd }) => {
+  const c = await ghContext(cwd);
+  if (!c.ok) return c;
+  const { ctx, token } = c;
+  if (!ctx.branch) return { ok: true, pr: null, branch: '', repo: `${ctx.owner}/${ctx.repo}` };
+  const r = await findOpenPr({ fetchFn: (...args) => fetch(...args), token }, ctx);
+  if (!r.ok) return r;
+  return { ok: true, pr: r.pr, branch: ctx.branch, repo: `${ctx.owner}/${ctx.repo}` };
+});
+
+ipcMain.handle('mudex:gh-pr-create', async (_e, { cwd, title, body, base }) => {
+  const c = await ghContext(cwd);
+  if (!c.ok) return c;
+  const { ctx, token } = c;
+  if (!ctx.branch) return { ok: false, error: 'NO_BRANCH' };
+  const cleanTitle = String(title || '').trim().slice(0, 200);
+  if (!cleanTitle) return { ok: false, error: 'NO_ARGS' };
+  let targetBase = String(base || '').trim();
+  if (!targetBase) {
+    const d = await getDefaultBranch({ fetchFn: (...args) => fetch(...args), token }, ctx);
+    if (!d.ok) return d;
+    targetBase = d.base;
+  }
+  return createPr({ fetchFn: (...args) => fetch(...args), token }, {
+    owner: ctx.owner, repo: ctx.repo, head: ctx.branch, base: targetBase,
+    title: cleanTitle, body: String(body || '').slice(0, 5000),
+  });
+});
+
+ipcMain.handle('mudex:gh-pr-update', async (_e, { cwd, number, title, body }) => {
+  const c = await ghContext(cwd);
+  if (!c.ok) return c;
+  const { ctx, token } = c;
+  return updatePr({ fetchFn: (...args) => fetch(...args), token }, {
+    owner: ctx.owner, repo: ctx.repo, number: Number(number) || 0,
+    title: String(title || ''), body: typeof body === 'string' ? body.slice(0, 5000) : undefined,
+  });
+});
+
+ipcMain.handle('mudex:gh-pr-comments', async (_e, { cwd, number }) => {
+  const c = await ghContext(cwd);
+  if (!c.ok) return c;
+  const { ctx, token } = c;
+  return listPrComments({ fetchFn: (...args) => fetch(...args), token }, {
+    owner: ctx.owner, repo: ctx.repo, number: Number(number) || 0,
+  });
+});
+
+ipcMain.handle('mudex:gh-ci-status', async (_e, { cwd }) => {
+  const c = await ghContext(cwd);
+  if (!c.ok) return c;
+  const { ctx, token } = c;
+  if (!ctx.sha) return { ok: false, error: 'NO_SHA' };
+  return getCheckRuns({ fetchFn: (...args) => fetch(...args), token }, ctx);
+});
+
 ipcMain.handle('mudex:git-clone', async (_e, { url, target }) => {
   const source = String(url || '').trim();
   const dest = String(target || '').trim();
@@ -1535,11 +1621,13 @@ ipcMain.handle('mudex:git-clone', async (_e, { url, target }) => {
   return { ok: true, path: absTarget };
 });
 
-async function startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, sendOv) {
+async function startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, reviewMode, steerMode, sendOv) {
   const baseKey = threadKey || `t-${Date.now()}-${(reqSeq += 1)}`;
-  // Plan turns live on a separate read-only host + session: same suffix as
-  // planThreadKey() in src/lib/plan-mode.mjs (kept in sync by test).
-  const key = planMode ? `${baseKey}\0plan` : baseKey;
+  // Plan/review turns live on separate read-only hosts + sessions: same
+  // NUL-separated suffixes as planThreadKey()/reviewThreadKey() in src/lib
+  // (kept in sync by test). A review turn must never resume the main
+  // session either. Steering always targets the live main thread.
+  const key = planMode ? `${baseKey}\0plan` : reviewMode ? `${baseKey}\0review` : baseKey;
   const reqId = `m${Date.now()}-${(reqSeq += 1)}`;
   const workdir = cwd || s.workdir || app.getPath('home');
   const timeoutMs = Number(s.timeoutMs) || 0;
@@ -1561,10 +1649,11 @@ async function startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, s
       settings: s,
       modelOverride: sendOv && sendOv.model,
       effortOverride: sendOv && sendOv.effort,
-      // A plan turn must never resume the main session: fresh plan session
-      // on the read-only host, so the main history stays untouched.
-      mspSessionId: planMode ? undefined : mspSessionId,
-      readonly: planMode || undefined,
+      steer: steerMode || undefined,
+      // A plan/review turn must never resume the main session: fresh
+      // session on the read-only host, so the main history stays untouched.
+      mspSessionId: planMode || reviewMode ? undefined : mspSessionId,
+      readonly: planMode || reviewMode || undefined,
       onItem: ({ turnId, item }) => send('msp:item', { reqId, threadKey: key, turnId, item }),
       onDone: ({ outcome, error }) => {
         clearTimeout(timer);
@@ -1591,7 +1680,7 @@ async function startMspChat(prompt, cwd, s, threadKey, mspSessionId, planMode, s
     running.delete(reqId);
     throw err;
   }
-  return { ok: true, reqId, engine: 'msp', mspSessionId: turn.mspSessionId, turnId: turn.turnId, cmd: `msp turn ${turn.turnId}`, cwd: workdir, mcpHealth: turn.mcpHealth || null };
+  return { ok: true, reqId, engine: 'msp', mspSessionId: turn.mspSessionId, turnId: turn.turnId, steered: turn.steered || undefined, cmd: `msp turn ${turn.turnId}`, cwd: workdir, mcpHealth: turn.mcpHealth || null };
 }
 
 ipcMain.handle('msp:prewarm', async (_e, { cwd }) => {

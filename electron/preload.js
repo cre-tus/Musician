@@ -43,8 +43,13 @@ contextBridge.exposeInMainWorld('mudex', {
   getSettings: () => ipcRenderer.invoke('mudex:get-settings'),
   saveSettings: (patch) => ipcRenderer.invoke('mudex:save-settings', patch),
   cliTest: () => ipcRenderer.invoke('mudex:cli-test'),
-  chatStart: (prompt, cwd, threadKey, mspSessionId, plan, overrides) =>
-    ipcRenderer.invoke('mudex:chat-start', { prompt, cwd, threadKey, mspSessionId, plan, overrides }),
+  chatStart: (prompt, cwd, threadKey, mspSessionId, plan, overrides, review, steer) =>
+    ipcRenderer.invoke('mudex:chat-start', { prompt, cwd, threadKey, mspSessionId, plan, overrides, review, steer }),
+  ghPrStatus: (cwd) => ipcRenderer.invoke('mudex:gh-pr-status', { cwd }),
+  ghPrCreate: (cwd, title, body, base) => ipcRenderer.invoke('mudex:gh-pr-create', { cwd, title, body, base }),
+  ghPrUpdate: (cwd, number, title, body) => ipcRenderer.invoke('mudex:gh-pr-update', { cwd, number, title, body }),
+  ghPrComments: (cwd, number) => ipcRenderer.invoke('mudex:gh-pr-comments', { cwd, number }),
+  ghCiStatus: (cwd) => ipcRenderer.invoke('mudex:gh-ci-status', { cwd }),
   chatCancel: (reqId) => ipcRenderer.invoke('mudex:chat-cancel', { reqId }),
   mspPrewarm: (cwd) => ipcRenderer.invoke('msp:prewarm', { cwd }),
   mspDecide: (key, choiceId, feedback) => ipcRenderer.invoke('msp:decide', { key, choiceId, feedback }),
@@ -73,6 +78,7 @@ contextBridge.exposeInMainWorld('mudex', {
   onMspUserInputSettled: (fn) => listen('msp:user-input-settled', fn),
   onMspUsage: (fn) => listen('msp:usage', fn),
   onMspTokens: (fn) => listen('msp:tokens', fn),
+  onMspContext: (fn) => listen('msp:context', fn),
   onMspSessionsChanged: (fn) => listen('msp:sessions-changed', fn),
   onMspHostDead: (fn) => listen('msp:host-dead', fn),
   onMspGateFallback: (fn) => listen('msp:gate-fallback', fn),

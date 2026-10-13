@@ -46,11 +46,14 @@ export default function SettingsView(props: Props) {
   const [workdir, setWorkdir] = useState(settings.workdir);
   const [cliPath, setCliPath] = useState(settings.cliPath);
   const [timeoutSec, setTimeoutSec] = useState(String(Math.round(settings.timeoutMs / 1000)));
+  const [maxTokens, setMaxTokens] = useState(String(settings.maxTurnTokens || 0));
+  const [maxAutoRuns, setMaxAutoRuns] = useState(String(settings.maxAutoRuns || 0));
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<TestResult | null>(null);
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [hostModels, setHostModels] = useState<HostModel[]>([]);
   const [browserHome, setBrowserHome] = useState(settings.browserHome);
+  const [githubToken, setGithubToken] = useState(settings.githubToken || '');
   const [mcpCmd, setMcpCmd] = useState('');
   const [mcpBlock, setMcpBlock] = useState('');
   const [mcpSettingsPath, setMcpSettingsPath] = useState('');
@@ -136,7 +139,10 @@ export default function SettingsView(props: Props) {
   useEffect(() => setWorkdir(settings.workdir), [settings.workdir]);
   useEffect(() => setCliPath(settings.cliPath), [settings.cliPath]);
   useEffect(() => setTimeoutSec(String(Math.round(settings.timeoutMs / 1000))), [settings.timeoutMs]);
+  useEffect(() => setMaxTokens(String(settings.maxTurnTokens || 0)), [settings.maxTurnTokens]);
+  useEffect(() => setMaxAutoRuns(String(settings.maxAutoRuns || 0)), [settings.maxAutoRuns]);
   useEffect(() => setBrowserHome(settings.browserHome), [settings.browserHome]);
+  useEffect(() => setGithubToken(settings.githubToken || ''), [settings.githubToken]);
 
   const commit = (patch: Partial<CliSettings>) => {
     props.onSave({ ...props.settings, ...patch });
@@ -146,6 +152,16 @@ export default function SettingsView(props: Props) {
     const sec = Math.min(86400, Math.max(0, parseInt(timeoutSec, 10) || 0));
     setTimeoutSec(String(sec));
     commit({ timeoutMs: sec * 1000 });
+  };
+  const commitMaxTokens = () => {
+    const n = Math.min(100000000, Math.max(0, parseInt(maxTokens, 10) || 0));
+    setMaxTokens(String(n));
+    commit({ maxTurnTokens: n });
+  };
+  const commitMaxAutoRuns = () => {
+    const n = Math.min(1000, Math.max(0, parseInt(maxAutoRuns, 10) || 0));
+    setMaxAutoRuns(String(n));
+    commit({ maxAutoRuns: n });
   };
   const blurOnEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') e.currentTarget.blur();
@@ -444,6 +460,24 @@ export default function SettingsView(props: Props) {
           </div>
           <div className="setting-row col">
             <div>
+              <b>{st.ghTokenLabel}</b>
+              <p>{st.ghTokenDesc}</p>
+            </div>
+            <input
+              type="password"
+              value={githubToken}
+              onChange={(e) => setGithubToken(e.target.value)}
+              onBlur={() => {
+                if (githubToken !== (settings.githubToken || '')) commit({ githubToken });
+              }}
+              onKeyDown={blurOnEnter}
+              placeholder={st.ghTokenPh}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+          <div className="setting-row col">
+            <div>
               <b>{st.argsLabel}</b>
               <p>
                 {st.argsDescPre}<code>muse exec</code>{st.argsDescPost}
@@ -486,6 +520,34 @@ export default function SettingsView(props: Props) {
               value={timeoutSec}
               onChange={(e) => setTimeoutSec(e.target.value)}
               onBlur={commitTimeout}
+              onKeyDown={blurOnEnter}
+              inputMode="numeric"
+            />
+          </div>
+          <div className="setting-row">
+            <div>
+              <b>{st.maxTokensLabel}</b>
+              <p>{st.maxTokensDesc}</p>
+            </div>
+            <input
+              className="narrow"
+              value={maxTokens}
+              onChange={(e) => setMaxTokens(e.target.value)}
+              onBlur={commitMaxTokens}
+              onKeyDown={blurOnEnter}
+              inputMode="numeric"
+            />
+          </div>
+          <div className="setting-row">
+            <div>
+              <b>{st.maxAutoRunsLabel}</b>
+              <p>{st.maxAutoRunsDesc}</p>
+            </div>
+            <input
+              className="narrow"
+              value={maxAutoRuns}
+              onChange={(e) => setMaxAutoRuns(e.target.value)}
+              onBlur={commitMaxAutoRuns}
               onKeyDown={blurOnEnter}
               inputMode="numeric"
             />

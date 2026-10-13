@@ -14,6 +14,15 @@ function quoteLines(text) {
     .join('\n');
 }
 
+export function formatBrowserSectionAnnotation({ pageTitle, pageUrl, tagPath, text, linkUrl, question }, uiLang = 'ko') {
+  const prompt = formatBrowserSectionPrompt({ pageTitle, pageUrl, tagPath, text, linkUrl }, uiLang);
+  if (!prompt) return '';
+  const asked = String(question || '').trim().slice(0, 2000);
+  if (!asked) return prompt;
+  const label = uiLang === 'en' ? 'Question' : '질문';
+  return `${prompt}\n\n${label}: ${asked}`;
+}
+
 export function formatBrowserSectionPrompt({ pageTitle, pageUrl, tagPath, text, linkUrl }, uiLang = 'ko') {
   const source = String(text || '');
   if (!source.trim()) return '';

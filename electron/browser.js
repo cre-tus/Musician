@@ -9,6 +9,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 const { browserTabShortcut } = require('./browser-shortcuts');
 const { normalizeUrl, resolveAddressInput } = require('./browser-url');
@@ -373,7 +374,8 @@ function handleFoundInPage(rec, emit, result) {
 }
 
 // "Ask about this section" capture: the element under the right-click,
-// climbed past inline wrappers until the block carries real text.
+// climbed past inline wrappers until the block carries real text. The
+// carrying block is outlined and its box reported for a section screenshot.
 const SECTION_JS = `/*MX-SECTION*/({ x, y }) => {
   const cap = (s, n) => String(s || '').slice(0, n);
   let el = null;
@@ -402,7 +404,25 @@ const SECTION_JS = `/*MX-SECTION*/({ x, y }) => {
   try {
     if (el.tagName === 'IMG' || el.tagName === 'VIDEO' || el.tagName === 'AUDIO') mediaSrc = String(el.currentSrc || el.src || '').slice(0, 500);
   } catch { mediaSrc = ''; }
-  return { tagPath: chain.join(' > ').slice(0, 240), text: cap((node.innerText || '').trim(), 2000), href, mediaSrc };
+  try {
+    const prev = document.querySelector ? document.querySelector('[data-mx-ask]') : null;
+    if (prev && prev !== node) {
+      if (prev.style) prev.style.outline = '';
+      if (prev.dataset) delete prev.dataset.mxAsk;
+      else if (prev.removeAttribute) prev.removeAttribute('data-mx-ask');
+    }
+  } catch { /* marking is best-effort */ }
+  try {
+    if (node.style) node.style.outline = '2px solid #f59e0b';
+    if (node.dataset) node.dataset.mxAsk = '1';
+    else if (node.setAttribute) node.setAttribute('data-mx-ask', '1');
+  } catch { /* marking is best-effort */ }
+  let rect = null;
+  try {
+    const box = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+    if (box && box.width >= 1 && box.height >= 1) rect = { x: box.x, y: box.y, width: box.width, height: box.height };
+  } catch { rect = null; }
+  return { tagPath: chain.join(' > ').slice(0, 240), text: cap((node.innerText || '').trim(), 2000), href, mediaSrc, rect };
 }`;
 
 // Native context-menu labels for browser tabs. The main process cannot read
@@ -416,19 +436,61 @@ function askSectionMenuLabels(lang) {
 // Merges the right-click params with the captured section into the
 // ask-section event payload. A pre-selection wins over the element text;
 // null means there is nothing worth asking about (empty margin click).
-function buildAskSectionPayload(params, extracted, page) {
+function buildAskSectionPayload(params, extracted, page, imagePath) {
   const p = params && typeof params === 'object' ? params : {};
   const x = extracted && typeof extracted === 'object' ? extracted : {};
   const selection = String(p.selectionText || '').trim();
   const text = (selection || String(x.text || '').trim()).slice(0, 4000);
-  if (!text) return null;
+  const shot = String(imagePath || '');
+  if (!text && !shot) return null;
   return {
     pageTitle: String((page && page.title) || ''),
     pageUrl: String((page && page.url) || ''),
     tagPath: String(x.tagPath || ''),
     text,
     linkUrl: String(p.linkURL || x.href || x.mediaSrc || ''),
+    ...(shot ? { imagePath: shot } : null),
   };
+}
+
+// Section screenshots share the pasted-images temp dir (same 48h cleanup and
+// reader caps as mudex:save-pasted-image) and the full-page capture size cap.
+const SECTION_CAPTURE_MAX_BYTES = 6 * 1024 * 1024;
+
+// Intersect the reported section box with the visible viewport, so a tall
+// node captures only its visible part. Null means capture nothing (text-only).
+function sectionCaptureRect(extracted, viewport) {
+  try {
+    const r = extracted && typeof extracted === 'object' ? extracted.rect : null;
+    const vw = Math.floor(Number(viewport && viewport.width) || 0);
+    const vh = Math.floor(Number(viewport && viewport.height) || 0);
+    if (!r || typeof r !== 'object' || vw < 1 || vh < 1) return null;
+    const x = Math.max(0, Math.round(Number(r.x)));
+    const y = Math.max(0, Math.round(Number(r.y)));
+    const w = Math.round(Number(r.width));
+    const h = Math.round(Number(r.height));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)) return null;
+    const width = Math.min(x + w, vw) - x;
+    const height = Math.min(y + h, vh) - y;
+    if (width < 1 || height < 1) return null;
+    return { x, y, width, height };
+  } catch {
+    return null;
+  }
+}
+
+function saveSectionCapture(png, opts) {
+  const buf = Buffer.isBuffer(png) ? png : Buffer.from(png || []);
+  if (buf.length === 0) throw new Error('EMPTY_CAPTURE');
+  if (buf.length > SECTION_CAPTURE_MAX_BYTES) throw new Error('CAPTURE_TOO_LARGE');
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const dir = String(o.dir || path.join(os.tmpdir(), 'Musician', 'pasted-images'));
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = o.now != null ? o.now : Date.now();
+  const uniq = o.randomId || crypto.randomUUID();
+  const target = path.join(dir, `${stamp}-${uniq}-section.png`);
+  fs.writeFileSync(target, buf, { flag: 'wx' });
+  return target;
 }
 
 // ---------------------------------------------------------------- engine
@@ -571,7 +633,19 @@ class BrowserEngine {
               } catch {
                 extracted = null;
               }
-              const payload = buildAskSectionPayload(params, extracted, { title: safeGet(wc, 'getTitle'), url: safeGet(wc, 'getURL') });
+              let imagePath = '';
+              try {
+                const bounds = view.getBounds();
+                const rect = sectionCaptureRect(extracted, { width: bounds.width, height: bounds.height });
+                if (rect) {
+                  const img = await wc.capturePage(rect);
+                  const png = img ? img.toPNG() : null;
+                  if (png && png.length > 0) imagePath = saveSectionCapture(png);
+                }
+              } catch {
+                imagePath = '';
+              }
+              const payload = buildAskSectionPayload(params, extracted, { title: safeGet(wc, 'getTitle'), url: safeGet(wc, 'getURL') }, imagePath);
               emit(payload ? { type: 'ask-section', ...payload } : { type: 'ask-section-empty' });
             })();
           },
@@ -1097,4 +1171,4 @@ function safeGet(wc, method) {
   }
 }
 
-module.exports = { BrowserEngine, createBridgeServer, normalizeUrl, resolveAddressInput, resolveBrowserStartUrl, isNavigableBrowserUrl, BRIDGE_FILE, staleRefError, shouldReportLoadFailure, handleFoundInPage, SECTION_JS, buildAskSectionPayload, askSectionMenuLabels };
+module.exports = { BrowserEngine, createBridgeServer, normalizeUrl, resolveAddressInput, resolveBrowserStartUrl, isNavigableBrowserUrl, BRIDGE_FILE, staleRefError, shouldReportLoadFailure, handleFoundInPage, SECTION_JS, buildAskSectionPayload, askSectionMenuLabels, sectionCaptureRect, saveSectionCapture };

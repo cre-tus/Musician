@@ -66,6 +66,7 @@ async function searchFiles(cwd, query, options = {}) {
     const rootStat = await fs.stat(root);
     if (!rootStat.isDirectory()) return { ok: false, error: 'NOT_A_DIRECTORY' };
     const isPathAllowed = compilePathFilter(options);
+    const includeDirs = options?.includeDirs === true;
     const ignored = new Set(['.git', 'node_modules', '.next', '.vite', 'dist', 'out', 'target', '.venv', 'venv', '__pycache__', 'coverage']);
     const stack = [root];
     const files = [];
@@ -73,6 +74,18 @@ async function searchFiles(cwd, query, options = {}) {
     const maxResults = 180;
     const deadline = Date.now() + 700;
     let visited = 0;
+    const scoreTerms = (lowerBase, lowerPath) => {
+      let score = 0;
+      for (const term of terms) {
+        const baseScore = fuzzyScore(term, lowerBase);
+        const rawPathScore = fuzzyScore(term, lowerPath);
+        const pathScore = rawPathScore < 0 ? -1 : Math.max(1, rawPathScore - 100);
+        const best = Math.max(baseScore, pathScore);
+        if (best < 0) return -1;
+        score += best;
+      }
+      return score;
+    };
     while (stack.length && visited < maxVisited && Date.now() < deadline) {
       if (isCancelled?.()) return { ok: false, error: 'CANCELLED' };
       const dir = stack.pop();
@@ -81,32 +94,29 @@ async function searchFiles(cwd, query, options = {}) {
       for (const entry of entries) {
         visited++;
         if (entry.isDirectory()) {
-          if (!ignored.has(entry.name.toLowerCase())) stack.push(path.join(dir, entry.name));
+          if (ignored.has(entry.name.toLowerCase())) continue;
+          const fullPath = path.join(dir, entry.name);
+          stack.push(fullPath);
+          if (includeDirs) {
+            const relativePath = path.relative(root, fullPath).replace(/\\/g, '/');
+            if (!isPathAllowed(relativePath)) continue;
+            const score = scoreTerms(entry.name.normalize('NFKC').toLocaleLowerCase(), relativePath.normalize('NFKC').toLocaleLowerCase());
+            if (score >= 0) files.push({ path: fullPath, relativePath, isDir: true, score });
+          }
           continue;
         }
         if (!entry.isFile()) continue;
         const fullPath = path.join(dir, entry.name);
         const relativePath = path.relative(root, fullPath).replace(/\\/g, '/');
         if (!isPathAllowed(relativePath)) continue;
-        const lowerBase = entry.name.normalize('NFKC').toLocaleLowerCase();
-        const lowerPath = relativePath.normalize('NFKC').toLocaleLowerCase();
-        let score = 0;
-        let matches = true;
-        for (const term of terms) {
-          const baseScore = fuzzyScore(term, lowerBase);
-          const rawPathScore = fuzzyScore(term, lowerPath);
-          const pathScore = rawPathScore < 0 ? -1 : Math.max(1, rawPathScore - 100);
-          const best = Math.max(baseScore, pathScore);
-          if (best < 0) { matches = false; break; }
-          score += best;
-        }
-        if (matches) files.push({ path: fullPath, relativePath, score });
+        const score = scoreTerms(entry.name.normalize('NFKC').toLocaleLowerCase(), relativePath.normalize('NFKC').toLocaleLowerCase());
+        if (score >= 0) files.push({ path: fullPath, relativePath, score });
         if (visited >= maxVisited || Date.now() >= deadline) break;
       }
     }
     files.sort((a, b) => b.score - a.score || a.relativePath.localeCompare(b.relativePath));
     const truncated = stack.length > 0 || visited >= maxVisited || Date.now() >= deadline || files.length > maxResults;
-    return { ok: true, files: files.slice(0, maxResults).map(({ path: filePath, relativePath }) => ({ path: filePath, relativePath })), truncated };
+    return { ok: true, files: files.slice(0, maxResults).map(({ path: filePath, relativePath, isDir }) => (isDir ? { path: filePath, relativePath, isDir: true } : { path: filePath, relativePath })), truncated };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }

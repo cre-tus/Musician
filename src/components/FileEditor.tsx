@@ -3,6 +3,7 @@ import type { EditorApi, OpenFile } from '../types';
 import { api, hasBridge, languageFromPath } from '../lib/mudex';
 import { relativePathFromRoot } from '../lib/path-utils.mjs';
 import { formatEditorSelectionPrompt } from '../lib/editor-selection-prompt.mjs';
+import { formatLineCommentPrompt } from '../lib/line-comment.mjs';
 import { adjustImageZoom, imageZoomPercent } from '../lib/image-zoom.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { CheckIcon, ChevronRightIcon, ClockIcon, CopyIcon, DiffIcon, ExternalLinkIcon, RefreshIcon, SaveIcon, SearchIcon, SendIcon, StarIcon } from './icons';
@@ -138,6 +139,21 @@ export default function FileEditor(props: Props) {
       ...selection,
       relativePath: relativePathFromRoot(props.workspaceRoot, file.path),
       language: languageFromPath(file.path),
+    }, lang);
+    if (prompt) window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text: prompt } }));
+  };
+
+  const addLineCommentToPrompt = (ed: { getPosition?: () => { lineNumber: number } | null }) => {
+    let line = 0;
+    try {
+      line = ed?.getPosition?.()?.lineNumber || 0;
+    } catch {
+      return;
+    }
+    if (!line) return;
+    const prompt = formatLineCommentPrompt({
+      relativePath: relativePathFromRoot(props.workspaceRoot, file.path),
+      line,
     }, lang);
     if (prompt) window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text: prompt } }));
   };
@@ -454,6 +470,13 @@ export default function FileEditor(props: Props) {
                   precondition: 'editorHasSelection',
                   run: () => addSelectionToPrompt(),
                 });
+                ed.getModifiedEditor().addAction({
+                  id: 'musician.commentLine',
+                  label: s.editor.commentLine,
+                  contextMenuGroupId: 'navigation',
+                  contextMenuOrder: 1.7,
+                  run: (inner) => addLineCommentToPrompt(inner),
+                });
                 ed.getModifiedEditor().onDidChangeModelContent(() => {
                   onChange(ed.getModifiedEditor().getValue());
                 });
@@ -487,6 +510,13 @@ export default function FileEditor(props: Props) {
                   contextMenuOrder: 1.6,
                   precondition: 'editorHasSelection',
                   run: () => addSelectionToPrompt(),
+                });
+                ed.addAction({
+                  id: 'musician.commentLine',
+                  label: s.editor.commentLine,
+                  contextMenuGroupId: 'navigation',
+                  contextMenuOrder: 1.7,
+                  run: (inner) => addLineCommentToPrompt(inner),
                 });
               }}
               onChange={(v) => onChange(v ?? '')}

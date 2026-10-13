@@ -16,7 +16,7 @@ import { readFileSearchPreferences, writeFileSearchPreferences } from '../lib/fi
 import type { FileSearchPreferences } from '../lib/file-search-preferences.mjs';
 import { readFileSearchHistory, recordFileSearchQuery, writeFileSearchHistory } from '../lib/file-search-history.mjs';
 import type { FileSearchHistoryEntry } from '../lib/file-search-history.mjs';
-import type { FileEntry, GitStatusKind } from '../types';
+import type { FileEntry, GhCheckSummary, GhPrComment, GhPrInfo, GitStatusKind } from '../types';
 
 interface EntryDialogState {
   mode: 'create-file' | 'create-folder' | 'rename' | 'delete';
@@ -99,6 +99,17 @@ export default function FilesTab(props: Props) {
   const [branchCreateBusy, setBranchCreateBusy] = useState(false);
   const [branchError, setBranchError] = useState('');
   const [newBranchName, setNewBranchName] = useState('');
+  const [ghLoaded, setGhLoaded] = useState(false);
+  const [ghBusy, setGhBusy] = useState(false);
+  const [ghError, setGhError] = useState('');
+  const [ghRepo, setGhRepo] = useState('');
+  const [ghBranch, setGhBranch] = useState('');
+  const [ghPr, setGhPr] = useState<GhPrInfo | null>(null);
+  const [ghTitle, setGhTitle] = useState('');
+  const [ghCreating, setGhCreating] = useState(false);
+  const [ghChecks, setGhChecks] = useState<GhCheckSummary | null>(null);
+  const [ghComments, setGhComments] = useState<GhPrComment[] | null>(null);
+  const [ghShowComments, setGhShowComments] = useState(false);
 
   const absForChanged = (file: string) => `${folder}${folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\'}${file.replace(/\//g, '\\')}`;
 
@@ -390,6 +401,111 @@ export default function FilesTab(props: Props) {
     }
   };
   useEffect(() => { void refreshGitBranch(); }, [folder]);
+
+  const ghErrText = (code: string) =>
+    code === 'NEED_TOKEN' || code === 'BAD_TOKEN' ? ft.prNeedToken
+    : code === 'NO_GITHUB_REMOTE' || code === 'NO_ORIGIN' ? ft.prNoRemote
+    : formatStr(ft.prFailed, { err: code });
+
+  const refreshGh = async () => {
+    if (!folder || !hasBridge() || ghBusy) return;
+    setGhBusy(true);
+    setGhError('');
+    try {
+      const [pr, ci] = await Promise.all([api().ghPrStatus(folder), api().ghCiStatus(folder)]);
+      if (!pr.ok) {
+        setGhError(ghErrText(pr.error || ''));
+        setGhLoaded(true);
+        return;
+      }
+      setGhRepo(pr.repo || '');
+      setGhBranch(pr.branch || '');
+      setGhPr(pr.pr || null);
+      if (!pr.pr) setGhTitle(pr.branch || '');
+      else setGhTitle(pr.pr.title || '');
+      if (ci.ok) {
+        setGhChecks({
+          total: ci.total || 0,
+          okCount: ci.okCount || 0,
+          failedCount: ci.failedCount || 0,
+          pendingCount: ci.pendingCount || 0,
+          runs: ci.runs || [],
+        });
+      } else {
+        setGhChecks(null);
+      }
+      setGhLoaded(true);
+    } catch (error) {
+      setGhError(error instanceof Error ? error.message : String(error));
+      setGhLoaded(true);
+    } finally {
+      setGhBusy(false);
+    }
+  };
+  useEffect(() => {
+    setGhLoaded(false);
+    setGhPr(null);
+    setGhChecks(null);
+    setGhComments(null);
+    setGhShowComments(false);
+    setGhError('');
+    void refreshGh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folder]);
+
+  const submitGhPr = async () => {
+    const title = ghTitle.trim();
+    if (!folder || !hasBridge() || !title || ghCreating) return;
+    setGhCreating(true);
+    setGhError('');
+    try {
+      const r = ghPr
+        ? await api().ghPrUpdate(folder, ghPr.number, title)
+        : await api().ghPrCreate(folder, title);
+      if (!r.ok) {
+        setGhError(ghErrText(r.error || ''));
+        return;
+      }
+      if (r.pr) setGhPr(r.pr);
+      props.onNotice(formatStr(ft.prCreated, { n: r.pr?.number ?? ghPr?.number ?? 0 }), 'git');
+      void refreshGh();
+    } catch (error) {
+      setGhError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGhCreating(false);
+    }
+  };
+
+  const toggleGhComments = async () => {
+    if (ghShowComments) {
+      setGhShowComments(false);
+      return;
+    }
+    setGhShowComments(true);
+    if (ghComments || !ghPr || !folder || !hasBridge()) return;
+    try {
+      const r = await api().ghPrComments(folder, ghPr.number);
+      if (r.ok) setGhComments(r.comments || []);
+      else setGhError(ghErrText(r.error || ''));
+    } catch (error) {
+      setGhError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const applyGhComment = (c: GhPrComment) => {
+    const at = c.path ? ` (${c.path}${c.line ? `:${c.line}` : ''})` : '';
+    const quote = c.body.split('\n').slice(0, 12).join('\n');
+    const text = ghPr
+      ? `PR #${ghPr.number} 코멘트 반영 요청 (${c.author}${at}):\n\n> ${quote.split('\n').join('\n> ')}`
+      : `PR 코멘트 반영 요청 (${c.author}${at}):\n\n> ${quote.split('\n').join('\n> ')}`;
+    window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text } }));
+  };
+
+  const openGhUrl = (url: string) => {
+    if (!url) return;
+    if (hasBridge()) void api().openExternalLink(url).catch(() => {});
+    else window.open(url, '_blank', 'noopener,noreferrer');
+  };
 
   const doGitSync = async (op: 'pull' | 'push') => {
     if (!folder || !hasBridge() || gitSyncBusy) return;
@@ -1108,6 +1224,103 @@ export default function FilesTab(props: Props) {
             <button className="mini-btn" type="button" title={ft.cloneTitle} aria-label={ft.cloneBtn} onClick={() => { setCloneError(''); setCloneOpen(true); }}>
               {ft.cloneBtn}
             </button>
+          </div>
+          <div className="gh-pr-section">
+            <div className="gh-pr-head">
+              <span className="section-cap">{ft.prTitle} · {ft.ciTitle}</span>
+              {ghRepo && <span className="gh-pr-repo" title={ghRepo}>{ghRepo}</span>}
+              <button className="icon-btn" type="button" title={ft.prRefresh} aria-label={ft.prRefresh} disabled={ghBusy} onClick={() => void refreshGh()}>
+                <RefreshIcon size={13} />
+              </button>
+            </div>
+            {!ghLoaded ? (
+              <div className="empty-note">{strings.common.loading}</div>
+            ) : ghError ? (
+              <div className="tree-error explorer-entry-error" role="alert">{ghError}</div>
+            ) : (
+              <>
+                {ghPr ? (
+                  <div className="gh-pr-row">
+                    <button className="mini-btn" type="button" title={ghPr.url} onClick={() => openGhUrl(ghPr.url)}>
+                      {formatStr(ft.prOpen, { n: ghPr.number })}
+                    </button>
+                    <span className="gh-pr-title" title={ghPr.title}>{ghPr.title}</span>
+                  </div>
+                ) : (
+                  <div className="empty-note">{ghBranch ? ft.prEmpty : ft.prNoRemote}</div>
+                )}
+                {ghBranch && (
+                  <div className="gh-pr-row">
+                    <input
+                      value={ghTitle}
+                      onChange={(event) => setGhTitle(event.target.value)}
+                      placeholder={ft.prTitlePh}
+                      aria-label={ft.prTitlePh}
+                      spellCheck={false}
+                      disabled={ghCreating}
+                    />
+                    <button className="mini-btn" type="button" disabled={ghCreating || !ghTitle.trim()} onClick={() => void submitGhPr()}>
+                      {ghCreating ? ft.prCreating : ghPr ? ft.prUpdate : ft.prCreate}
+                    </button>
+                  </div>
+                )}
+                {ghChecks && ghChecks.total > 0 ? (
+                  <div className="gh-ci-block">
+                    <div className="gh-ci-summary">
+                      {formatStr(ft.checksLabel, { ok: ghChecks.okCount, total: ghChecks.total })}
+                      {ghChecks.failedCount > 0 && <span className="code-bad"> · {formatStr(ft.ciFailed, { n: ghChecks.failedCount })}</span>}
+                      {ghChecks.pendingCount > 0 && <span> · {formatStr(ft.ciPending, { n: ghChecks.pendingCount })}</span>}
+                    </div>
+                    {ghChecks.runs.map((run, i) => (
+                      <div key={`${run.name}:${i}`} className="gh-check-row">
+                        <span className={run.conclusion === 'success' ? 'code-ok' : run.conclusion === null || run.status !== 'completed' ? '' : 'code-bad'}>
+                          {run.conclusion || run.status}
+                        </span>
+                        <button className="gh-check-link" type="button" title={run.url} onClick={() => openGhUrl(run.url)}>
+                          {run.name}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-note">{ft.ciEmpty}</div>
+                )}
+                {ghPr && (
+                  <div className="gh-comments-block">
+                    <button className="mini-btn" type="button" aria-expanded={ghShowComments} onClick={() => void toggleGhComments()}>
+                      {ft.commentsTitle}{ghComments ? ` (${ghComments.length})` : ''}
+                    </button>
+                    {ghShowComments && (
+                      ghComments && ghComments.length > 0 ? (
+                        <ul className="gh-comments-list">
+                          {ghComments.map((c) => (
+                            <li key={c.id} className="gh-comment-row">
+                              <div className="gh-comment-head">
+                                <b>{c.author || '?'}</b>
+                                {c.path && <span className="gh-comment-path" title={c.path}>{c.path}{c.line ? `:${c.line}` : ''}</span>}
+                              </div>
+                              <div className="gh-comment-body">{c.body.split('\n').slice(0, 6).join('\n')}</div>
+                              <div className="gh-comment-actions">
+                                <button className="mini-btn" type="button" onClick={() => applyGhComment(c)}>
+                                  {ft.commentApply}
+                                </button>
+                                {c.url && (
+                                  <button className="mini-btn" type="button" title={c.url} aria-label={c.url} onClick={() => openGhUrl(c.url)}>
+                                    ↗
+                                  </button>
+                                )}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="empty-note">{ft.commentsEmpty}</div>
+                      )
+                    )}
+                  </div>
+                )}
+              </>
+            )}
           </div>
           {sections.changed && changedFiles.length === 0 ? (
             <div className="empty-note">{ft.noChanges}</div>

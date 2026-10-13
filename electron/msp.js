@@ -117,6 +117,8 @@ function slimItem(it) {
   for (const k of [
     'turnId', 'text', 'summary', 'displayText', 'fallbackText', 'message', 'visibleOutput',
     'tool', 'args', 'failureReason', 'durationMs', 'usage', 'exitCode', 'approvalId',
+    'outcome', 'trigger', 'reason', 'strategyId', 'summarizedThrough',
+    'tokensBefore', 'tokensAfter', 'recordedAt',
   ]) {
     if (it[k] !== undefined) o[k] = it[k];
   }
@@ -490,6 +492,22 @@ class MspEngine {
       }
     }
     const short = String(text).length > 200 ? `${String(text).slice(0, 200)}…` : String(text);
+    // Steering folds the input into the LIVE turn: same thread, same turn
+    // id, no new listeners. The running turn's own stream carries the
+    // steered items (flagged `steered`) through to its single completion,
+    // so spawning a second listener pair would double-report and corrupt
+    // the turnId bookkeeping. If the old turn ended mid-submit and this
+    // started a fresh one instead, fall through to the normal lane rather
+    // than dropping the fresh turn's output.
+    if (o.steer && t.turnId) {
+      const liveId = t.turnId;
+      const steered = await t.session.sendUserTurn({ input: [{ type: 'text', text: String(text) }], displayText: short, ifBusy: 'steer' });
+      if (!steered || !steered.turnId || steered.turnId === liveId) {
+        if (steered && steered.completed && typeof steered.completed.catch === 'function') steered.completed.catch(() => {});
+        return { turnId: liveId, steered: true, mspSessionId: t.mspSessionId, mcpHealth: mcpHealth || null };
+      }
+      return this.sendTurn(threadKey, text, { ...o, steer: false });
+    }
     const turn = await t.session.sendUserTurn({ input: [{ type: 'text', text: String(text) }], displayText: short });
     t.turnId = turn.turnId;
     // Stream items in the background; completion settles separately so the

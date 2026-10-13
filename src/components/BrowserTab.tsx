@@ -4,7 +4,8 @@ import { agentBadgeState } from '../lib/browser-agent-badge.mjs';
 import type { BrowserBookmark } from '../lib/browser-bookmarks.mjs';
 import { isBrowserBookmarked } from '../lib/browser-bookmarks.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
-import { formatBrowserSectionPrompt } from '../lib/browser-section-prompt.mjs';
+import { formatBrowserSectionAnnotation } from '../lib/browser-section-prompt.mjs';
+import { ANNOTATION_TOKEN, stageAnnotation } from '../lib/annotations.mjs';
 import type { BrowserShortcut } from '../types';
 import { BackIcon, ChevronDownIcon, CopyIcon, ForwardIcon, GlobeIcon, HomeIcon, RefreshIcon, SearchIcon, StarIcon, StopIcon, XIcon } from './icons';
 import { useLang, useStrings } from '../lib/lang';
@@ -59,6 +60,31 @@ export default function BrowserTab(props: Props) {
   const [agentAt, setAgentAt] = useState(0);
   const [agentMethod, setAgentMethod] = useState('');
   const [health, setHealth] = useState<{ ok: boolean; reason?: string | null } | null>(null);
+  const [askPanel, setAskPanel] = useState<{ pageTitle: string; pageUrl: string; tagPath: string; text: string; linkUrl: string; imagePath: string } | null>(null);
+  const [askQuestion, setAskQuestion] = useState('');
+
+  const closeAskPanel = () => {
+    setAskPanel(null);
+    setAskQuestion('');
+  };
+  const submitAskPanel = () => {
+    if (!askPanel) return;
+    const full = formatBrowserSectionAnnotation({
+      pageTitle: askPanel.pageTitle,
+      pageUrl: askPanel.pageUrl,
+      tagPath: askPanel.tagPath,
+      text: askPanel.text,
+      linkUrl: askPanel.linkUrl,
+      question: askQuestion,
+    }, lang);
+    if (!full && !askPanel.imagePath) {
+      props.onNotice(s.browser.askSectionEmpty);
+      return;
+    }
+    if (full) stageAnnotation(full);
+    window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text: full ? ANNOTATION_TOKEN : '', imagePath: askPanel.imagePath || undefined } }));
+    closeAskPanel();
+  };
 
   // Live bridge signal (same pre-flight the engine runs). Never claims a
   // connection from the setting alone.
@@ -177,14 +203,19 @@ export default function BrowserTab(props: Props) {
         setFindMatches(ev.matches);
         setActiveMatchOrdinal(ev.activeMatchOrdinal);
       } else if (ev.type === 'ask-section') {
-        const prompt = formatBrowserSectionPrompt({
+        // The question is typed here in the browser tab, not in chat: the
+        // panel below collects it, and chat only ever sees the compressed
+        // annotation token (the full payload waits in the annotation queue
+        // until the message is sent).
+        setAskPanel({
           pageTitle: ev.pageTitle,
           pageUrl: ev.pageUrl,
           tagPath: ev.tagPath,
           text: ev.text,
           linkUrl: ev.linkUrl,
-        }, lang);
-        if (prompt) window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text: prompt } }));
+          imagePath: typeof ev.imagePath === 'string' ? ev.imagePath : '',
+        });
+        setAskQuestion('');
       } else if (ev.type === 'ask-section-empty') {
         props.onNotice(s.browser.askSectionEmpty);
       }
@@ -409,6 +440,32 @@ export default function BrowserTab(props: Props) {
           <button type="button" className="icon-btn" title={s.browser.prevTitle} aria-label={s.browser.prevLabel} disabled={!findMatches} onClick={() => moveFindMatch(false)}><ChevronDownIcon size={13} className="message-find-prev" /></button>
           <button type="button" className="icon-btn" title={s.browser.nextTitle} aria-label={s.browser.nextLabel} disabled={!findMatches} onClick={() => moveFindMatch(true)}><ChevronDownIcon size={13} /></button>
           <button type="button" className="icon-btn" title={s.browser.findCloseTitle} aria-label={s.browser.findCloseLabel} onClick={closeFind}><XIcon size={13} /></button>
+        </div>
+      )}
+      {askPanel && (
+        <div className="browser-ask-panel">
+          <div className="browser-ask-meta">
+            <span className="browser-ask-title">{s.browser.askPanelTitle}</span>
+            <span className="browser-ask-section" title={askPanel.pageUrl}>
+              {askPanel.pageTitle}{askPanel.tagPath ? ` · ${askPanel.tagPath}` : ''}
+            </span>
+            {askPanel.text.trim() && (
+              <span className="browser-ask-excerpt">{askPanel.text.trim().slice(0, 160)}</span>
+            )}
+          </div>
+          <input
+            value={askQuestion}
+            onChange={(event) => setAskQuestion(event.target.value)}
+            placeholder={s.browser.askQuestionPlaceholder}
+            aria-label={s.browser.askPanelTitle}
+            autoFocus
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') { event.preventDefault(); submitAskPanel(); }
+              else if (event.key === 'Escape') { event.preventDefault(); closeAskPanel(); }
+            }}
+          />
+          <button type="button" className="btn" onClick={submitAskPanel}>{s.browser.askSend}</button>
+          <button type="button" className="icon-btn" title={s.browser.askCancel} aria-label={s.browser.askCancel} onClick={closeAskPanel}><XIcon size={13} /></button>
         </div>
       )}
       <div ref={boxRef} className="browser-viewport">

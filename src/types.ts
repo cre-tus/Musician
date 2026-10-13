@@ -6,12 +6,15 @@ export interface CliSettings {
   extraArgs: string;
   workdir: string;
   timeoutMs: number;
+  maxTurnTokens?: number;
+  maxAutoRuns?: number;
   theme: 'light' | 'dark';
   codeTheme: string;
   engine: 'auto' | 'msp' | 'exec';
   approvalMode: string;
   reasoningEffort: string;
   contributorMode: boolean;
+  githubToken?: string;
   browserAgent: boolean;
   browserHome: string;
   backgroundNotifications: boolean;
@@ -55,7 +58,7 @@ export type BrowserEvent =
   | { type: 'find-result'; tabId: string; requestId: number; query: string; matches: number; activeMatchOrdinal: number; finalUpdate: boolean }
   | { type: 'agent'; tabId: string | null; method: string; params: string }
   | { type: 'agent-switch'; tabId: string }
-  | { type: 'ask-section'; tabId: string; pageTitle: string; pageUrl: string; tagPath: string; text: string; linkUrl: string }
+  | { type: 'ask-section'; tabId: string; pageTitle: string; pageUrl: string; tagPath: string; text: string; linkUrl: string; imagePath?: string }
   | { type: 'ask-section-empty'; tabId: string };
 
 export type TermEvent =
@@ -144,9 +147,14 @@ export interface ChatMessage {
   verify?: VerifyResult[];
   reverted?: boolean;
   work?: string[];
+  tools?: ToolRecord[];
+  compaction?: CompactionRecord | null;
   plan?: boolean;
+  review?: boolean;
+  steered?: boolean;
   checkpointId?: string;
   todos?: MspTodo[];
+  completion?: CompletionRecord;
   // System-generated user turns (e.g. interrupt resume) hidden from ↑ history.
   auto?: boolean;
 }
@@ -156,6 +164,45 @@ export interface TokenUsage {
   outputTokens: number;
   cachedTokens?: number;
   reasoningTokens?: number;
+}
+
+export interface ContextPressure {
+  key: string;
+  sessionId: string | null;
+  usedTokens: number | null;
+  windowTokens: number | null;
+  pressure: string | null;
+}
+
+export interface ToolRecord {
+  id: string;
+  kind: string;
+  tool: string;
+  target: string;
+  status: string;
+  durationMs: number | null;
+  exitCode: number | null;
+  error: string;
+  output: string;
+}
+
+export interface CompactionRecord {
+  id: string;
+  outcome: string;
+  trigger: string | null;
+  reason: string | null;
+  strategyId: string | null;
+  summarizedThrough: string | null;
+  tokensBefore: number | null;
+  tokensAfter: number | null;
+  summary: string;
+  recordedAt: string | null;
+  turnId: string | null;
+}
+
+export interface CompletionRecord {
+  state: 'met' | 'open' | 'failed';
+  reasons: string[];
 }
 
 export interface ChangedStat {
@@ -280,6 +327,42 @@ export interface ClaudeSessionInfo {
   updatedAt: string;
 }
 
+export interface GhPrInfo {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  head?: string;
+  base?: string;
+  createdAt?: string | null;
+}
+
+export interface GhPrComment {
+  id: string;
+  kind: 'comment' | 'review';
+  author: string;
+  body: string;
+  path: string | null;
+  line: number | null;
+  createdAt: string;
+  url: string;
+}
+
+export interface GhCheckRun {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string;
+}
+
+export interface GhCheckSummary {
+  total: number;
+  okCount: number;
+  failedCount: number;
+  pendingCount: number;
+  runs: GhCheckRun[];
+}
+
 export interface UsageWindow {
   usedPercent: number;
   resetsAtMs: number;
@@ -325,6 +408,7 @@ export interface ChatStartResult {
   engine?: 'msp' | 'exec';
   mspSessionId?: string;
   turnId?: string;
+  steered?: boolean;
   fallback?: string;
   fallbackReason?: string;
   mcpHealth?: McpHealthEntry[] | null;
@@ -344,7 +428,7 @@ export interface MudexApi {
   renameEntry: (rootPath: string, entryPath: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>;
   deleteEntry: (rootPath: string, entryPath: string) => Promise<{ ok: boolean; error?: string }>;
   revealEntry: (rootPath: string, entryPath: string) => Promise<{ ok: boolean; error?: string }>;
-  searchFiles: (cwd: string, query: string, options?: { include?: string; exclude?: string; scope?: string }) => Promise<{ ok: boolean; files?: { path: string; relativePath: string }[]; truncated?: boolean; error?: string }>;
+  searchFiles: (cwd: string, query: string, options?: { include?: string; exclude?: string; scope?: string; includeDirs?: boolean }) => Promise<{ ok: boolean; files?: { path: string; relativePath: string; isDir?: boolean }[]; truncated?: boolean; error?: string }>;
   searchInFiles: (cwd: string, query: string, options?: { caseSensitive?: boolean; wholeWord?: boolean; include?: string; exclude?: string; scope?: string }) => Promise<{ ok: boolean; matches?: { path: string; relativePath: string; lineNumber: number; lineText: string }[]; truncated?: boolean; error?: string }>;
   readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; error?: string }>;
   pickFiles: () => Promise<{ ok: boolean; cancelled?: boolean; paths?: string[] }>;
@@ -379,7 +463,12 @@ export interface MudexApi {
     resolvedPath?: string;
     source?: string;
   }>;
-  chatStart: (prompt: string, cwd: string, threadKey?: string, mspSessionId?: string, plan?: boolean, overrides?: { model?: string; effort?: string }) => Promise<ChatStartResult>;
+  chatStart: (prompt: string, cwd: string, threadKey?: string, mspSessionId?: string, plan?: boolean, overrides?: { model?: string; effort?: string }, review?: boolean, steer?: boolean) => Promise<ChatStartResult>;
+  ghPrStatus: (cwd: string) => Promise<{ ok: boolean; pr?: GhPrInfo | null; branch?: string; repo?: string; error?: string }>;
+  ghPrCreate: (cwd: string, title: string, body?: string, base?: string) => Promise<{ ok: boolean; pr?: GhPrInfo; error?: string }>;
+  ghPrUpdate: (cwd: string, number: number, title?: string, body?: string) => Promise<{ ok: boolean; pr?: GhPrInfo; error?: string }>;
+  ghPrComments: (cwd: string, number: number) => Promise<{ ok: boolean; comments?: GhPrComment[]; error?: string }>;
+  ghCiStatus: (cwd: string) => Promise<{ ok: boolean; total?: number; okCount?: number; failedCount?: number; pendingCount?: number; runs?: GhCheckRun[]; error?: string }>;
   chatCancel: (reqId: string) => Promise<{ ok: boolean }>;
   mspPrewarm: (cwd: string) => Promise<{ ok: boolean; key?: string; error?: string }>;
   mspDecide: (key: string, choiceId: string, feedback?: string) => Promise<{ ok: boolean }>;
@@ -453,6 +542,7 @@ export interface MudexApi {
   onMspUserInputSettled: (fn: (p: { sessionId: string; userInputId: string }) => void) => () => void;
   onMspUsage: (fn: (p: { key: string; usage: SubscriptionUsage | null }) => void) => () => void;
   onMspTokens: (fn: (p: { sessionId: string | null; turnId: string | null; usage: TokenUsage | null; cumulative: { totalTokens: number } | null }) => void) => () => void;
+  onMspContext: (fn: (p: ContextPressure) => void) => () => void;
   onMspSessionsChanged: (fn: (p: { key: string }) => void) => () => void;
   onMspHostDead: (fn: (p: { key: string; code: number | null }) => void) => () => void;
   onMspGateFallback: (fn: (p: { key: string; requested: string; gate: string; fallback: string }) => void) => () => void;
@@ -476,6 +566,16 @@ export interface MspItem {
   args?: string;
   failureReason?: string;
   durationMs?: number;
+  exitCode?: number;
+  outcome?: string;
+  trigger?: string;
+  reason?: string;
+  strategyId?: string;
+  summarizedThrough?: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  recordedAt?: string;
+  turnId?: string | null;
 }
 
 declare global {
