@@ -7,8 +7,10 @@ import { compareSidebarSessions, readSidebarSessionSort, writeSidebarSessionSort
 import { fuzzyMatchIndexes, scoreSidebarSession } from '../lib/sidebar-session-search.mjs';
 import { matchesSidebarSessionQuery, parseSidebarSessionQuery } from '../lib/sidebar-session-query.mjs';
 import { countSidebarSessionFilters, filterSidebarSessions, isSidebarSessionFailed, readSidebarSessionFilter, writeSidebarSessionFilter } from '../lib/sidebar-session-filter.mjs';
+import { lastResult, sessionStatus } from '../lib/session-status.mjs';
 import { allVisibleSidebarSessionsSelected, selectSidebarSessionRange, selectVisibleSidebarSessions, toggleSidebarSessionSelection, visibleSidebarSessionSelection } from '../lib/sidebar-session-selection.mjs';
 import { normalizePathForComparison } from '../lib/path-utils.mjs';
+import { OLD_THREAD_DAYS, formatStorageBytes, oldSessionIds, summarizeSessionStorage } from '../lib/session-cleanup.mjs';
 import { filterHostSessions } from '../lib/host-session-filter.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import { formatStr } from '../lib/i18n.mjs';
@@ -40,6 +42,7 @@ interface Props {
   sessions: Session[];
   draftSessionIds: string[];
   queuedSessionCounts: Record<string, number>;
+  approvalCounts: Record<string, number>;
   activeId: string;
   groupBy: 'project' | 'status';
   runningIds: string[];
@@ -60,6 +63,8 @@ interface Props {
   onDeleteMany: (ids: string[]) => Promise<boolean>;
   onExportMany: (ids: string[]) => Promise<boolean>;
   onBackupMany: (ids: string[]) => Promise<boolean>;
+  onBackupAll: () => void;
+  onDiagnose: () => void;
   onImport: () => void;
   onToggleArchived: (id: string) => void;
   onRename: (id: string, title: string) => void;
@@ -276,6 +281,13 @@ export default function Sidebar(props: Props) {
       || Number(!!b.pinned) - Number(!!a.pinned) || compareSidebarSessions(a, b, sessionSort)),
     [filtered, sessionSort, q, sessionSearchScores],
   );
+  // Batch-archive candidates: old, active, never running. Reversible via the
+  // archive section, so one click is enough — no confirm round-trip.
+  const archivableOldIds = useMemo(
+    () => oldSessionIds(sessions).filter((id) => id !== activeId && !runningIds.includes(id)),
+    [sessions, activeId, runningIds],
+  );
+  const storageSummary = useMemo(() => summarizeSessionStorage(sessions), [sessions]);
   const visibleSessionIds = useMemo(() => [
     ...activeFiltered.map((session) => session.id),
     ...(selectionMode && (hasQuery || archiveOpen) ? archivedItems.map((session) => session.id) : []),
@@ -441,6 +453,12 @@ export default function Sidebar(props: Props) {
         <button className="side-action" onClick={props.onImport} title={sb.importTitle}>
           <ImportIcon size={15} /> {sb.importBtn}
         </button>
+        <button className="side-action" onClick={props.onBackupAll} title={sb.backupAllTitle}>
+          <ImportIcon size={15} /> {sb.backupAllBtn}
+        </button>
+        <button className="side-action" onClick={props.onDiagnose} title={sb.diagTitle}>
+          <ImportIcon size={15} /> {sb.diagBtn}
+        </button>
         <div className="side-search-wrap" ref={sessionSearchShellRef} onKeyDown={(event) => {
           if (event.key === 'Escape' && queryHelpOpen) {
             event.preventDefault();
@@ -491,7 +509,7 @@ export default function Sidebar(props: Props) {
             <div className="session-search-help-title">{sb.searchHelpHeading}</div>
             <p><code>in:</code> {sb.searchHelpInDesc}</p>
             <div className="session-search-help-group"><span>{sb.searchHelpGroupProject}</span><button type="button" title={sb.searchHelpStartInTitle} onClick={() => addSearchToken('in:')}><code>in:</code><span>{sb.searchHelpStartIn}</span></button></div>
-            <div className="session-search-help-group"><span>{sb.searchHelpGroupStatus}</span>{[['is:running', sb.statusRunning], ['is:failed', sb.statusFailed], ['is:pinned', sb.pinBtn], ['is:archived', sb.archiveBtn]].map(([token, label]) => <button type="button" key={token} title={formatStr(sb.searchHelpAddToken, { token })} onClick={() => addSearchToken(token)}><code>{token}</code><span>{label}</span></button>)}</div>
+            <div className="session-search-help-group"><span>{sb.searchHelpGroupStatus}</span>{[['is:running', sb.statusRunning], ['is:failed', sb.statusFailed], ['is:pinned', sb.pinBtn], ['is:archived', sb.archiveBtn], ['is:old', sb.statusOld]].map(([token, label]) => <button type="button" key={token} title={formatStr(sb.searchHelpAddToken, { token })} onClick={() => addSearchToken(token)}><code>{token}</code><span>{label}</span></button>)}</div>
             <div className="session-search-help-group"><span>{sb.searchHelpGroupInclude}</span>{[['has:draft', sb.draftTag], ['has:queued', sb.filterQueued]].map(([token, label]) => <button type="button" key={token} title={formatStr(sb.searchHelpAddToken, { token })} onClick={() => addSearchToken(token)}><code>{token}</code><span>{label}</span></button>)}</div>
           </div>}
         </div>
@@ -716,6 +734,12 @@ export default function Sidebar(props: Props) {
                 g.items.map((s) => {
                   const running = runningIds.includes(s.id);
                   const failed = !running && isSidebarSessionFailed(s);
+                  const threadState = sessionStatus(s, { running, approvals: props.approvalCounts[s.id] || 0 });
+                  const threadResult = threadState === 'done' || threadState === 'idle' ? lastResult(s) : null;
+                  const threadResultText = !threadResult ? '' : threadResult.kind === 'timeout' ? sb.resultTimeout
+                    : threadResult.kind === 'verify' ? formatStr(sb.resultVerify, { bad: threadResult.bad, total: threadResult.total })
+                    : threadResult.kind === 'exit' ? formatStr(sb.resultExit, { code: threadResult.code })
+                    : threadResult.kind === 'state' ? threadResult.state : sb.resultDone;
                   const unread = s.id !== activeId && props.unreadIds.includes(s.id);
                                   const match = q && !s.title.toLowerCase().includes(q)
                                     ? [...s.messages].reverse().find((m) => m.text.toLowerCase().includes(q))?.text || ''
@@ -789,9 +813,13 @@ export default function Sidebar(props: Props) {
                       {s.engine === 'msp' && <span className="tag tag-msp">MSP</span>}
                       {draftSessionIdSet.has(s.id) && <span className="thread-draft-indicator" title={sb.draftTitle} aria-label={sb.draftLabel}>{sb.draftTag}</span>}
                       {!!props.queuedSessionCounts[s.id] && <span className="thread-queue-indicator" title={sb.queueTitle} aria-label={formatStr(sb.queueLabel, { count: props.queuedSessionCounts[s.id] })}>{formatStr(sb.queueTag, { count: props.queuedSessionCounts[s.id] })}</span>}
+                      {!!props.approvalCounts[s.id] && s.id !== activeId && <button type="button" className="thread-approval-indicator" title={formatStr(sb.approvalJump, { title: s.title, count: props.approvalCounts[s.id] })} aria-label={formatStr(sb.approvalJump, { title: s.title, count: props.approvalCounts[s.id] })} onClick={(e) => { e.stopPropagation(); props.onSelect(s.id); }}>{formatStr(sb.approvalTag, { count: props.approvalCounts[s.id] })}</button>}
                       {unread && <span className="thread-unread-dot" title={sb.newReplyTitle} aria-label={sb.newReplyLabel} role="status" />}
                       <span className="thread-meta">
-                        {running ? <span className="st-word running">{sb.statusRunning}</span> : failed ? <span className="st-word failed">{sb.statusFailed}</span> : timeAgo(lastTs(s), clockNow, lang)}
+                        {threadState === 'running' ? <span className="st-word running">{sb.statusRunning}</span>
+                          : threadState === 'failed' ? <span className="st-word failed">{sb.statusFailed}</span>
+                          : threadState === 'review' ? <span className="st-word review">{sb.statusReview}</span>
+                          : threadResultText || timeAgo(lastTs(s), clockNow, lang)}
                       </span>
                       {running && (
                         <button
@@ -847,6 +875,19 @@ export default function Sidebar(props: Props) {
             </div>
           );
         })}
+      {archivableOldIds.length > 0 && (
+        <div className="side-section cleanup-row">
+          <span>{formatStr(sb.archiveOldHint, { n: archivableOldIds.length, days: OLD_THREAD_DAYS })}</span>
+          <button
+            type="button"
+            className="mini-btn"
+            title={sb.archiveOldTitle}
+            onClick={() => props.onToggleArchivedMany(archivableOldIds)}
+          >
+            {sb.archiveOldBtn}
+          </button>
+        </div>
+      )}
       {archivedItems.length > 0 && (
         <>
           <div className="side-section archive-section">
@@ -883,6 +924,7 @@ export default function Sidebar(props: Props) {
                   <button type="button" className="thread-title" aria-current={s.id === activeId ? 'page' : undefined} aria-keyshortcuts="ArrowUp ArrowDown Home End" onKeyDown={(e) => handleSessionTitleKeyDown(e, null)}>{s.title}</button>
                   {draftSessionIdSet.has(s.id) && <span className="thread-draft-indicator" title={sb.draftTitle} aria-label={sb.draftLabel}>{sb.draftTag}</span>}
                   {!!props.queuedSessionCounts[s.id] && <span className="thread-queue-indicator" title={sb.queueTitle} aria-label={formatStr(sb.queueLabel, { count: props.queuedSessionCounts[s.id] })}>{formatStr(sb.queueTag, { count: props.queuedSessionCounts[s.id] })}</span>}
+                  {!!props.approvalCounts[s.id] && s.id !== activeId && <button type="button" className="thread-approval-indicator" title={formatStr(sb.approvalJump, { title: s.title, count: props.approvalCounts[s.id] })} aria-label={formatStr(sb.approvalJump, { title: s.title, count: props.approvalCounts[s.id] })} onClick={(e) => { e.stopPropagation(); props.onSelect(s.id); }}>{formatStr(sb.approvalTag, { count: props.approvalCounts[s.id] })}</button>}
                   {s.id !== activeId && props.unreadIds.includes(s.id) && <span className="thread-unread-dot" title={sb.newReplyTitle} aria-label={sb.newReplyLabel} role="status" />}
                   {s.pinned && <StarIcon size={12} filled />}
                   <button
@@ -966,6 +1008,12 @@ export default function Sidebar(props: Props) {
       )}
 
       <div className="side-statusbar">
+        <div
+          className="side-storage"
+          title={formatStr(sb.storageTitle, { threads: storageSummary.threads, archived: storageSummary.archived, size: formatStorageBytes(storageSummary.bytes, lang === 'en') })}
+        >
+          {formatStr(sb.storageLine, { threads: storageSummary.threads, archived: storageSummary.archived, size: formatStorageBytes(storageSummary.bytes, lang === 'en') })}
+        </div>
         <button className="mini-profile" onClick={() => setProfileOpen(true)} title={formatStr(sb.profileTitle, { sub: profileSub })}>
           <span className="avatar" aria-hidden>
             <GuitarIcon size={17} />

@@ -22,6 +22,7 @@ interface Props {
   onSave: (settings: CliSettings) => void;
   onBack: () => void;
   onOpenSkills: () => void;
+  initialFilter?: string;
 }
 
 type TestResult = Awaited<ReturnType<MudexApi['cliTest']>>;
@@ -62,7 +63,12 @@ export default function SettingsView(props: Props) {
   const [mcpRegistering, setMcpRegistering] = useState(false);
   const [mcpRegisterMsg, setMcpRegisterMsg] = useState('');
   const [mcpRegistration, setMcpRegistration] = useState('');
-  const [filterQuery, setFilterQuery] = useState('');
+  const [filterQuery, setFilterQuery] = useState(props.initialFilter || '');
+  // Palette deep links ("token limit", "approval mode", ...) land here with
+  // a preset filter instead of making the user retype it.
+  useEffect(() => {
+    if (props.initialFilter) setFilterQuery(props.initialFilter);
+  }, [props.initialFilter]);
   const [filterSummary, setFilterSummary] = useState('');
   const [customCmds, setCustomCmds] = useState<CustomSlashCommand[]>(() => {
     try { return readCustomSlashCommands(localStorage, SLASH_COMMANDS.map((c) => c.id)); } catch { return []; }
@@ -379,6 +385,27 @@ export default function SettingsView(props: Props) {
                   key={v}
                   className={(settings.lang || 'ko') === v ? 'seg active' : 'seg'}
                   onClick={() => commit({ lang: v })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="setting-row">
+            <div>
+              <b>{st.uiFontLabel}</b>
+              <p>{st.uiFontDesc}</p>
+            </div>
+            <div className="segmented" role="group" aria-label={st.uiFontLabel}>
+              {([
+                ['small', st.uiFontSmall],
+                ['default', st.uiFontDefault],
+                ['large', st.uiFontLarge],
+              ] as Array<readonly [string, string]>).map(([v, label]) => (
+                <button
+                  key={v}
+                  className={(settings.uiFont || 'default') === v ? 'seg active' : 'seg'}
+                  onClick={() => commit({ uiFont: v })}
                 >
                   {label}
                 </button>
@@ -1024,6 +1051,24 @@ export default function SettingsView(props: Props) {
                 className={!settings.backgroundNotifications ? 'seg active' : 'seg'}
                 aria-pressed={!settings.backgroundNotifications}
                 onClick={() => commit({ backgroundNotifications: false })}
+              >{st.offBtn}</button>
+            </div>
+          </div>
+          <div className="setting-row">
+            <div>
+              <b>{st.calmLabel}</b>
+              <p>{st.calmDesc}</p>
+            </div>
+            <div className="segmented" role="group" aria-label={st.calmLabel}>
+              <button
+                className={settings.calmFocus ? 'seg active' : 'seg'}
+                aria-pressed={settings.calmFocus === true}
+                onClick={() => commit({ calmFocus: true })}
+              >{st.onBtn}</button>
+              <button
+                className={!settings.calmFocus ? 'seg active' : 'seg'}
+                aria-pressed={settings.calmFocus !== true}
+                onClick={() => commit({ calmFocus: false })}
               >{st.offBtn}</button>
             </div>
           </div>

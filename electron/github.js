@@ -99,6 +99,7 @@ async function findOpenPr(deps, { owner, repo, branch }) {
       title: pr.title || '',
       state: pr.state || 'open',
       url: pr.html_url || '',
+      body: pr.body || '',
       head: (pr.head && pr.head.ref) || branch,
       base: (pr.base && pr.base.ref) || '',
       createdAt: pr.created_at || null,
@@ -121,7 +122,7 @@ async function createPr(deps, { owner, repo, head, base, title, body }) {
   if (!head || !base || !title) return { ok: false, error: 'NO_ARGS' };
   const r = await ghRequest({ ...deps, method: 'POST', apiPath: `/repos/${owner}/${repo}/pulls`, body: { head, base, title, body: body || '' } });
   if (!r.ok) return r;
-  return { ok: true, pr: { number: r.data.number, title: r.data.title || '', state: r.data.state || 'open', url: r.data.html_url || '' } };
+  return { ok: true, pr: { number: r.data.number, title: r.data.title || '', state: r.data.state || 'open', url: r.data.html_url || '', body: r.data.body || '' } };
 }
 
 async function updatePr(deps, { owner, repo, number, title, body }) {
@@ -134,7 +135,7 @@ async function updatePr(deps, { owner, repo, number, title, body }) {
   if (typeof body === 'string') patch.body = body;
   const r = await ghRequest({ ...deps, method: 'PATCH', apiPath: `/repos/${owner}/${repo}/pulls/${number}`, body: patch });
   if (!r.ok) return r;
-  return { ok: true, pr: { number: r.data.number, title: r.data.title || '', state: r.data.state || 'open', url: r.data.html_url || '' } };
+  return { ok: true, pr: { number: r.data.number, title: r.data.title || '', state: r.data.state || 'open', url: r.data.html_url || '', body: r.data.body || '' } };
 }
 
 function normalizeComments(issues, reviews) {
@@ -208,9 +209,78 @@ async function getCheckRuns(deps, { owner, repo, sha }) {
   return { ok: true, total: runs.length, okCount: ok, failedCount: failed, pendingCount: pending, runs: rows };
 }
 
+// Raw-text GET for non-JSON endpoints (Actions job logs). Same auth and
+// timeout discipline as ghRequest; follows the signed-URL redirect.
+async function ghText({ fetchFn, token, apiPath }) {
+  if (typeof fetchFn !== 'function') return { ok: false, error: 'NO_FETCH' };
+  const headers = { 'User-Agent': 'musician-app', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  if (timer.unref) timer.unref();
+  try {
+    const res = await fetchFn(`${API_BASE}${apiPath}`, { headers, signal: ctrl.signal });
+    const status = res && typeof res.status === 'number' ? res.status : 0;
+    if (status === 401 || status === 403) return { ok: false, status, error: status === 401 ? 'BAD_TOKEN' : 'FORBIDDEN' };
+    if (status < 200 || status >= 300) return { ok: false, status, error: `HTTP_${status}` };
+    return { ok: true, status, text: res ? await res.text() : '' };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const CI_RUNS_MAX = 5;
+const CI_FAILED_JOBS_MAX = 3;
+const CI_LOG_TAIL = 6000;
+
+// Failed CI jobs for a head SHA: workflow run -> jobs -> failed steps plus
+// the tail of each failed job's log, ready to paste into the conversation.
+async function getFailedJobLogs(deps, { owner, repo, sha }) {
+  const missing = needRepo({ owner, repo });
+  if (missing) return { ok: false, error: missing };
+  if (!sha) return { ok: false, error: 'NO_SHA' };
+  const runsR = await ghRequest({ ...deps, apiPath: `/repos/${owner}/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=${CI_RUNS_MAX}` });
+  if (!runsR.ok) return runsR;
+  const runs = (runsR.data && Array.isArray(runsR.data.workflow_runs) ? runsR.data.workflow_runs : []).slice(0, CI_RUNS_MAX);
+  const jobs = [];
+  for (const run of runs) {
+    if (jobs.length >= CI_FAILED_JOBS_MAX) break;
+    const jobsUrl = run && run.jobs_url ? String(run.jobs_url) : '';
+    const m = jobsUrl.match(/^https:\/\/api\.github\.com(\/repos\/[^/]+\/[^/]+\/actions\/runs\/\d+\/jobs)/);
+    const jobsR = await ghRequest({ ...deps, apiPath: m ? `${m[1]}?per_page=50` : '' });
+    if (!jobsR.ok || !m) continue;
+    const list = jobsR.data && Array.isArray(jobsR.data.jobs) ? jobsR.data.jobs : [];
+    for (const job of list) {
+      if (jobs.length >= CI_FAILED_JOBS_MAX) break;
+      if (!job || job.conclusion !== 'failure') continue;
+      const failedSteps = (Array.isArray(job.steps) ? job.steps : [])
+        .filter((s) => s && s.conclusion === 'failure')
+        .map((s) => s.name || '')
+        .filter(Boolean)
+        .slice(0, 10);
+      let tail = '';
+      if (job.id) {
+        const logR = await ghText({ ...deps, apiPath: `/repos/${owner}/${repo}/actions/jobs/${job.id}/logs` });
+        if (logR.ok) tail = String(logR.text || '').replace(/\r/g, '').slice(-CI_LOG_TAIL);
+      }
+      jobs.push({
+        runName: (run && run.name) || '',
+        jobName: job.name || '',
+        failedSteps,
+        url: job.html_url || '',
+        tail,
+      });
+    }
+  }
+  return { ok: true, jobs };
+}
+
 module.exports = {
   parseGitHubRemote,
   ghRequest,
+  ghText,
   getRepoContext,
   findOpenPr,
   getDefaultBranch,
@@ -219,4 +289,5 @@ module.exports = {
   normalizeComments,
   listPrComments,
   getCheckRuns,
+  getFailedJobLogs,
 };

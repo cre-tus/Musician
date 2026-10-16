@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import FileTree from './FileTree';
-import { CheckIcon, ChevronDownIcon, ChevronRightIcon, ClockIcon, CollapseIcon, CopyIcon, ExplorerIcon, FileTypeIcon, FolderIcon, NewFileIcon, NewFolderIcon, PlusIcon, RefreshIcon, SearchIcon, StarIcon, XIcon } from './icons';
+import { BackIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, ClockIcon, CollapseIcon, CopyIcon, ExplorerIcon, FileTypeIcon, FolderIcon, ForwardIcon, NewFileIcon, NewFolderIcon, PlusIcon, RefreshIcon, SearchIcon, StarIcon, XIcon } from './icons';
 import { api, hasBridge } from '../lib/mudex';
 import { normalizePinnedFilePath, pinnedFileParentDirectories, pinnedFileStorageKey, readPinnedFilePaths, reconcilePinnedFilePaths, removePinnedFilePaths, renamePinnedFilePaths } from '../lib/pinned-file-paths.mjs';
 import { normalizeCommitMessage, parseUpstreamCounts } from '../lib/git-status.mjs';
@@ -11,12 +11,17 @@ import { scheduleAfterPaint } from '../lib/after-paint.mjs';
 import type { ExplorerSection } from '../lib/explorer-section-state.mjs';
 import { findTextMatchRanges } from '../lib/text-match-ranges.mjs';
 import { formatStr } from '../lib/i18n.mjs';
-import { useStrings } from '../lib/lang';
+import { useLang, useStrings } from '../lib/lang';
+import { loadFindingStatuses, saveFindingStatus } from '../lib/review-findings.mjs';
+import type { FindingStatus } from '../lib/review-findings.mjs';
+import { buildPrBody } from '../lib/pr-description.mjs';
 import { readFileSearchPreferences, writeFileSearchPreferences } from '../lib/file-search-preferences.mjs';
 import type { FileSearchPreferences } from '../lib/file-search-preferences.mjs';
 import { readFileSearchHistory, recordFileSearchQuery, writeFileSearchHistory } from '../lib/file-search-history.mjs';
 import type { FileSearchHistoryEntry } from '../lib/file-search-history.mjs';
-import type { FileEntry, GhCheckSummary, GhPrComment, GhPrInfo, GitStatusKind } from '../types';
+import type { FileEntry, GhCheckSummary, GhFailedJob, GhPrComment, GhPrInfo, GitStatusKind, GitWorktree } from '../types';
+import { splitFileRefs } from '../lib/file-refs.mjs';
+import { clampChangedIndex, stepChangedFile } from '../lib/changed-nav.mjs';
 
 interface EntryDialogState {
   mode: 'create-file' | 'create-folder' | 'rename' | 'delete';
@@ -73,6 +78,7 @@ const normalizePinnedPath = normalizePinnedFilePath;
 export default function FilesTab(props: Props) {
   const { folder, treeVersion, changedFiles, changedKinds, changedStaged, openFiles, recentFiles, activeFilePath, onOpenFile, onOpenFileAtLine, onOpenChanged, onRefreshChanged, onPickFolder } = props;
   const strings = useStrings();
+  const lang = useLang();
   const ft = strings.files;
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
@@ -83,6 +89,19 @@ export default function FilesTab(props: Props) {
   const [commitGrouped, setCommitGrouped] = useState(true);
   const [changesGrouped, setChangesGrouped] = useState(true);
   const [collapsedChangeGroups, setCollapsedChangeGroups] = useState<Record<string, boolean>>({});
+  const [changedNavIndex, setChangedNavIndex] = useState(0);
+  useEffect(() => {
+    setChangedNavIndex((prev) => clampChangedIndex(changedFiles, prev));
+  }, [changedFiles]);
+  const openChangedAt = (file: string, index: number) => {
+    setChangedNavIndex(index);
+    onOpenChanged(file);
+  };
+  const stepChanged = (direction: 1 | -1) => {
+    const next = stepChangedFile(changedFiles, changedNavIndex, direction);
+    if (!next.file) return;
+    openChangedAt(next.file, next.index);
+  };
   const stagedCount = changedFiles.filter((f) => changedStaged[f.replace(/\\/g, '/').toLowerCase()]).length;
   const [gitBranch, setGitBranch] = useState<{ branch: string; ahead: number; behind: number; remote: string } | null>(null);
   const [gitSyncBusy, setGitSyncBusy] = useState<'pull' | 'push' | null>(null);
@@ -110,6 +129,14 @@ export default function FilesTab(props: Props) {
   const [ghChecks, setGhChecks] = useState<GhCheckSummary | null>(null);
   const [ghComments, setGhComments] = useState<GhPrComment[] | null>(null);
   const [ghShowComments, setGhShowComments] = useState(false);
+  const [ghBody, setGhBody] = useState('');
+  const [ghFindings, setGhFindings] = useState<Record<string, FindingStatus>>({});
+  const [ciLogsBusy, setCiLogsBusy] = useState(false);
+  const [wtList, setWtList] = useState<GitWorktree[]>([]);
+  const [wtBusy, setWtBusy] = useState(false);
+  const [wtPath, setWtPath] = useState('');
+  const [wtBranch, setWtBranch] = useState('');
+  const [wtConfirm, setWtConfirm] = useState<string | null>(null);
 
   const absForChanged = (file: string) => `${folder}${folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\'}${file.replace(/\//g, '\\')}`;
 
@@ -181,7 +208,7 @@ export default function FilesTab(props: Props) {
         <button
           className="changed-item"
           title={formatStr(ft.diffTitle, { file: f })}
-          onClick={() => onOpenChanged(f)}
+          onClick={() => openChangedAt(f, Math.max(0, changedFiles.indexOf(f)))}
         >
           <FileTypeIcon size={15} name={f} />
           <span className="changed-name">{f}</span>
@@ -423,6 +450,7 @@ export default function FilesTab(props: Props) {
       setGhPr(pr.pr || null);
       if (!pr.pr) setGhTitle(pr.branch || '');
       else setGhTitle(pr.pr.title || '');
+      setGhBody((pr.pr && pr.pr.body) || '');
       if (ci.ok) {
         setGhChecks({
           total: ci.total || 0,
@@ -448,7 +476,12 @@ export default function FilesTab(props: Props) {
     setGhChecks(null);
     setGhComments(null);
     setGhShowComments(false);
+    setGhBody('');
+    setGhFindings({});
     setGhError('');
+    setWtList([]);
+    setWtConfirm(null);
+    void refreshWt();
     void refreshGh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [folder]);
@@ -459,9 +492,12 @@ export default function FilesTab(props: Props) {
     setGhCreating(true);
     setGhError('');
     try {
+      const body = ghBody.trim();
+      // An untouched body must not wipe the PR description: updates send
+      // the body only when it differs from what the PR already has.
       const r = ghPr
-        ? await api().ghPrUpdate(folder, ghPr.number, title)
-        : await api().ghPrCreate(folder, title);
+        ? await api().ghPrUpdate(folder, ghPr.number, title, body !== (ghPr.body || '') ? body : undefined)
+        : await api().ghPrCreate(folder, title, body);
       if (!r.ok) {
         setGhError(ghErrText(r.error || ''));
         return;
@@ -485,11 +521,24 @@ export default function FilesTab(props: Props) {
     if (ghComments || !ghPr || !folder || !hasBridge()) return;
     try {
       const r = await api().ghPrComments(folder, ghPr.number);
-      if (r.ok) setGhComments(r.comments || []);
-      else setGhError(ghErrText(r.error || ''));
+      if (r.ok) {
+        setGhComments(r.comments || []);
+        try {
+          setGhFindings(loadFindingStatuses(localStorage, ghRepo, ghPr.number));
+        } catch { /* findings best-effort */ }
+      } else setGhError(ghErrText(r.error || ''));
     } catch (error) {
       setGhError(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const markFinding = (c: GhPrComment, status: FindingStatus) => {
+    if (!ghPr) return;
+    try {
+      if (saveFindingStatus(localStorage, ghRepo, ghPr.number, c.id, status)) {
+        setGhFindings((prev) => ({ ...prev, [c.id]: status }));
+      }
+    } catch { /* findings best-effort */ }
   };
 
   const applyGhComment = (c: GhPrComment) => {
@@ -498,13 +547,120 @@ export default function FilesTab(props: Props) {
     const text = ghPr
       ? `PR #${ghPr.number} 코멘트 반영 요청 (${c.author}${at}):\n\n> ${quote.split('\n').join('\n> ')}`
       : `PR 코멘트 반영 요청 (${c.author}${at}):\n\n> ${quote.split('\n').join('\n> ')}`;
+    markFinding(c, 'fix-requested');
     window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text } }));
+  };
+
+  const jumpToFinding = (c: GhPrComment) => {
+    if (!c.path || !c.line || !folder) return;
+    const sep = folder.endsWith('\\') || folder.endsWith('/') ? '' : (folder.includes('\\') ? '\\' : '/');
+    const rel = c.path.replace(/\//g, sep || '/');
+    props.onOpenFileAtLine(`${folder}${sep}${rel}`, c.line, true);
+  };
+
+  const draftPrBody = () => {
+    setGhBody(buildPrBody({ branch: ghBranch, files: changedFiles, checks: ghChecks }, lang));
+  };
+
+  const fetchCiLogs = async () => {
+    if (!folder || !hasBridge() || ciLogsBusy) return;
+    setCiLogsBusy(true);
+    try {
+      const r = await api().ghCiLogs(folder);
+      if (!r.ok) {
+        setGhError(ghErrText(r.error || ''));
+        return;
+      }
+      const jobs: GhFailedJob[] = r.jobs || [];
+      if (jobs.length === 0) {
+        props.onNotice(ft.ciLogsEmpty, 'git');
+        return;
+      }
+      const blocks = jobs.map((j) => {
+        const head = `## ${j.runName} / ${j.jobName}${j.failedSteps.length > 0 ? ` (실패 단계: ${j.failedSteps.join(', ')})` : ''}${j.url ? `\n${j.url}` : ''}`;
+        return `${head}\n\n${(j.tail || '').slice(-4000)}`.trim();
+      });
+      const text = `CI 실패 로그 (${jobs.length}건):\n\n${blocks.join('\n\n---\n\n')}`;
+      window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text } }));
+      props.onNotice(formatStr(ft.ciLogsDone, { n: jobs.length }), 'git');
+    } catch (error) {
+      setGhError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCiLogsBusy(false);
+    }
   };
 
   const openGhUrl = (url: string) => {
     if (!url) return;
     if (hasBridge()) void api().openExternalLink(url).catch(() => {});
     else window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const refreshWt = async () => {
+    if (!folder || !hasBridge() || wtBusy) return;
+    setWtBusy(true);
+    try {
+      const r = await api().wtList(folder);
+      if (r.ok) setWtList(r.worktrees || []);
+      else props.onNotice(formatStr(ft.wtFailed, { err: r.error || '' }), 'git');
+    } catch (error) {
+      props.onNotice(error instanceof Error ? error.message : String(error), 'git');
+    } finally {
+      setWtBusy(false);
+    }
+  };
+
+  const addWt = async () => {
+    const p = wtPath.trim();
+    if (!folder || !hasBridge() || !p || wtBusy) return;
+    setWtBusy(true);
+    try {
+      const r = await api().wtAdd(folder, p, wtBranch.trim() || undefined);
+      if (!r.ok) {
+        props.onNotice(formatStr(ft.wtFailed, { err: r.error || '' }), 'git');
+        return;
+      }
+      setWtPath('');
+      setWtBranch('');
+      props.onNotice(formatStr(ft.wtAdded, { path: r.path || p }), 'git');
+      await refreshWt();
+    } catch (error) {
+      props.onNotice(error instanceof Error ? error.message : String(error), 'git');
+    } finally {
+      setWtBusy(false);
+    }
+  };
+
+  const removeWt = async (wt: GitWorktree) => {
+    if (!folder || !hasBridge() || wtBusy) return;
+    if (wtConfirm !== wt.path) {
+      setWtConfirm(wt.path);
+      return;
+    }
+    setWtConfirm(null);
+    setWtBusy(true);
+    try {
+      const r = await api().wtRemove(folder, wt.path, false);
+      if (!r.ok) {
+        props.onNotice(formatStr(ft.wtFailed, { err: r.error || '' }), 'git');
+        return;
+      }
+      props.onNotice(formatStr(ft.wtRemoved, { path: wt.path }), 'git');
+      await refreshWt();
+    } catch (error) {
+      props.onNotice(error instanceof Error ? error.message : String(error), 'git');
+    } finally {
+      setWtBusy(false);
+    }
+  };
+
+  const copyWtPath = async (wt: GitWorktree) => {
+    try {
+      await navigator.clipboard.writeText(wt.path);
+      props.onNotice(ft.wtCopied, 'git');
+    } catch {
+      props.onNotice(ft.wtCopyFailed, 'git');
+    }
   };
 
   const doGitSync = async (op: 'pull' | 'push') => {
@@ -1195,6 +1351,17 @@ export default function FilesTab(props: Props) {
               <RefreshIcon size={13} />
             </button>
             {changedFiles.length > 0 && (
+              <div className="changed-nav" role="group" aria-label={ft.changedTitle}>
+                <button className="icon-btn changed-nav-prev" type="button" title={ft.changedPrev} aria-label={ft.changedPrev} disabled={changedFiles.length < 2} onClick={() => stepChanged(-1)}>
+                  <BackIcon size={13} />
+                </button>
+                <span className="changed-nav-count" aria-live="polite">{formatStr(ft.changedPosition, { current: Math.min(changedNavIndex + 1, changedFiles.length), total: changedFiles.length })}</span>
+                <button className="icon-btn changed-nav-next" type="button" title={ft.changedNext} aria-label={ft.changedNext} disabled={changedFiles.length < 2} onClick={() => stepChanged(1)}>
+                  <ForwardIcon size={13} />
+                </button>
+              </div>
+            )}
+            {changedFiles.length > 0 && (
               <button className="btn git-commit-open" type="button" title={stagedCount > 0 ? formatStr(ft.commitStagedTitle, { count: stagedCount }) : ft.commitNoneTitle} onClick={() => openCommit()}>
                 {ft.commitBtn}{stagedCount > 0 ? ` ${stagedCount}` : ''}
               </button>
@@ -1250,19 +1417,37 @@ export default function FilesTab(props: Props) {
                   <div className="empty-note">{ghBranch ? ft.prEmpty : ft.prNoRemote}</div>
                 )}
                 {ghBranch && (
-                  <div className="gh-pr-row">
-                    <input
-                      value={ghTitle}
-                      onChange={(event) => setGhTitle(event.target.value)}
-                      placeholder={ft.prTitlePh}
-                      aria-label={ft.prTitlePh}
-                      spellCheck={false}
-                      disabled={ghCreating}
-                    />
-                    <button className="mini-btn" type="button" disabled={ghCreating || !ghTitle.trim()} onClick={() => void submitGhPr()}>
-                      {ghCreating ? ft.prCreating : ghPr ? ft.prUpdate : ft.prCreate}
-                    </button>
-                  </div>
+                  <>
+                    <div className="gh-pr-row">
+                      <input
+                        value={ghTitle}
+                        onChange={(event) => setGhTitle(event.target.value)}
+                        placeholder={ft.prTitlePh}
+                        aria-label={ft.prTitlePh}
+                        spellCheck={false}
+                        disabled={ghCreating}
+                      />
+                      <button className="mini-btn" type="button" disabled={ghCreating || !ghTitle.trim()} onClick={() => void submitGhPr()}>
+                        {ghCreating ? ft.prCreating : ghPr ? ft.prUpdate : ft.prCreate}
+                      </button>
+                    </div>
+                    <div className="gh-pr-row">
+                      <textarea
+                        value={ghBody}
+                        onChange={(event) => setGhBody(event.target.value)}
+                        placeholder={ft.prBodyPh}
+                        aria-label={ft.prBodyPh}
+                        spellCheck={false}
+                        disabled={ghCreating}
+                        rows={4}
+                      />
+                    </div>
+                    <div className="gh-pr-row">
+                      <button className="mini-btn" type="button" disabled={ghCreating} onClick={draftPrBody}>
+                        {ft.prBodyDraft}
+                      </button>
+                    </div>
+                  </>
                 )}
                 {ghChecks && ghChecks.total > 0 ? (
                   <div className="gh-ci-block">
@@ -1270,6 +1455,11 @@ export default function FilesTab(props: Props) {
                       {formatStr(ft.checksLabel, { ok: ghChecks.okCount, total: ghChecks.total })}
                       {ghChecks.failedCount > 0 && <span className="code-bad"> · {formatStr(ft.ciFailed, { n: ghChecks.failedCount })}</span>}
                       {ghChecks.pendingCount > 0 && <span> · {formatStr(ft.ciPending, { n: ghChecks.pendingCount })}</span>}
+                      {ghChecks.failedCount > 0 && (
+                        <button className="mini-btn" type="button" disabled={ciLogsBusy} onClick={() => void fetchCiLogs()}>
+                          {ciLogsBusy ? ft.ciLogsLoading : ft.ciLogsFetch}
+                        </button>
+                      )}
                     </div>
                     {ghChecks.runs.map((run, i) => (
                       <div key={`${run.name}:${i}`} className="gh-check-row">
@@ -1293,25 +1483,70 @@ export default function FilesTab(props: Props) {
                     {ghShowComments && (
                       ghComments && ghComments.length > 0 ? (
                         <ul className="gh-comments-list">
-                          {ghComments.map((c) => (
-                            <li key={c.id} className="gh-comment-row">
-                              <div className="gh-comment-head">
-                                <b>{c.author || '?'}</b>
-                                {c.path && <span className="gh-comment-path" title={c.path}>{c.path}{c.line ? `:${c.line}` : ''}</span>}
-                              </div>
-                              <div className="gh-comment-body">{c.body.split('\n').slice(0, 6).join('\n')}</div>
-                              <div className="gh-comment-actions">
-                                <button className="mini-btn" type="button" onClick={() => applyGhComment(c)}>
-                                  {ft.commentApply}
-                                </button>
-                                {c.url && (
-                                  <button className="mini-btn" type="button" title={c.url} aria-label={c.url} onClick={() => openGhUrl(c.url)}>
-                                    ↗
+                          {ghComments.map((c) => {
+                            const finding = ghFindings[c.id] || 'open';
+                            return (
+                              <li key={c.id} className={`gh-comment-row finding-${finding}`}>
+                                <div className="gh-comment-head">
+                                  <b>{c.author || '?'}</b>
+                                  {c.path && <span className="gh-comment-path" title={c.path}>{c.path}{c.line ? `:${c.line}` : ''}</span>}
+                                  <span className={`finding-chip finding-${finding}`} title={ft.findingState}>
+                                    {ft[`finding_${finding}`]}
+                                  </span>
+                                </div>
+                                <div className="gh-comment-body">
+                                  {splitFileRefs(c.body.split('\n').slice(0, 6).join('\n')).map((seg, i) => ('file' in seg ? (
+                                    <button
+                                      key={i}
+                                      type="button"
+                                      className="ref-link"
+                                      title={seg.text}
+                                      onClick={() => {
+                                        if (!folder) return;
+                                        const sep = folder.includes('\\') ? '\\' : '/';
+                                        props.onOpenFileAtLine(`${folder}${folder.endsWith(sep) ? '' : sep}${seg.file.replace(/\//g, sep)}`, seg.line, true);
+                                      }}
+                                    >
+                                      {seg.text}
+                                    </button>
+                                  ) : (
+                                    <span key={i}>{seg.text}</span>
+                                  )))}
+                                </div>
+                                <div className="gh-comment-actions">
+                                  <button className="mini-btn" type="button" onClick={() => applyGhComment(c)}>
+                                    {ft.commentApply}
                                   </button>
-                                )}
-                              </div>
-                            </li>
-                          ))}
+                                  {c.path && c.line && (
+                                    <button className="mini-btn" type="button" onClick={() => jumpToFinding(c)}>
+                                      {ft.findingJump}
+                                    </button>
+                                  )}
+                                  <button
+                                    className="mini-btn"
+                                    type="button"
+                                    disabled={finding === 'resolved'}
+                                    onClick={() => markFinding(c, 'resolved')}
+                                  >
+                                    {ft.findingResolve}
+                                  </button>
+                                  <button
+                                    className="mini-btn"
+                                    type="button"
+                                    disabled={finding === 'deferred'}
+                                    onClick={() => markFinding(c, 'deferred')}
+                                  >
+                                    {ft.findingDefer}
+                                  </button>
+                                  {c.url && (
+                                    <button className="mini-btn" type="button" title={c.url} aria-label={c.url} onClick={() => openGhUrl(c.url)}>
+                                      ↗
+                                    </button>
+                                  )}
+                                </div>
+                              </li>
+                            );
+                          })}
                         </ul>
                       ) : (
                         <div className="empty-note">{ft.commentsEmpty}</div>
@@ -1321,6 +1556,65 @@ export default function FilesTab(props: Props) {
                 )}
               </>
             )}
+          </div>
+          <div className="wt-section">
+            <div className="section-cap">
+              <span>{ft.wtTitle}</span>
+              <button className="icon-btn" type="button" title={ft.prRefresh} aria-label={ft.prRefresh} disabled={wtBusy} onClick={() => void refreshWt()}>
+                <RefreshIcon size={13} />
+              </button>
+            </div>
+            {wtList.length === 0 ? (
+              <div className="empty-note">{ft.wtEmpty}</div>
+            ) : (
+              <ul className="wt-list">
+                {wtList.map((w, i) => (
+                  <li key={w.path} className="wt-row">
+                    <div className="wt-head">
+                      <b title={w.path}>{i === 0 ? ft.wtMain : (w.branch || ft.wtDetached)}</b>
+                      {w.head && <span className="wt-head-sha" title={w.head}>{w.head.slice(0, 7)}</span>}
+                    </div>
+                    <div className="wt-path" title={w.path}>{w.path}</div>
+                    <div className="wt-actions">
+                      <button className="mini-btn" type="button" onClick={() => void copyWtPath(w)}>
+                        {ft.wtCopyPath}
+                      </button>
+                      {i > 0 && (
+                        <button
+                          className="mini-btn"
+                          type="button"
+                          disabled={wtBusy}
+                          onClick={() => void removeWt(w)}
+                        >
+                          {wtConfirm === w.path ? ft.wtRemoveConfirm : ft.wtRemove}
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="wt-add-row">
+              <input
+                value={wtPath}
+                onChange={(event) => setWtPath(event.target.value)}
+                placeholder={ft.wtPathPh}
+                aria-label={ft.wtPathPh}
+                spellCheck={false}
+                disabled={wtBusy}
+              />
+              <input
+                value={wtBranch}
+                onChange={(event) => setWtBranch(event.target.value)}
+                placeholder={ft.wtBranchPh}
+                aria-label={ft.wtBranchPh}
+                spellCheck={false}
+                disabled={wtBusy}
+              />
+              <button className="mini-btn" type="button" disabled={wtBusy || !wtPath.trim()} onClick={() => void addWt()}>
+                {ft.wtAdd}
+              </button>
+            </div>
           </div>
           {sections.changed && changedFiles.length === 0 ? (
             <div className="empty-note">{ft.noChanges}</div>

@@ -1,4 +1,6 @@
-const SUPPORTED = new Set(['is:pinned', 'is:running', 'is:failed', 'is:archived', 'has:draft', 'has:queued']);
+import { isOldSession } from './session-cleanup.mjs';
+
+const SUPPORTED = new Set(['is:pinned', 'is:running', 'is:failed', 'is:archived', 'is:old', 'has:draft', 'has:queued']);
 
 export function parseSidebarSessionQuery(value) {
   const tokens = String(value || '').match(/[^\s"]+:"[^"]*"|[^\s']+:'[^']*'|"[^"]*"|'[^']*'|\S+/g) || [];
@@ -32,6 +34,7 @@ export function matchesSidebarSessionQuery(session, filters, state = {}) {
       if (value === 'archived') return !!session?.archived;
       if (value === 'running') return (state.runningIds || []).includes(session?.id);
       if (value === 'failed') return (state.failedIds || []).includes(session?.id);
+      if (value === 'old') return isOldSession(session, state.now);
     }
     if (type === 'has') {
       if (value === 'draft') return (state.draftIds || []).includes(session?.id);

@@ -36,7 +36,14 @@ class TerminalHost {
     } catch (err) {
       return { ok: false, error: String((err && err.message) || err) };
     }
-    this.terms.set(id, { child, shell: name, cwd: cwd || '', seq: gen });
+    this.terms.set(id, {
+      child,
+      shell: name,
+      cwd: cwd || '',
+      seq: gen,
+      pid: Number.isFinite(child && child.pid) ? child.pid : null,
+      startedAt: Date.now(),
+    });
     child.stdout.on('data', (d) => this.emit({ type: 'output', tabId: id, text: d.toString(), seq: gen }));
     child.stderr.on('data', (d) => this.emit({ type: 'output', tabId: id, text: d.toString(), seq: gen }));
     child.on('error', (err) => {
@@ -72,6 +79,22 @@ class TerminalHost {
 
   running(tabId) {
     return this.terms.has(String(tabId || ''));
+  }
+
+  list() {
+    const out = [];
+    for (const [tabId, t] of this.terms) {
+      const alive = !!t.child && t.child.exitCode === null && t.child.signalCode == null;
+      out.push({
+        tabId,
+        shell: t.shell,
+        cwd: t.cwd || '',
+        pid: Number.isFinite(t.pid) ? t.pid : null,
+        startedAt: t.startedAt || 0,
+        alive,
+      });
+    }
+    return out;
   }
 
   emit(ev) {

@@ -9,6 +9,7 @@ export interface CliSettings {
   maxTurnTokens?: number;
   maxAutoRuns?: number;
   theme: 'light' | 'dark';
+  uiFont?: string;
   codeTheme: string;
   engine: 'auto' | 'msp' | 'exec';
   approvalMode: string;
@@ -18,6 +19,7 @@ export interface CliSettings {
   browserAgent: boolean;
   browserHome: string;
   backgroundNotifications: boolean;
+  calmFocus: boolean;
   lang?: 'ko' | 'en';
   hooks?: TurnHook[];
 }
@@ -141,8 +143,13 @@ export interface ChatMessage {
   done: boolean;
   durationMs?: number;
   changedFiles?: string[];
+  preexistingFiles?: string[];
+  reviewedAt?: number;
+  reviewedSnapshot?: string;
+  verifiedSnapshot?: string;
   usage?: TokenUsage;
   timeout?: boolean;
+  connTransient?: boolean;
   changedStats?: ChangedStat[];
   verify?: VerifyResult[];
   reverted?: boolean;
@@ -210,6 +217,14 @@ export interface ChangedStat {
   added: number;
   deleted: number;
 }
+export interface FileHunk {
+  index: number;
+  head: string;
+  lines: string[];
+  truncated?: boolean;
+  added: number;
+  removed: number;
+}
 
 export type GitStatusKind = 'M' | 'U' | 'A' | 'D' | 'R' | 'C' | 'T';
 
@@ -249,6 +264,7 @@ export interface Session {
   archived?: boolean;
   modelOverride?: string;
   effortOverride?: string;
+  forkOrigin?: { sessionId: string; messageId: string };
 }
 
 export interface ApprovalChoice {
@@ -332,6 +348,7 @@ export interface GhPrInfo {
   title: string;
   state: string;
   url: string;
+  body?: string;
   head?: string;
   base?: string;
   createdAt?: string | null;
@@ -353,6 +370,33 @@ export interface GhCheckRun {
   status: string;
   conclusion: string | null;
   url: string;
+}
+export interface GhFailedJob {
+  runName: string;
+  jobName: string;
+  failedSteps: string[];
+  url: string;
+  tail: string;
+}
+export interface GitWorktree {
+  path: string;
+  head: string;
+  branch: string;
+  bare: boolean;
+  detached: boolean;
+}
+export interface DiagItem {
+  id: string;
+  ok: boolean;
+  detail: string;
+}
+export interface TermProc {
+  tabId: string;
+  shell: string;
+  cwd: string;
+  pid: number | null;
+  startedAt: number;
+  alive: boolean;
 }
 
 export interface GhCheckSummary {
@@ -418,6 +462,8 @@ export interface ChatStartResult {
 export interface MudexApi {
   showNotification: (sessionTitle: string, sessionId: string, status: 'success' | 'failed' | 'stopped' | 'scheduled') => Promise<{ ok: boolean }>;
   onNotificationClick: (fn: (event: { sessionId: string }) => void) => () => void;
+  onQueryQuitStatus: (fn: () => void) => () => void;
+  reportQuitStatus: (status: { running: string[]; dirty: string[]; terminals: number }) => Promise<{ ok: boolean }>;
   pickFolder: () => Promise<{ ok: boolean; cancelled?: boolean; path?: string }>;
   listDir: (dirPath: string) => Promise<{ ok: boolean; entries?: FileEntry[]; error?: string }>;
   watchDirectory: (root: string, directory: string) => Promise<{ ok: boolean; error?: string }>;
@@ -439,13 +485,18 @@ export interface MudexApi {
   pickBackup: () => Promise<{ ok: boolean; cancelled?: boolean; paths?: string[] }>;
   readFileBytes: (filePath: string) => Promise<{ ok: boolean; base64?: string; ext?: string; mime?: string; error?: string }>;
   openFileDefault: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
+  openLog: () => Promise<{ ok: boolean; error?: string }>;
   openExternalLink: (url: string) => Promise<{ ok: boolean; error?: string }>;
   gitNumstat: (cwd: string) => Promise<{ ok: boolean; files?: ChangedStat[]; error?: string }>;
   verifyScripts: (cwd: string) => Promise<{ ok: boolean; scripts?: string[]; error?: string }>;
   verifyRun: (cwd: string, script: string) => Promise<{ ok: boolean; code?: number | null; tail?: string; error?: string }>;
+  verifyExec: (cwd: string, command: string) => Promise<{ ok: boolean; code?: number | null; tail?: string; error?: string }>;
   revertFiles: (cwd: string, files: string[]) => Promise<{ ok: boolean; results?: { file: string; ok: boolean; deleted?: boolean; error?: string }[]; error?: string }>;
+  gitHunks: (cwd: string, file: string) => Promise<{ ok: boolean; staged?: boolean; hunks?: FileHunk[]; error?: string }>;
+  gitDiscardHunks: (cwd: string, file: string, hunks: number[]) => Promise<{ ok: boolean; results?: { index: number; ok: boolean; error?: string }[]; error?: string }>;
   checkpointCreate: (cwd: string, sessionId: string) => Promise<{ ok: boolean; id?: string; mode?: string; error?: string }>;
   checkpointRestore: (cwd: string, sessionId: string, id: string) => Promise<{ ok: boolean; restored?: string[]; deleted?: string[]; failed?: string[]; error?: string }>;
+  checkpointPreview: (cwd: string, sessionId: string, id: string) => Promise<{ ok: boolean; mode?: string; overwrite?: { files: string[]; total: number } | null; restore?: { files: string[]; total: number }; remove?: { files: string[]; total: number }; error?: string }>;
   writeFile: (filePath: string, content: string, expectedOriginal?: string) => Promise<{ ok: boolean; error?: string }>;
   getSettings: () => Promise<{ ok: boolean; settings: CliSettings }>;
   saveSettings: (patch: Partial<CliSettings>) => Promise<{ ok: boolean; settings: CliSettings }>;
@@ -469,6 +520,12 @@ export interface MudexApi {
   ghPrUpdate: (cwd: string, number: number, title?: string, body?: string) => Promise<{ ok: boolean; pr?: GhPrInfo; error?: string }>;
   ghPrComments: (cwd: string, number: number) => Promise<{ ok: boolean; comments?: GhPrComment[]; error?: string }>;
   ghCiStatus: (cwd: string) => Promise<{ ok: boolean; total?: number; okCount?: number; failedCount?: number; pendingCount?: number; runs?: GhCheckRun[]; error?: string }>;
+  ghCiLogs: (cwd: string) => Promise<{ ok: boolean; jobs?: GhFailedJob[]; error?: string }>;
+  wtList: (cwd: string) => Promise<{ ok: boolean; worktrees?: GitWorktree[]; error?: string }>;
+  wtAdd: (cwd: string, wtPath: string, branch?: string) => Promise<{ ok: boolean; path?: string; error?: string }>;
+  wtRemove: (cwd: string, wtPath: string, force?: boolean) => Promise<{ ok: boolean; error?: string }>;
+  diagnose: (cwd?: string) => Promise<{ ok: boolean; items?: DiagItem[]; error?: string }>;
+  termList: () => Promise<{ ok: boolean; procs?: TermProc[]; error?: string }>;
   chatCancel: (reqId: string) => Promise<{ ok: boolean }>;
   mspPrewarm: (cwd: string) => Promise<{ ok: boolean; key?: string; error?: string }>;
   mspDecide: (key: string, choiceId: string, feedback?: string) => Promise<{ ok: boolean }>;
@@ -538,6 +595,7 @@ export interface MudexApi {
   onMspItem: (fn: (p: { reqId: string; threadKey: string; turnId: string; item: MspItem }) => void) => () => void;
   onMspApproval: (fn: (p: MspApproval) => void) => () => void;
   onMspApprovalResolved: (fn: (p: { sessionId: string | null; approvalId: string | null }) => void) => () => void;
+  onMspApprovalPending: (fn: (p: { counts: Record<string, number> }) => void) => () => void;
   onMspUserInput: (fn: (prompt: MspUserInputPrompt) => void) => () => void;
   onMspUserInputSettled: (fn: (p: { sessionId: string; userInputId: string }) => void) => () => void;
   onMspUsage: (fn: (p: { key: string; usage: SubscriptionUsage | null }) => void) => () => void;

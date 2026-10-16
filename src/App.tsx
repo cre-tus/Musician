@@ -24,7 +24,9 @@ import { LangContext } from './lib/lang';
 import { hideHostSessionId, readHiddenHostSessionIds, visibleHostSessions } from './lib/host-session-filter.mjs';
 import { shouldShowBackgroundNotification } from './lib/notification-rules.mjs';
 import { clearUnread, createStopRegistry, markUnread } from './lib/session-alerts.mjs';
+import { summarizeApprovalCounts } from './lib/approval-badges.mjs';
 import { visibleRunningSessions } from './lib/running-sessions.mjs';
+import { isCalmFocus } from './lib/calm-focus.mjs';
 import { addScheduledPrompt, cancelScheduledPrompt, createScheduledPrompt, dueScheduledPrompts, fireableScheduledPrompt, formatRepeat, formatScheduledFireTime, markScheduledPrompt, readScheduledPrompts, rescheduleScheduledPrompt, rollRepeatingPrompt, staleScheduledPrompts, writeScheduledPrompts } from './lib/scheduled-prompts.mjs';
 import { shouldParkBrowserForOverlays } from './lib/browser-overlay-park.mjs';
 import { bookmarkHost, isBrowserBookmarked, normalizeBookmarkUrl, readBrowserBookmarks, toggleBrowserBookmark, writeBrowserBookmarks } from './lib/browser-bookmarks.mjs';
@@ -40,6 +42,10 @@ import { createSingleFlight } from './lib/single-flight.mjs';
 import { nextRecentTab, touchRecentTab } from './lib/recent-tab-history.mjs';
 import { formatSessionTranscript, formatSessionTranscripts } from './lib/session-transcript.mjs';
 import { createSessionBackup, parseSessionBackup, toImportSessions } from './lib/session-backup.mjs';
+import { createFullBackup, parseFullBackup } from './lib/full-backup.mjs';
+import { loadProjectMemories, saveProjectMemories } from './lib/project-memory.mjs';
+import { readCustomSlashCommands, writeCustomSlashCommands } from './lib/custom-slash.mjs';
+import { verifyCommandsKey } from './lib/verify-commands.mjs';
 import { forkSession } from './lib/session-fork.mjs';
 import { mcpChatNotice } from './lib/mcp-chat-notice.mjs';
 import { readPinnedProjects, togglePinnedProject, writePinnedProjects } from './lib/pinned-projects.mjs';
@@ -47,7 +53,7 @@ import { prefillWorkspaceSearchQuery } from './lib/workspace-search-query.mjs';
 import { scheduleAfterPaint } from './lib/after-paint.mjs';
 import { editorNavigationStorageKey, pushEditorLocation, readEditorNavigationHistory, remapEditorNavigationPaths, removeEditorNavigationPaths, stepEditorLocation, toggleEditorLocationBookmark as toggleLocationBookmark, writeEditorNavigationHistory } from './lib/editor-navigation-history.mjs';
 import { adjustEditorFontSize, DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_FIELD_SELECTOR, editorFontZoomDelta, resolveEditorFontSize, shouldHandleEditorFontZoom } from './lib/editor-font-size.mjs';
-import type { BrowserShortcut, ChatMessage, CliSettings, CliStatus, EditorApi, GitStatusKind, HostSession, MspStatus, PaneTab, PaneTabKind, Session, SubscriptionUsage } from './types';
+import type { BrowserShortcut, ChatMessage, CliSettings, CliStatus, DiagItem, EditorApi, GitStatusKind, HostSession, MspStatus, PaneTab, PaneTabKind, Session, SubscriptionUsage } from './types';
 import {
   addProject,
   api,
@@ -82,6 +88,7 @@ const DEFAULT_SETTINGS: CliSettings = {
   browserAgent: true,
   browserHome: '',
   backgroundNotifications: true,
+  calmFocus: false,
   lang: 'ko',
 };
 
@@ -301,6 +308,7 @@ export default function App() {
   const runningIdsRef = useRef(runningIds);
   runningIdsRef.current = runningIds;
   const [unreadIds, setUnreadIds] = useState<string[]>([]);
+  const [approvalCounts, setApprovalCounts] = useState<Record<string, number>>({});
   const stopRegistryRef = useRef(createStopRegistry());
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -360,6 +368,22 @@ export default function App() {
     setNotice(message);
     setNoticeKind(kind === 'git' ? 'git' : '');
   };
+  const [diagOpen, setDiagOpen] = useState(false);
+  const [diagItems, setDiagItems] = useState<DiagItem[]>([]);
+  const [diagBusy, setDiagBusy] = useState(false);
+  const runDiagnose = async () => {
+    if (!hasBridge() || diagBusy) return;
+    setDiagBusy(true);
+    try {
+      const r = await api().diagnose(folder || undefined);
+      if (r.ok) setDiagItems(r.items || []);
+      else setNotice(formatStr(av.importReadFailed, { error: r.error || common.unknownError }));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDiagBusy(false);
+    }
+  };
   const [confirmRequest, setConfirmRequest] = useState<ConfirmOptions | null>(null);
   const confirmResolverRef = useRef<((result: ConfirmResult) => void) | null>(null);
   const omittedDraftNoticeRef = useRef(false);
@@ -373,6 +397,8 @@ export default function App() {
   const [codexSignal, setCodexSignal] = useState(0);
   const [claudeSignal, setClaudeSignal] = useState(0);
   const [modelPickerSignal, setModelPickerSignal] = useState(0);
+  const [memorySignal, setMemorySignal] = useState(0);
+  const [settingsFilter, setSettingsFilter] = useState('');
   const [quota, setQuota] = useState<SubscriptionUsage | null>(() => loadLastUsage(localStorage));
   const [sideW, setSideW] = useState(() => clamp(loadNum('mudex:sidew', 284), 200, 480));
   const [chatRatio, setChatRatio] = useState(() => clamp(loadNum('mudex:chatratio', 0.45), 0.25, 0.75));
@@ -607,6 +633,17 @@ export default function App() {
         }
       })
       .catch((e) => setMspStatus({ state: 'error', error: e instanceof Error ? e.message : String(e) }));
+  }, []);
+
+  // Sidebar approval badges: engine pushes per-session pending counts.
+  useEffect(() => {
+    if (!hasBridge()) return;
+    const off = api().onMspApprovalPending((p) => {
+      setApprovalCounts(summarizeApprovalCounts(p && p.counts));
+    });
+    return () => {
+      off();
+    };
   }, []);
 
   // MSP host sessions: follow push events (initial load comes from warmup).
@@ -1126,11 +1163,37 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', h);
   }, [tabs]);
 
+  // Quit guard: main asks what is still running/unsaved, then offers
+  // [quit] vs [keep running]. Best-effort — a missing answer quits as before.
+  useEffect(() => {
+    if (!hasBridge()) return;
+    return api().onQueryQuitStatus(() => {
+      const running = runningIds.map((id) => sessions.find((s) => s.id === id)?.title?.trim() || id);
+      const dirty = tabs
+        .filter((t) => t.kind === 'file' && t.file && t.file.dirty && !t.file.readOnly)
+        .map((t) => (t.file as { path: string }).path);
+      api().termList().then(
+        (r) => {
+          const procs = r && (r as { procs?: unknown[] }).procs;
+          api().reportQuitStatus({ running, dirty, terminals: Array.isArray(procs) ? procs.length : 0 }).catch(() => {});
+        },
+        () => {
+          api().reportQuitStatus({ running, dirty, terminals: 0 }).catch(() => {});
+        },
+      );
+    });
+  }, [sessions, runningIds, tabs]);
+
   // Theme: settings.theme drives the mode; dark is the default.
   useEffect(() => {
     setDark(settings.theme !== 'light');
     document.documentElement.dataset.theme = settings.theme;
   }, [settings.theme]);
+  // Accessibility: UI font size (small/default/large) scales app chrome text.
+  useEffect(() => {
+    const v = settings.uiFont === 'small' || settings.uiFont === 'large' ? settings.uiFont : 'default';
+    document.documentElement.dataset.uifont = v;
+  }, [settings.uiFont]);
 
   const lang = sanitizeLang(settings.lang);
   // App sits above LangContext.Provider, so it reads STRINGS directly.
@@ -1213,6 +1276,7 @@ export default function App() {
         e.preventDefault();
         setQuickOpen(false);
         setPaletteOpen(false);
+        setSettingsFilter('');
         setView('settings');
       } else if (e.shiftKey && e.code === 'Slash') {
         e.preventDefault();
@@ -1439,15 +1503,42 @@ export default function App() {
     setActiveId(s.id);
   };
 
-  const forkSessionFrom = (sessionId: string, messageId: string) => {
+  const forkSessionFrom = (sessionId: string, messageId: string, editedText?: string) => {
     const source = sessions.find((session) => session.id === sessionId);
     if (!source) return;
     const forked = forkSession(source, messageId, {
       createId: () => uid('s'),
       now: Date.now(),
       title: `${source.title} (${av.forkSuffix})`,
+      origin: { sessionId: source.id, messageId },
+      ...(typeof editedText === 'string' ? { editedText } : {}),
     });
     if (!forked) return;
+    setSessions((prev) => [forked, ...prev]);
+    setActiveId(forked.id);
+    setView('thread');
+    setNotice(formatStr(av.forkedOk, { title: source.title }));
+  };
+  const rerunBranchFrom = (sessionId: string, messageId: string, text: string) => {
+    const source = sessions.find((session) => session.id === sessionId);
+    if (!source || !text.trim()) return;
+    const forked = forkSession(source, messageId, {
+      createId: () => uid('s'),
+      now: Date.now(),
+      title: `${source.title} (${av.forkSuffix})`,
+      origin: { sessionId: source.id, messageId },
+      editedText: text,
+    });
+    if (!forked) return;
+    // The edited request rides in the composer draft; drop its history copy
+    // so the branch does not show the same request twice.
+    if (forked.messages.length > 0) {
+      const tail = forked.messages[forked.messages.length - 1];
+      if (tail && tail.role === 'user') forked.messages = forked.messages.slice(0, -1);
+    }
+    try {
+      localStorage.setItem(`mudex:draft:${forked.id}`, text);
+    } catch { /* draft best-effort */ }
     setSessions((prev) => [forked, ...prev]);
     setActiveId(forked.id);
     setView('thread');
@@ -1456,7 +1547,7 @@ export default function App() {
   newChatRef.current = newChat;
 
   const clearSessionLocalState = (id: string) => {
-    for (const key of [`mudex:draft:${id}`, `mudex:queue:${id}`, `mudex:queue-paused:${id}`, `mudex:chat-scroll:v1:${id}`]) {
+    for (const key of [`mudex:draft:${id}`, `mudex:attach-draft:${id}`, `mudex:queue:${id}`, `mudex:queue-paused:${id}`, `mudex:chat-scroll:v1:${id}`]) {
       try { localStorage.removeItem(key); } catch { /* optional per-session preferences */ }
     }
     setDraftSessionIds((previous) => previous.filter((sessionId) => sessionId !== id));
@@ -1618,6 +1709,13 @@ export default function App() {
         setNotice(formatStr(av.importReadFailed, { error: read.error || common.unknownError }));
         return false;
       }
+      let kind = '';
+      try {
+        kind = (JSON.parse(read.content) || {}).kind || '';
+      } catch {
+        kind = '';
+      }
+      if (kind === 'full-backup') return importFullBackup(read.content);
       const parsed = parseSessionBackup(read.content);
       if (!parsed.ok) {
         setNotice(formatStr(av.importParseFailed, { error: parsed.error }));
@@ -1631,6 +1729,90 @@ export default function App() {
     } catch (error) {
       setNotice(error instanceof Error ? formatStr(av.importReadFailed, { error: error.message }) : av.importFailedBare);
       return false;
+    }
+  };
+
+  const importFullBackup = (content: string): boolean => {
+    const parsed = parseFullBackup(content);
+    if (!parsed.ok) {
+      setNotice(formatStr(av.importParseFailed, { error: parsed.error }));
+      return false;
+    }
+    const now = Date.now();
+    const fresh = toImportSessions(parsed.data.sessions, { createId: () => uid('id'), now });
+    setSessions((prev) => [...fresh, ...prev]);
+    try {
+      const { settings, memories, slashCommands, schedules, verifyCommands } = parsed.data;
+      if (settings && Object.keys(settings).length > 0 && hasBridge()) {
+        void api().saveSettings(settings).catch(() => {});
+      }
+      saveProjectMemories(localStorage, Array.isArray(memories) ? memories : []);
+      writeCustomSlashCommands(localStorage, Array.isArray(slashCommands) ? slashCommands : [], []);
+      writeScheduledPrompts(Array.isArray(schedules) ? schedules : [], localStorage);
+      if (verifyCommands && typeof verifyCommands === 'object') {
+        for (const [cwd, list] of Object.entries(verifyCommands)) {
+          try {
+            localStorage.setItem(verifyCommandsKey(cwd), JSON.stringify(list));
+          } catch {
+            /* quota best-effort */
+          }
+        }
+      }
+    } catch {
+      /* extras best-effort: sessions already imported */
+    }
+    setNotice(formatStr(av.importedOk, { n: fresh.length }));
+    return true;
+  };
+
+  const backupAll = async (): Promise<void> => {
+    if (sessions.length === 0 && !hasBridge()) return;
+    try {
+      let settings: Record<string, unknown> = {};
+      try {
+        if (hasBridge()) {
+          const sres = await api().getSettings();
+          if (sres && sres.ok && sres.settings) settings = sres.settings as unknown as Record<string, unknown>;
+        }
+      } catch {
+        /* settings best-effort */
+      }
+      let memories: unknown[] = [];
+      let slash: unknown[] = [];
+      let schedules: unknown[] = [];
+      try {
+        memories = loadProjectMemories(localStorage);
+        slash = readCustomSlashCommands(localStorage, []);
+        schedules = readScheduledPrompts(localStorage);
+      } catch {
+        /* extras best-effort */
+      }
+      const verifyCommands: Record<string, { name: string; cmd: string }[]> = {};
+      try {
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i) || '';
+          if (!key.startsWith('mudex-verify-commands:')) continue;
+          const cwd = key.slice('mudex-verify-commands:'.length);
+          try {
+            const arr = JSON.parse(localStorage.getItem(key) || '[]');
+            if (Array.isArray(arr) && arr.length > 0) verifyCommands[cwd] = arr;
+          } catch {
+            /* skip corrupt entries */
+          }
+        }
+      } catch {
+        /* extras best-effort */
+      }
+      const json = createFullBackup({ sessions, settings, memories, slashCommands: slash, schedules, verifyCommands });
+      const result = await api().exportBackup(STRINGS[lang].sidebar.backupAllFile, json);
+      if (!result.ok) {
+        setNotice(formatStr(av.backupFailed, { error: result.error || common.unknownError }));
+        return;
+      }
+      if (result.canceled) return;
+      setNotice(STRINGS[lang].sidebar.backupAllOk);
+    } catch (error) {
+      setNotice(error instanceof Error ? formatStr(av.backupFailed, { error: error.message }) : av.backupFailedBare);
     }
   };
 
@@ -2420,14 +2602,16 @@ export default function App() {
         readOnly: true,
       };
       const hit = tabs.find((t) => t.kind === 'file' && t.file && t.file.path === key);
+      const calm = isCalmFocus(settings);
       if (hit) {
         setTabs((prev) => prev.map((t) => (t.id === hit.id ? { ...t, file: entry } : t)));
-        setActiveTabId(hit.id);
+        if (!calm) setActiveTabId(hit.id);
       } else {
         const tab: PaneTab = { id: uid('tab'), kind: 'file', title: `${file} (diff)`, file: entry };
         setTabs((prev) => [...prev, tab]);
-        setActiveTabId(tab.id);
+        if (!calm) setActiveTabId(tab.id);
       }
+      if (calm) return;
       setEditorVisible(true);
       setView('thread');
     } catch (e) {
@@ -2722,6 +2906,7 @@ export default function App() {
         setView('usage');
         break;
       case 'settings':
+        setSettingsFilter('');
         setView('settings');
         break;
       case 'shortcuts':
@@ -2827,7 +3012,9 @@ export default function App() {
     { id: 'browser', title: av.palOpenBrowser, keywords: ['open browser'], run: () => { openBrowser(); setPaletteOpen(false); } },
     { id: 'terminal', title: av.palNewTerm, hint: 'Ctrl+Shift+`', keywords: ['open terminal', 'new terminal', '터미널 열기'], run: () => { openTerminal(); setPaletteOpen(false); } },
     { id: 'usage', title: av.palUsage, keywords: ['usage', 'token usage'], run: () => { setView('usage'); setPaletteOpen(false); } },
-    { id: 'settings', title: STRINGS[lang].shortcuts.nl16, hint: 'Ctrl+,', keywords: ['settings', 'preferences'], run: () => { setView('settings'); setPaletteOpen(false); } },
+    { id: 'settings', title: STRINGS[lang].shortcuts.nl16, hint: 'Ctrl+,', keywords: ['settings', 'preferences'], run: () => { setSettingsFilter(''); setView('settings'); setPaletteOpen(false); } },
+    { id: 'settings-token-limit', title: av.palTokenLimit, keywords: ['token limit', 'max tokens', 'token cap', '토큰 제한', '토큰 상한', '턴 토큰'], run: () => { setSettingsFilter(lang === 'en' ? 'token' : '토큰'); setView('settings'); setPaletteOpen(false); } },
+    { id: 'open-memory', title: av.palMemory, keywords: ['project memory', 'delete memory', 'forget memory', '프로젝트 기억', '기억 삭제', '기억 관리'], run: () => { setView('thread'); setMemorySignal((signal) => signal + 1); setPaletteOpen(false); } },
     { id: 'sidebar', title: sidebarVisible ? av.palHideSidebar : av.palShowSidebar, hint: 'Ctrl+B', keywords: ['toggle sidebar'], run: () => { setSidebarVisible((v) => !v); setPaletteOpen(false); } },
   ];
   // The native browser view paints above React UI — park it under overlays.
@@ -2850,6 +3037,7 @@ export default function App() {
           sessions={sessions}
           draftSessionIds={draftSessionIds}
           queuedSessionCounts={queuedSessionCounts}
+          approvalCounts={approvalCounts}
           activeId={active?.id ?? ''}
           groupBy={groupBy}
           runningIds={runningIds}
@@ -2872,11 +3060,13 @@ export default function App() {
           onDeleteMany={deleteSessions}
           onExportMany={exportSessionTranscripts}
           onBackupMany={backupSessions}
+          onBackupAll={() => { void backupAll(); }}
+          onDiagnose={() => { setDiagOpen(true); setDiagItems([]); }}
           onImport={() => { void importSessions(); }}
           onToggleArchived={toggleSessionArchived}
           onRename={renameSession}
           onCollapse={() => setSidebarVisible(false)}
-          onOpenSettings={() => setView('settings')}
+          onOpenSettings={() => { setSettingsFilter(''); setView('settings'); }}
           onOpenCodex={openCodex}
           onOpenClaude={openClaude}
           onOpenFiles={openFilesViewer}
@@ -2937,6 +3127,7 @@ export default function App() {
             onSave={persistSettings}
             onBack={() => setView('thread')}
             onOpenSkills={openSkillsTab}
+            initialFilter={settingsFilter}
           />
         )}
         <div ref={wrapRef} className={`thread-wrap${view === 'thread' ? '' : ' hidden'}${editorVisible ? ' with-editor' : ''}`}>
@@ -2956,7 +3147,7 @@ export default function App() {
             onAppendAssistant={(msg) => appendAssistant(s.id, msg)}
             onTitleMaybe={(firstPrompt) => titleMaybe(s.id, firstPrompt)}
             onInsertToEditor={insertToEditor}
-            onOpenSettings={() => setView('settings')}
+            onOpenSettings={() => { setSettingsFilter(''); setView('settings'); }}
             onOpenGitDiff={openGitDiff}
             onOpenFileAtLine={openFileAtLine}
             onConfirm={requestConfirm}
@@ -2966,8 +3157,20 @@ export default function App() {
             onPatchSettings={patchSettings}
             onSessionOverride={(patch) => setSessions((prev) => prev.map((row) => row.id === s.id ? { ...row, ...patch } : row))}
             onForkSession={(messageId) => forkSessionFrom(s.id, messageId)}
+            onRerunBranch={(messageId, text) => rerunBranchFrom(s.id, messageId, text)}
+            forkCompare={(() => {
+              const origin = s.forkOrigin;
+              if (!origin) return null;
+              const source = sessions.find((row) => row.id === origin.sessionId);
+              if (!source) return null;
+              const idx = source.messages.findIndex((msg) => msg.id === origin.messageId);
+              const answer = idx < 0 ? null : source.messages.slice(idx + 1).find((msg) => msg.role === 'assistant');
+              if (!answer || !answer.text.trim()) return null;
+              return { originTitle: source.title, originText: answer.text };
+            })()}
             onUpdateMessage={(msgId, patch) => patchMessage(s.id, msgId, patch)}
             onDraftStatus={updateDraftSessionStatus}
+            runningFolders={sessions.filter((row) => row.id !== s.id && runningIds.includes(row.id)).map((row) => row.cwd || '').filter(Boolean)}
             onQueueStatus={updateQueuedSessionCount}
             onSchedulePrompt={(text) => setScheduleDraft({ sessionId: s.id, text })}
             onToggleGoals={() => setGoalsOpen((v) => !v)}
@@ -3002,6 +3205,7 @@ export default function App() {
             codexSignal={s.id === activeId ? codexSignal : 0}
             claudeSignal={s.id === activeId ? claudeSignal : 0}
             modelPickerSignal={s.id === activeId ? modelPickerSignal : 0}
+            memorySignal={s.id === activeId ? memorySignal : 0}
             tokenWin={tokenWin}
             quota={quota}
             paneStyle={s.id !== activeId ? { display: 'none' } : editorVisible ? { flex: `0 0 ${Math.round(chatRatio * 1000) / 10}%`, minWidth: 340 } : undefined}
@@ -3117,7 +3321,7 @@ export default function App() {
               else if (shortcut === 'open-explorer') openFilesViewerRef.current?.();
               else if (shortcut === 'toggle-sidebar') setSidebarVisible((visible) => !visible);
               else if (shortcut === 'toggle-editor') { setView('thread'); setEditorVisible((visible) => !visible); }
-              else if (shortcut === 'open-settings') { setPaletteOpen(false); setQuickOpen(false); setView('settings'); }
+              else if (shortcut === 'open-settings') { setPaletteOpen(false); setQuickOpen(false); setSettingsFilter(''); setView('settings'); }
               else if (shortcut === 'reopen-closed-file') reopenClosedFileRef.current();
               else if (shortcut === 'find-in-files') {
                 openWorkspaceSearchRef.current?.();
@@ -3163,6 +3367,38 @@ export default function App() {
         {...confirmRequest}
         onResolve={resolveConfirm}
       />}
+      {diagOpen && (
+        <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !diagBusy) setDiagOpen(false); }}>
+          <section className="modal diag-dialog" role="dialog" aria-modal="true" aria-labelledby="diag-title" tabIndex={-1} onKeyDown={(event) => {
+            if (event.key === 'Escape' && !diagBusy) { event.preventDefault(); setDiagOpen(false); }
+          }}>
+            <div className="modal-header"><h3 id="diag-title">{STRINGS[lang].sidebar.diagTitle}</h3></div>
+            <div className="modal-body">
+              {diagItems.length === 0 ? (
+                <p className="modal-note">{STRINGS[lang].sidebar.diagEmpty}</p>
+              ) : (
+                <ul className="diag-list">
+                  {diagItems.map((item) => (
+                    <li key={item.id} className={`diag-row ${item.ok ? 'is-ok' : 'is-bad'}`}>
+                      <span className="diag-dot" aria-hidden="true">{item.ok ? '●' : '○'}</span>
+                      <code className="diag-id">{item.id}</code>
+                      <span className="diag-detail">{item.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="mini-btn" disabled={diagBusy} onClick={() => void runDiagnose()}>
+                {diagBusy ? STRINGS[lang].sidebar.diagRunning : STRINGS[lang].sidebar.diagRun}
+              </button>
+              <button type="button" className="mini-btn" disabled={diagBusy} onClick={() => setDiagOpen(false)}>
+                {common.close}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {scheduleDraft && (
         <SchedulePromptDialog
           draft={scheduleDraft.text.trim()}

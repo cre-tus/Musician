@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { api, hasBridge } from '../lib/mudex';
+import { parseTerminalPorts } from '../lib/terminal-ports.mjs';
 import { rankTerminalHistory } from '../lib/terminal-history-search.mjs';
 import { findTerminalLinks } from '../lib/terminal-links.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
@@ -74,6 +75,8 @@ export default function TerminalTab(props: Props) {
   const [historySearchOpen, setHistorySearchOpen] = useState(false);
   const [historySearchQuery, setHistorySearchQuery] = useState('');
   const [historySearchIndex, setHistorySearchIndex] = useState(0);
+  const outRef = useRef('');
+  const [ports, setPorts] = useState<number[]>([]);
   const runningRef = useRef(false);
   runningRef.current = running;
   const shellSeqRef = useRef(0);
@@ -136,6 +139,8 @@ export default function TerminalTab(props: Props) {
         lineRef.current = '';
         cursorRef.current = 0;
         histIdxRef.current = -1;
+        outRef.current = '';
+        setPorts([]);
         startShell(shell);
       });
   };
@@ -232,6 +237,9 @@ export default function TerminalTab(props: Props) {
       if (typeof ev.seq === 'number' && ev.seq !== shellSeqRef.current) return;
       if (ev.type === 'output') {
         term.write(ev.text.replace(/\r?\n/g, '\r\n'));
+        outRef.current = `${outRef.current}${ev.text}`.slice(-20000);
+        const found = parseTerminalPorts(outRef.current);
+        setPorts((prev) => (found.join(',') === prev.join(',') ? prev : found));
       } else {
         setRunning(false);
         const msg = ev.error ? formatStr(s.terminal.exitedErr, { error: ev.error }) : formatStr(s.terminal.exitedCode, { code: ev.code });
@@ -444,6 +452,8 @@ export default function TerminalTab(props: Props) {
                   lineRef.current = '';
                   cursorRef.current = 0;
                   histIdxRef.current = -1;
+                  outRef.current = '';
+                  setPorts([]);
                   startShell(next);
                 });
             }
@@ -489,6 +499,24 @@ export default function TerminalTab(props: Props) {
           <StopIcon size={13} /> {s.terminal.killBtn}
         </button>
       </div>
+      {ports.length > 0 && (
+        <div className="term-ports">
+          <span className="term-ports-label">{s.terminal.portsLabel}</span>
+          {ports.map((p) => (
+            <button
+              key={p}
+              type="button"
+              className="mini-btn"
+              title={`http://localhost:${p}`}
+              onClick={() => {
+                if (hasBridge()) void api().openExternalLink(`http://localhost:${p}`).catch(() => {});
+              }}
+            >
+              :{p}
+            </button>
+          ))}
+        </div>
+      )}
       {historySearchOpen && <div className="term-history-search" role="dialog" aria-label={s.terminal.historyDialog}>
         <div className="term-history-search-head">
           <input

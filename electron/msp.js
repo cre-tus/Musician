@@ -351,6 +351,7 @@ class MspEngine {
         /* already settled */
       }
     }
+    this._emitApprovalPending();
     for (const [key, pending] of this.pendingUserInputs) {
       if (pending.hostKey === host.key) this.pendingUserInputs.delete(key);
     }
@@ -454,13 +455,31 @@ class MspEngine {
     return new Promise((resolve, reject) => {
       this.pendingApprovals.set(key, { resolve, reject, threadKey, hostKey });
       this.send('msp:approval', { key, threadKey, mspSessionId: req.sessionId, approval: slimApproval(req) });
+      this._emitApprovalPending();
     });
+  }
+
+  // Sidebar approval badges: per-session pending counts. threadKeys carry a
+  // NUL lane suffix (\0plan / \0review); the base session id is the head.
+  _approvalCounts() {
+    const counts = {};
+    for (const p of this.pendingApprovals.values()) {
+      const base = String((p && p.threadKey) || '').split('\0')[0];
+      if (!base) continue;
+      counts[base] = (counts[base] || 0) + 1;
+    }
+    return counts;
+  }
+
+  _emitApprovalPending() {
+    this.send('msp:approval-pending', { counts: this._approvalCounts() });
   }
 
   decideApproval(key, choiceId, feedback) {
     const p = this.pendingApprovals.get(key);
     if (!p) return false;
     this.pendingApprovals.delete(key);
+    this._emitApprovalPending();
     const decision = { choiceId };
     if (feedback) decision.feedback = feedback;
     p.resolve(decision);
@@ -713,6 +732,7 @@ class MspEngine {
         }
       }
     }
+    this._emitApprovalPending();
     for (const [key, pending] of this.pendingUserInputs) {
       if (pending.hostKey === host.key) this.pendingUserInputs.delete(key);
     }

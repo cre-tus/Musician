@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ChangedStat, ChatMessage, ClaudeSessionInfo, CliSettings, CliStatus, CodexSessionInfo, CompletionRecord, ContextPressure, MspApproval, MspItem, MspTodo, MspUserInputPrompt, Session, SubscriptionUsage, TokenWindow } from '../types';
+import type { ChangedStat, ChatMessage, ClaudeSessionInfo, CliSettings, CliStatus, CodexSessionInfo, CompletionRecord, ContextPressure, FileHunk, MspApproval, MspItem, MspTodo, MspUserInputPrompt, Session, SubscriptionUsage, TokenWindow } from '../types';
 import ApprovalPanel from './ApprovalPanel';
 import { AgentsDialog, MemoryDialog } from './ProjectContextDialogs';
 import GoalsPanel from './GoalsPanel';
@@ -8,6 +8,25 @@ import type { ConfirmOptions, ConfirmResult } from './ConfirmDialog';
 import { api, buildCmdPreview, hasBridge, porcelainPath, uid } from '../lib/mudex';
 import { baseName } from '../lib/path-utils.mjs';
 import { ANNOTATION_TOKEN, clearAnnotations, resolveAnnotations } from '../lib/annotations.mjs';
+import { runStatusLine } from '../lib/run-status.mjs';
+import { summarizeTurn } from '../lib/turn-summary.mjs';
+import { sendContextRows } from '../lib/send-context.mjs';
+import { recoveryActionsFor } from '../lib/recovery-actions.mjs';
+import { stuckOutputCount } from '../lib/follow-stuck.mjs';
+import { buildTurnTimeline } from '../lib/turn-timeline.mjs';
+import { clearAttachDraft, isOutsideDir, loadAttachDraft, saveAttachDraft } from '../lib/composer-drafts.mjs';
+import { joinAbs, splitFileRefs } from '../lib/file-refs.mjs';
+import { diffLines, diffStats } from '../lib/text-diff.mjs';
+import { maskSecrets } from '../lib/secret-mask.mjs';
+import { classifyRunError } from '../lib/conn-error.mjs';
+import CommandEditDialog from './CommandEditDialog';
+import type { EditedRunResult } from './ApprovalPanel';
+import { diffTurnSnapshots } from '../lib/turn-diff.mjs';
+import { buildVerifyFixPrompt, failedVerifications } from '../lib/verify-fix-request.mjs';
+import { VERIFY_COMMAND_MAX, loadVerifyCommands, saveVerifyCommands } from '../lib/verify-commands.mjs';
+import type { VerifyCommand } from '../lib/verify-commands.mjs';
+import LogView from './LogView';
+import { isSteerSubmitting, steerPhaseLabel, STEER_ACCEPTED, STEER_PROCESSING, STEER_SENDING } from '../lib/steer-status.mjs';
 import { enqueuePrompt, extractQueuedPrompt, MAX_QUEUED_PROMPTS, moveQueuedPrompt, normalizePromptQueue, prependPrompt, removeQueuedPrompt, shouldAutoRunQueuedPrompt, takeNextPrompt } from '../lib/prompt-queue.mjs';
 import { armInterruptChain, buildResumePrompt, emptyInterruptChain, flattenInterruptChain, normalizeInterruptChain, popInterruptChain } from '../lib/interrupt-turn.mjs';
 import type { InterruptChain } from '../lib/interrupt-turn.mjs';
@@ -16,6 +35,10 @@ import { runNotificationStatus, shouldShowBackgroundNotification } from '../lib/
 import { clampChatScrollTop, parseChatScrollState } from '../lib/chat-scroll-state.mjs';
 import { formatSessionTranscript } from '../lib/session-transcript.mjs';
 import { findPromptFileMention, insertPromptFileMention } from '../lib/prompt-file-mention.mjs';
+import { SELECTION_BUNDLE_MAX, addSelectionToBundle, bundleEntryLabel, removeSelectionFromBundle } from '../lib/selection-bundle.mjs';
+import { isCalmFocus } from '../lib/calm-focus.mjs';
+import type { BundleSelection } from '../lib/selection-bundle.mjs';
+import { formatEditorSelectionPrompt } from '../lib/editor-selection-prompt.mjs';
 import { findSlashCommand, matchSlashCommands, SLASH_COMMANDS } from '../lib/slash-commands.mjs';
 import type { SlashCommand } from '../lib/slash-commands.mjs';
 import type { Goal, GoalStore } from '../lib/goals.mjs';
@@ -67,6 +90,7 @@ import { formatStr, STRINGS } from '../lib/i18n.mjs';
 import { useLang, useStrings } from '../lib/lang';
 import {
   AlertIcon,
+  ArchiveIcon,
   CheckIcon,
   ChevronDownIcon,
   ClipIcon,
@@ -123,6 +147,9 @@ interface Props {
   onForkSession: (messageId: string) => void;
   onUpdateMessage: (id: string, patch: Partial<ChatMessage>) => void;
   onDraftStatus: (sessionId: string, hasDraft: boolean) => void;
+  runningFolders: string[];
+  onRerunBranch: (messageId: string, text: string) => void;
+  forkCompare: { originTitle: string; originText: string } | null;
   onQueueStatus: (sessionId: string, count: number) => void;
   onSchedulePrompt: (text: string) => void;
   onToggleGoals: () => void;
@@ -144,6 +171,7 @@ interface Props {
   codexSignal: number;
   claudeSignal: number;
   modelPickerSignal: number;
+  memorySignal: number;
   paneStyle?: React.CSSProperties;
   tokenWin: { h5: TokenWindow; wk: TokenWindow };
   quota: SubscriptionUsage | null;
@@ -191,12 +219,11 @@ async function gitSnapshot(cwd: string): Promise<string[]> {
 }
 
 function diffPaths(before: string[], after: string[]): string[] {
-  const b = new Set(before);
-  return after
-    .filter((e) => !b.has(e))
-    .map(porcelainPath)
-    .filter(Boolean)
-    .slice(0, 20);
+  return diffTurnSnapshots(before, after).changed;
+}
+
+function changeSnapshotOf(m: ChatMessage): string {
+  return JSON.stringify({ files: m.changedFiles || [], stats: m.changedStats || [] });
 }
 
 function foldMspItems(items: Map<string, MspItem>, lang: 'ko' | 'en' = 'ko'): { text: string; activity: string } {
@@ -289,10 +316,12 @@ function CodeBlock({
   lang,
   code,
   onInsert,
+  onApply,
 }: {
   lang: string;
   code: string;
   onInsert: (code: string) => void;
+  onApply?: (code: string, lang: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const cv = useStrings().chat;
@@ -322,12 +351,39 @@ function CodeBlock({
           <button className="mini-btn" onClick={() => onInsert(code)} title={cv.codeInsertTitle}>
             {cv.codeInsert}
           </button>
+          {onApply && (
+            <button className="mini-btn" onClick={() => onApply(code, lang)} title={cv.codeApplyTitle}>
+              {cv.codeApply}
+            </button>
+          )}
         </div>
       </div>
       <pre>
         <code>{code}</code>
       </pre>
     </div>
+  );
+}
+
+function RefText({ text, cwd, onOpen }: { text: string; cwd: string; onOpen: (absPath: string, line: number) => void }) {
+  const segs = React.useMemo(() => splitFileRefs(text), [text]);
+  if (segs.length === 0) return <>{text}</>;
+  return (
+    <>
+      {segs.map((s, i) => ('file' in s ? (
+        <button
+          key={i}
+          type="button"
+          className="ref-link"
+          title={s.text}
+          onClick={() => onOpen(joinAbs(cwd, (s as { file: string }).file), (s as { line: number }).line)}
+        >
+          {s.text}
+        </button>
+      ) : (
+        <span key={i}>{s.text}</span>
+      )))}
+    </>
   );
 }
 
@@ -360,10 +416,14 @@ export default function ChatView(props: Props) {
   const strings = useStrings();
   const cv = strings.chat;
   const gt = strings.goals;
+  const logLabels = { searchPh: cv.logSearchPh, errorsOnly: cv.logErrorsOnly, wrap: cv.logWrap, copy: cv.logCopy, copied: cv.logCopied };
   // The chat-event subscription below mounts once; handlers read the live
   // language through this ref (same pattern as cbRef for props).
   const langRef = useRef(lang);
   langRef.current = lang;
+  // Live settings for once-mounted listeners (composer insert, bundle add).
+  const calmRef = useRef(settings);
+  calmRef.current = settings;
   const examples = [cv.ex0, cv.ex1, cv.ex2];
   const reasoningEfforts: [string, string][] = [
     ['', strings.settings.cliDefault],
@@ -457,6 +517,9 @@ export default function ChatView(props: Props) {
   }, [props.paneActive]);
   // Plan mode is per session; a pending plan belongs to its own turn only.
   useEffect(() => {
+    setRerunFrom(null);
+    setCompareFor(null);
+    setApplyCode(null);
     setPlanMode(readPlanModeSafe(session.id));
     setPendingPlan(null);
     planTurnRef.current = false;
@@ -500,9 +563,30 @@ export default function ChatView(props: Props) {
   const [actOpen, setActOpen] = useState<string | null>(null);
   const [verifyScripts, setVerifyScripts] = useState<string[]>([]);
   const [verifyRunning, setVerifyRunning] = useState<{ msgId: string; script: string } | null>(null);
+  const [customVerifies, setCustomVerifies] = useState<VerifyCommand[]>([]);
+  const [verifyEditFor, setVerifyEditFor] = useState<string | null>(null);
+  const [cmdRunFor, setCmdRunFor] = useState<{ msgId: string; name: string; cmd: string; cwd: string } | null>(null);
+  const [hunkOpen, setHunkOpen] = useState<{ msgId: string; file: string } | null>(null);
+  const [hunks, setHunks] = useState<FileHunk[]>([]);
+  const [hunksLoading, setHunksLoading] = useState(false);
+  const [hunksStaged, setHunksStaged] = useState(false);
+  const [hunkSel, setHunkSel] = useState<number[]>([]);
+  const [hunkBusy, setHunkBusy] = useState(false);
+  const [verifyDraftName, setVerifyDraftName] = useState('');
+  const [verifyDraftCmd, setVerifyDraftCmd] = useState('');
+  const [rerunFrom, setRerunFrom] = useState<string | null>(null);
+  const [compareFor, setCompareFor] = useState<string | null>(null);
+  const [applyCode, setApplyCode] = useState<{ code: string; lang: string } | null>(null);
+  const [applyFile, setApplyFile] = useState('');
+  const [applyMode, setApplyMode] = useState<'append' | 'overwrite'>('append');
+  const [applyBusy, setApplyBusy] = useState(false);
   const [reverting, setReverting] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<MspApproval[]>([]);
+  // Approval keys whose edited command already runs app-side: kept mounted
+  // past the host's approval-resolved event so the result stays readable.
+  const editedRunKeysRef = useRef<Set<string>>(new Set());
   const [userInputs, setUserInputs] = useState<MspUserInputPrompt[]>([]);
+  const [steerPhase, setSteerPhase] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const runEngineRef = useRef<'msp' | 'exec'>('exec');
   const mspItemsRef = useRef(new Map<string, MspItem>());
@@ -523,6 +607,10 @@ export default function ChatView(props: Props) {
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
+  const [outboxOpen, setOutboxOpen] = useState(false);
+  const [excludeMemory, setExcludeMemory] = useState(false);
+  const [excludeGoal, setExcludeGoal] = useState(false);
+  const outboxRef = useRef<HTMLDivElement | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement | null>(null);
@@ -542,6 +630,20 @@ export default function ChatView(props: Props) {
   const followScrollRef = useRef(initialChatScroll?.follow ?? true);
   const scrollSaveTimerRef = useRef<number | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const stuckBaseRef = useRef(session.messages.length);
+  const stuckCount = stuckOutputCount(stuckBaseRef.current, session.messages.length);
+  useEffect(() => {
+    stuckBaseRef.current = session.messages.length;
+  }, [session.id]);
+  const timelineRequests = useMemo(() => {
+    const map: Record<string, string> = {};
+    let lastUser = '';
+    for (const mm of session.messages) {
+      if (mm.role === 'user' && mm.text && mm.text.trim()) lastUser = mm.text;
+      else if (mm.role === 'assistant') map[mm.id] = lastUser;
+    }
+    return map;
+  }, [session.messages]);
   const persistChatScrollRef = useRef<() => void>(() => {});
   persistChatScrollRef.current = () => {
     try { localStorage.setItem(scrollPositionKey, JSON.stringify(chatScrollStateRef.current)); } catch { /* optional reading position */ }
@@ -949,6 +1051,13 @@ export default function ChatView(props: Props) {
   }, [draftKey, input, session.id, props.onDraftStatus]);
 
   useEffect(() => {
+    try {
+      if (draftOwnerRef.current !== session.id) return;
+      saveAttachDraft(localStorage, session.id, attach);
+    } catch { /* storage unavailable */ }
+  }, [attach, session.id]);
+
+  useEffect(() => {
     const onComposerInsert = (event: Event) => {
       const detail = (event as CustomEvent<{ text?: unknown; imagePath?: unknown }>).detail;
       const text = detail?.text;
@@ -962,6 +1071,7 @@ export default function ChatView(props: Props) {
       if (shot) void attachFilesRef.current([shot]);
       setNotice(cv.composerInserted);
       scheduleAfterPaint(() => {
+        if (isCalmFocus(calmRef.current)) return;
         const textarea = composerInputRef.current;
         if (!textarea) return;
         textarea.focus();
@@ -971,6 +1081,51 @@ export default function ChatView(props: Props) {
     window.addEventListener('musician:composer-insert', onComposerInsert);
     return () => window.removeEventListener('musician:composer-insert', onComposerInsert);
   }, []);
+
+  const [selectionBundle, setSelectionBundle] = useState<BundleSelection[]>([]);
+  const selectionBundleRef = useRef(selectionBundle);
+  selectionBundleRef.current = selectionBundle;
+
+  useEffect(() => {
+    const onBundleAdd = (event: Event) => {
+      const detail = (event as CustomEvent<Record<string, unknown>>).detail;
+      if (!detail || typeof detail !== 'object') return;
+      const next = addSelectionToBundle(selectionBundleRef.current, detail);
+      if (!next.added) {
+        if (next.reason === 'empty') return;
+        setNotice(next.reason === 'duplicate'
+          ? STRINGS[langRef.current].chat.bundleDuplicate
+          : formatStr(STRINGS[langRef.current].chat.bundleFull, { max: SELECTION_BUNDLE_MAX }));
+        return;
+      }
+      setSelectionBundle(next.bundle);
+      setNotice(formatStr(STRINGS[langRef.current].chat.bundleAdded, { count: next.bundle.length }));
+    };
+    window.addEventListener('musician:selection-bundle-add', onBundleAdd);
+    return () => window.removeEventListener('musician:selection-bundle-add', onBundleAdd);
+  }, []);
+
+  const sendSelectionBundle = () => {
+    const bundle = selectionBundleRef.current;
+    if (bundle.length === 0) return;
+    const head = formatStr(STRINGS[langRef.current].chat.bundleAskHead, { count: bundle.length });
+    const parts = bundle
+      .map((entry) => formatEditorSelectionPrompt(entry, langRef.current))
+      .filter((part) => part.trim());
+    if (parts.length === 0) return;
+    promptHistoryIndexRef.current = null;
+    setFileMention(null);
+    setInput((current) => `${current.trimEnd()}${current.trim() ? '\n\n' : ''}${head}\n\n${parts.join('\n\n')}`);
+    setSelectionBundle([]);
+    setNotice(STRINGS[langRef.current].chat.composerInserted);
+    scheduleAfterPaint(() => {
+      if (isCalmFocus(calmRef.current)) return;
+      const textarea = composerInputRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    });
+  };
 
   useEffect(() => {
     const onMemoryChange = () => setMemoryTick((t) => t + 1);
@@ -984,6 +1139,18 @@ export default function ChatView(props: Props) {
     promptHistoryIndexRef.current = null;
     clearAnnotations();
     try { setInput(localStorage.getItem(draftKey) || ''); } catch { setInput(''); }
+    try {
+      const draft = loadAttachDraft(localStorage, session.id);
+      const folders = draft.kept.filter((d) => d.folder);
+      const files = draft.kept.filter((d) => !d.folder);
+      if (folders.length > 0) {
+        setAttach(folders.map((d) => ({ path: d.path, name: d.name, content: '', image: false, folder: true })));
+      } else {
+        setAttach([]);
+      }
+      if (files.length > 0 && hasBridge()) void attachFilesRef.current(files.map((d) => d.path));
+      if (draft.droppedImages) setNotice(cv.attachImagesDropped);
+    } catch { /* draft restore best-effort */ }
   }, [draftKey, session.id]);
 
   useLayoutEffect(() => {
@@ -1076,7 +1243,7 @@ export default function ChatView(props: Props) {
       return;
     }
     const title = session.title.replace(/[\r\n\t]+/g, ' ').trim() || cv.exportTitle;
-    const transcript = formatSessionTranscript(session, { projectFallback: folder, exportedAt: Date.now(), lang });
+    const transcript = maskSecrets(formatSessionTranscript(session, { projectFallback: folder, exportedAt: Date.now(), lang }));
     try {
       const result = await api().exportMarkdown(title, transcript);
       if (!result.ok) throw new Error(result.error || cv.exportFailed);
@@ -1246,7 +1413,7 @@ export default function ChatView(props: Props) {
     if (props.claudeSignal > 0) void openHandoff('claude');
   }, [props.claudeSignal]);
 
-  // Slash "/model" → App signal → open the model menu here (idle only).
+  // Slash "/model" →App signal →open the model menu here (idle only).
   useEffect(() => {
     if (props.modelPickerSignal <= 0) return;
     if (runRef.current) {
@@ -1255,6 +1422,12 @@ export default function ChatView(props: Props) {
     }
     setModelPickerOpen(true);
   }, [props.modelPickerSignal]);
+
+  // Palette "project memory" → App signal → open the memory dialog here.
+  useEffect(() => {
+    if (props.memorySignal <= 0 || !folder) return;
+    setMemoryOpen(true);
+  }, [props.memorySignal, folder]);
 
   // Keep latest callbacks without re-subscribing.
   const cbRef = useRef(props);
@@ -1343,6 +1516,7 @@ export default function ChatView(props: Props) {
               }
             : undefined),
         timeout: timedOut || undefined,
+        connTransient: classifyRunError(error) === 'transient' || undefined,
         plan: planTurnRef.current || undefined,
         review: reviewTurnRef.current || undefined,
         checkpointId: turnCheckpointRef.current || undefined,
@@ -1372,7 +1546,8 @@ export default function ChatView(props: Props) {
       if (sc) sc.scrollTop = sc.scrollHeight;
       void (async () => {
         const after = await gitSnapshot(cwd || '');
-        const changed = error ? [] : diffPaths(beforeRef.current, after);
+        const snap = error ? { changed: [], preexisting: [] } : diffTurnSnapshots(beforeRef.current, after);
+        const changed = snap.changed;
         let stats: ChangedStat[] | undefined;
         if (changed.length > 0 && cwd && hasBridge()) {
           try {
@@ -1387,6 +1562,7 @@ export default function ChatView(props: Props) {
         }
         const patch: Partial<ChatMessage> = {};
         if (changed.length > 0) patch.changedFiles = changed;
+        if (snap.preexisting.length > 0) patch.preexistingFiles = snap.preexisting;
         if (stats && stats.length > 0) patch.changedStats = stats;
         if (changed.length > 0 && acts.length === 0) patch.work = [formatStr(liveCv.workChanged, { files: changed.join(', ') })];
         if (Object.keys(patch).length > 0) cbRef.current.onUpdateMessage(msgId, patch);
@@ -1408,7 +1584,9 @@ export default function ChatView(props: Props) {
     });
     const offApprDone = api().onMspApprovalResolved(({ approvalId }) => {
       if (!approvalId) return;
-      setApprovals((prev) => prev.filter((x) => x.approval.approvalId !== approvalId));
+      // Edited-run cards stay mounted so the user can read the result;
+      // they leave through their own [close] (onDismissApproval) instead.
+      setApprovals((prev) => prev.filter((x) => x.approval.approvalId !== approvalId && !editedRunKeysRef.current.has(x.key)));
     });
     const offUserInput = api().onMspUserInput((prompt) => {
       const sid = cbRef.current.session.id;
@@ -1539,8 +1717,10 @@ export default function ChatView(props: Props) {
   useEffect(() => {
     if (!hasBridge() || !folder) {
       setVerifyScripts([]);
+      setCustomVerifies([]);
       return;
     }
+    setCustomVerifies(loadVerifyCommands(typeof localStorage === 'undefined' ? null : localStorage, folder));
     api()
       .verifyScripts(folder)
       .then((r) => {
@@ -1607,7 +1787,7 @@ export default function ChatView(props: Props) {
   }, [modelPickerOpen]);
 
   useEffect(() => {
-    if (!actionMenuOpen && !modelPickerOpen && !approvalMenuOpen) return;
+    if (!actionMenuOpen && !modelPickerOpen && !approvalMenuOpen && !outboxOpen) return;
     const onPointerDown = (e: PointerEvent) => {
       const target = e.target as Node | null;
       if (!target) return;
@@ -1621,6 +1801,9 @@ export default function ChatView(props: Props) {
       if (approvalMenuOpen && !approvalMenuRef.current?.contains(target)) {
         setApprovalMenuOpen(false);
       }
+      if (outboxOpen && !outboxRef.current?.contains(target)) {
+        setOutboxOpen(false);
+      }
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -1631,6 +1814,7 @@ export default function ChatView(props: Props) {
         if (actionMenuOpen) setActionMenuOpen(false);
         if (modelPickerOpen) setModelPickerOpen(false);
         if (approvalMenuOpen) setApprovalMenuOpen(false);
+        if (outboxOpen) setOutboxOpen(false);
       }
     };
     document.addEventListener('pointerdown', onPointerDown);
@@ -1639,7 +1823,7 @@ export default function ChatView(props: Props) {
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKey);
     };
-  }, [actionMenuOpen, modelPickerOpen, approvalMenuOpen, reasoningOpen]);
+  }, [actionMenuOpen, modelPickerOpen, approvalMenuOpen, reasoningOpen, outboxOpen]);
 
   useEffect(() => {
     if (run) {
@@ -1647,6 +1831,7 @@ export default function ChatView(props: Props) {
       setModelPickerOpen(false);
       setApprovalMenuOpen(false);
       setReasoningOpen(false);
+      setOutboxOpen(false);
     }
   }, [run]);
 
@@ -1904,12 +2089,29 @@ export default function ChatView(props: Props) {
       submitGoalSetup();
       return;
     }
+    // Edit-and-rerun: the composer text becomes a new branch from the
+    // marked request instead of a follow-up in this conversation.
+    if (raw === undefined && rerunFrom && !run) {
+      const text = input.trim();
+      if (!text) return;
+      setRerunFrom(null);
+      props.onRerunBranch(rerunFrom, text);
+      return;
+    }
     const rawText = (raw ?? input).trim();
     const attachments = options.ignoreAttachments ? [] : attach;
     if ((!rawText && attachments.length === 0) || run) return;
     if (!hasBridge()) {
       setNotice(cv.needAppCli);
       return;
+    }
+    const sendCwd = session.cwd || folder;
+    if (sendCwd && (props.runningFolders || []).includes(sendCwd)) {
+      if (await props.onConfirm({
+        title: cv.conflictTitle,
+        message: formatStr(cv.conflictMsg, { folder: sendCwd }),
+        confirmLabel: cv.conflictConfirm,
+      }) !== 'confirm') return;
     }
     // Composer-originated sends expand staged "[주석]" tokens into their
     // full browser-section payloads; sending is the commit point, so the
@@ -1975,11 +2177,16 @@ export default function ChatView(props: Props) {
     // kickoff) already built the exact wire — wrapping again would inject
     // the goal twice or drag in a stale previously-active goal.
     const base = planTurn ? buildPlanPrompt(full, lang) : full;
-    const wire = options.rawWire ? base : applyGoalContext(base, activeLinkedGoal(props.goalStore, session.id), lang);
+    // One-shot outbox excludes: the user reviewed the outgoing context and
+    // dropped the goal and/or memory for this send only.
+    const linkedGoal = excludeGoal ? null : activeLinkedGoal(props.goalStore, session.id);
+    const wire = options.rawWire ? base : applyGoalContext(base, linkedGoal, lang);
     // Project memory rides after the goal block as its own labeled section,
     // so the pinned goal wrapping above stays exactly as specified.
-    const memos = options.rawWire ? '' : formatMemoryContext(loadProjectMemories(), folder);
+    const memos = options.rawWire || excludeMemory ? '' : formatMemoryContext(loadProjectMemories(), folder);
     const wireWithMemory = `${wire}${memos}`;
+    setExcludeMemory(false);
+    setExcludeGoal(false);
     try {
       const ov = sendOverrides(cbRef.current.session);
       const res = await api().chatStart(wireWithMemory, folder, cbRef.current.session.id, cbRef.current.session.mspSessionId, planTurn || undefined, Object.keys(ov).length > 0 ? ov : undefined, reviewTurn || undefined);
@@ -2007,8 +2214,7 @@ export default function ChatView(props: Props) {
       setActOpen(null);
       setRun(runRef.current);
       cbRef.current.onRunningChange(true);
-      // A plan/review turn's session id belongs to its read-only session —
-      // adopting it would unlink the main conversation. Record the engine
+      // A plan/review turn's session id belongs to its read-only session — adopting it would unlink the main conversation. Record the engine
       // honestly but keep the main link untouched.
       if (planTurn || reviewTurn) cbRef.current.onMspSession(cbRef.current.session.mspSessionId || '', runEngineRef.current);
       else cbRef.current.onMspSession(res.mspSessionId || '', runEngineRef.current);
@@ -2017,7 +2223,10 @@ export default function ChatView(props: Props) {
       if (mcpNotice) setNotice(mcpNotice);
       setStreamText('');
       setStreamStderr('');
-      if (!options.preserveDraft) setAttach([]);
+      if (!options.preserveDraft) {
+        setAttach([]);
+        try { clearAttachDraft(localStorage, session.id); } catch { /* storage unavailable */ }
+      }
     } catch (e) {
       cbRef.current.onAppendAssistant({
         id: uid('m'),
@@ -2049,8 +2258,7 @@ export default function ChatView(props: Props) {
     return true;
   };
 
-  // Goal-setup mode: the next composer submit becomes the goal title —
-  // the goal is created, linked to this session, and started at once.
+  // Goal-setup mode: the next composer submit becomes the goal title — the goal is created, linked to this session, and started at once.
   const enterGoalSetup = () => {
     setActionMenuOpen(false);
     props.onGoalSetupChange(true);
@@ -2277,6 +2485,9 @@ export default function ChatView(props: Props) {
   const steerTurn = async () => {
     const text = input.trim();
     if (!text || !run || !hasBridge()) return;
+    // A second click while the first steer is still on the wire must not
+    // deliver the same instruction twice.
+    if (isSteerSubmitting(steerPhase)) return;
     if (!canSteerRun({ engine: run.engine, run, hasBridge: true })) {
       setNotice(cv.steerUnsupported);
       return;
@@ -2285,20 +2496,34 @@ export default function ChatView(props: Props) {
     promptHistoryIndexRef.current = null;
     setInput('');
     setFileMention(null);
+    setSteerPhase(STEER_SENDING);
     try {
       const res = await api().chatStart(text, folder, session.id, session.mspSessionId, undefined, undefined, undefined, true);
       if (!res.ok) {
         setNotice(res.error === 'STEER_UNSUPPORTED' ? cv.steerUnsupported : (res.error || cv.steerFailed));
         setInput(text);
+        setSteerPhase(null);
         return;
       }
+      setSteerPhase(STEER_ACCEPTED);
+      // Accepted is a moment: once the turn keeps going with the steered
+      // input, the phase is processing until the run ends.
+      window.setTimeout(() => {
+        setSteerPhase((prev) => (prev === STEER_ACCEPTED ? STEER_PROCESSING : prev));
+      }, 1500);
       cbRef.current.onAppendUser({ id: uid('m'), role: 'user', text: label, ts: Date.now(), done: true, steered: res.steered || undefined });
       setNotice(res.steered ? cv.steerNotice : cv.steerStarted);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : String(e));
       setInput(text);
+      setSteerPhase(null);
     }
   };
+
+  // A steer belongs to its run: when the run ends the phase clears with it.
+  useEffect(() => {
+    if (!run) setSteerPhase(null);
+  }, [run]);
 
   const cancelInterruptDraft = () => {
     setInput('');
@@ -2315,11 +2540,15 @@ export default function ChatView(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run]);
 
-  const runVerify = async (m: ChatMessage, script: string) => {
+  const runVerify = async (
+    m: ChatMessage,
+    script: string,
+    exec?: (cwd: string) => Promise<{ ok: boolean; code?: number | null; tail?: string; error?: string }>,
+  ) => {
     if (!m.cwd || !hasBridge() || verifyRunning || run) return;
     setVerifyRunning({ msgId: m.id, script });
     try {
-      const r = await api().verifyRun(m.cwd, script);
+      const r = await (exec ? exec(m.cwd) : api().verifyRun(m.cwd, script));
       const rec = {
         script,
         ok: r.ok && r.code === 0,
@@ -2333,6 +2562,7 @@ export default function ChatView(props: Props) {
       const cur = cbRef.current.session.messages.find((x) => x.id === m.id);
       cbRef.current.onUpdateMessage(m.id, {
         verify: [...prev, rec],
+        verifiedSnapshot: changeSnapshotOf(cur ?? m),
         completion: cur ? judgeCompletion({
           goal: activeLinkedGoal(props.goalStore, cbRef.current.session.id) ?? null,
           verify: rec,
@@ -2368,6 +2598,203 @@ export default function ChatView(props: Props) {
     }
   };
 
+  const persistCustomVerifies = (next: VerifyCommand[]) => {
+    const capped = next.slice(0, VERIFY_COMMAND_MAX);
+    setCustomVerifies(capped);
+    if (folder) saveVerifyCommands(typeof localStorage === 'undefined' ? null : localStorage, folder, capped);
+  };
+  const addCustomVerify = () => {
+    const name = verifyDraftName.trim();
+    const cmd = verifyDraftCmd.trim();
+    if (!name || !cmd || customVerifies.some((v) => v.name === name)) return;
+    persistCustomVerifies([...customVerifies, { name, cmd }]);
+    setVerifyDraftName('');
+    setVerifyDraftCmd('');
+  };
+  const removeCustomVerify = (name: string) => {
+    persistCustomVerifies(customVerifies.filter((v) => v.name !== name));
+  };
+
+  const applyCandidates = React.useMemo(() => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (let i = session.messages.length - 1; i >= 0 && out.length < 20; i -= 1) {
+      for (const f of session.messages[i].changedFiles || []) {
+        if (!seen.has(f)) {
+          seen.add(f);
+          out.push(f);
+        }
+      }
+    }
+    for (const a of attach) {
+      if (!a.image && !a.folder && !seen.has(a.path)) {
+        seen.add(a.path);
+        out.push(a.path);
+      }
+    }
+    return out;
+  }, [session.messages, attach]);
+
+  const suggestApplyFile = () => {
+    for (let i = session.messages.length - 1; i >= 0; i -= 1) {
+      const files = session.messages[i].changedFiles;
+      if (files && files.length > 0) return files[files.length - 1];
+    }
+    const f = attach.find((a) => !a.image && !a.folder);
+    return f ? f.path : '';
+  };
+
+  const [applyCurrent, setApplyCurrent] = useState<string | null>(null);
+
+  const openApply = (code: string, lang: string) => {
+    setApplyCode({ code, lang });
+    setApplyFile(suggestApplyFile());
+    setApplyMode('append');
+    setApplyCurrent(null);
+  };
+
+  const loadApplyPreview = async () => {
+    const target = applyFile.trim();
+    if (!target || !hasBridge() || applyBusy) return;
+    setApplyBusy(true);
+    try {
+      const r = await api().readFile(joinAbs(session.cwd || folder, target));
+      if (!r.ok) {
+        setNotice(formatStr(cv.applyFailed, { err: r.error || '' }));
+        return;
+      }
+      setApplyCurrent(r.content ?? '');
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplyBusy(false);
+    }
+  };
+
+  const confirmApply = async () => {
+    if (!applyCode || applyCurrent === null || !hasBridge() || applyBusy) return;
+    const target = applyFile.trim();
+    if (!target) return;
+    if (await props.onConfirm({
+      title: cv.applyTitle,
+      message: formatStr(cv.applyConfirmMsg, { file: target, mode: applyMode === 'append' ? cv.applyModeAppend : cv.applyModeOverwrite }),
+      confirmLabel: cv.applyConfirm,
+    }) !== 'confirm') return;
+    setApplyBusy(true);
+    try {
+      const next = applyMode === 'overwrite'
+        ? applyCode.code
+        : `${applyCurrent}${applyCurrent === '' || applyCurrent.endsWith('\n') ? '' : '\n'}\n${applyCode.code}\n`;
+      const r = await api().writeFile(joinAbs(session.cwd || folder, target), next, applyCurrent);
+      if (!r.ok) {
+        setNotice(formatStr(cv.applyFailed, { err: r.error || '' }));
+        return;
+      }
+      setNotice(formatStr(cv.applyDone, { file: target }));
+      setApplyCode(null);
+      setApplyCurrent(null);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplyBusy(false);
+    }
+  };
+
+  const openTurnDiff = (m: ChatMessage, file: string) => {
+    const cur = cbRef.current.session.messages.find((x) => x.id === m.id) ?? m;
+    cbRef.current.onUpdateMessage(m.id, { reviewedAt: Date.now(), reviewedSnapshot: changeSnapshotOf(cur) });
+    cbRef.current.onOpenGitDiff(file, m.cwd || folder);
+  };
+
+  const toggleHunks = async (m: ChatMessage, file: string) => {
+    const cwd = m.cwd || folder;
+    if (!cwd || !hasBridge() || run) return;
+    if (hunkOpen && hunkOpen.msgId === m.id && hunkOpen.file === file) {
+      setHunkOpen(null);
+      return;
+    }
+    setHunkOpen({ msgId: m.id, file });
+    setHunks([]);
+    setHunkSel([]);
+    setHunksStaged(false);
+    setHunksLoading(true);
+    try {
+      const r = await api().gitHunks(cwd, file);
+      if (r.ok) {
+        const list = r.hunks || [];
+        setHunks(list);
+        setHunkSel(list.map((h) => h.index));
+        setHunksStaged(!!r.staged);
+      } else {
+        setNotice(formatStr(cv.hunkFailed, { err: r.error || '' }));
+      }
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
+    } finally {
+      setHunksLoading(false);
+    }
+  };
+  const toggleHunkSel = (index: number) => {
+    setHunkSel((prev) => (prev.includes(index) ? prev.filter((i) => i !== index) : [...prev, index]));
+  };
+  const discardHunks = async (m: ChatMessage, file: string, mode: 'selected' | 'unselected') => {
+    const cwd = m.cwd || folder;
+    if (!cwd || !hasBridge() || run || hunkBusy) return;
+    const all = hunks.map((h) => h.index);
+    const indices = mode === 'selected' ? hunkSel : all.filter((i) => !hunkSel.includes(i));
+    if (indices.length === 0) {
+      setNotice(cv.hunkEmptySel);
+      return;
+    }
+    if (await props.onConfirm({
+      title: cv.hunkConfirmTitle,
+      message: formatStr(cv.hunkConfirmMsg, { count: indices.length, file }),
+      confirmLabel: cv.hunkDiscardSel,
+      destructive: true,
+    }) !== 'confirm') return;
+    setHunkBusy(true);
+    try {
+      const r = await api().gitDiscardHunks(cwd, file, indices);
+      const bad = (r.results || []).find((x) => !x.ok);
+      if (!r.ok || bad) {
+        setNotice(formatStr(cv.hunkFailed, { err: (!r.ok && r.error) || (bad && bad.error) || '' }));
+        return;
+      }
+      setNotice(cv.hunkDone);
+      // Refresh the panel and the turn card stats for this file.
+      try {
+        const fresh = await api().gitHunks(cwd, file);
+        if (fresh.ok) {
+          const list = fresh.hunks || [];
+          setHunks(list);
+          setHunkSel(list.map((h) => h.index));
+          setHunksStaged(!!fresh.staged);
+        }
+      } catch { /* panel refresh best-effort */ }
+      try {
+        const ns = await api().gitNumstat(cwd);
+        const files = ns.ok && ns.files ? ns.files : [];
+        const entry = files.find((f) => f.file === file);
+        const cur = cbRef.current.session.messages.find((x) => x.id === m.id);
+        if (!entry && cur) {
+          cbRef.current.onUpdateMessage(m.id, {
+            changedFiles: (cur.changedFiles || []).filter((f) => f !== file),
+            changedStats: (cur.changedStats || []).filter((f) => f.file !== file),
+            preexistingFiles: (cur.preexistingFiles || []).filter((f) => f !== file),
+          });
+        } else if (entry && cur) {
+          cbRef.current.onUpdateMessage(m.id, {
+            changedStats: (cur.changedStats || []).map((f) => (f.file === file ? { file, added: entry.added, deleted: entry.deleted } : f)),
+          });
+        }
+      } catch { /* stats refresh best-effort */ }
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
+    } finally {
+      setHunkBusy(false);
+    }
+  };
+
   const doRevert = async (m: ChatMessage) => {
     if (!m.cwd || !m.changedFiles || m.changedFiles.length === 0 || !hasBridge() || run || reverting) return;
     if (await props.onConfirm({ title: cv.revertTitle, message: formatStr(cv.revertMsg, { count: m.changedFiles.length }), confirmLabel: cv.revertBtn, destructive: true }) !== 'confirm') return;
@@ -2390,7 +2817,24 @@ export default function ChatView(props: Props) {
 
   const doCheckpointRestore = async (m: ChatMessage) => {
     if (!m.cwd || !m.checkpointId || !hasBridge() || run || reverting) return;
-    if (await props.onConfirm({ title: cv.checkpointTitle, message: cv.checkpointMsg, confirmLabel: cv.checkpointBtn, destructive: true }) !== 'confirm') return;
+    let confirmMessage = cv.checkpointMsg;
+    try {
+      const pv = await api().checkpointPreview(m.cwd, session.id, m.checkpointId);
+      if (pv && pv.ok && pv.restore && pv.remove) {
+        const names = (l: { files: string[]; total: number }) =>
+          l.files.slice(0, 8).join(', ') || cv.noFiles;
+        const lines = [
+          cv.checkpointMsg,
+          formatStr(cv.checkpointPreviewRestore, { n: String(pv.restore.total), files: names(pv.restore) }),
+          formatStr(cv.checkpointPreviewRemove, { n: String(pv.remove.total), files: names(pv.remove) }),
+        ];
+        if (pv.overwrite) {
+          lines.push(formatStr(cv.checkpointPreviewOverwrite, { n: String(pv.overwrite.total), files: names(pv.overwrite) }));
+        }
+        confirmMessage = lines.join('\n');
+      }
+    } catch { confirmMessage = cv.checkpointMsg; }
+    if (await props.onConfirm({ title: cv.checkpointTitle, message: confirmMessage, confirmLabel: cv.checkpointBtn, destructive: true }) !== 'confirm') return;
     setReverting(m.id);
     try {
       const r = await api().checkpointRestore(m.cwd, session.id, m.checkpointId);
@@ -2407,8 +2851,7 @@ export default function ChatView(props: Props) {
     }
   };
 
-  // Exact resume: the new turn gets the stopped turn's durable record —
-  // original request, tools already run, open todos, last verify verdict,
+  // Exact resume: the new turn gets the stopped turn's durable record — original request, tools already run, open todos, last verify verdict,
   // output tail — instead of a bare tail. When the engine session link
   // survived, the prompt says so and the engine keeps its own context.
   const continueRun = (m: ChatMessage) => {
@@ -2426,6 +2869,15 @@ export default function ChatView(props: Props) {
   };
 
   const showEmpty = session.messages.length === 0 && !run;
+  const runStatusText = runStatusLine({
+    running: run,
+    activity: streamActivity,
+    liveAct: mspActs.find((a) => a.live) || null,
+    approvals,
+    userInputs,
+  }, lang);
+  const steerStatusText = steerPhase ? steerPhaseLabel(steerPhase, lang) : '';
+  const statusLineText = [runStatusText, steerStatusText].filter(Boolean).join(' · ');
   const activeCwd = session.cwd || folder;
   const workspaceName = activeCwd.split(/[\\/]/).filter(Boolean).pop() || activeCwd || cv.noWorkspace;
   const awaitingUserInput = !!runRef.current?.mspSessionId
@@ -2682,7 +3134,20 @@ export default function ChatView(props: Props) {
               <button type="button" role="tab" aria-selected={!isClaudeHandoff} className={isClaudeHandoff ? 'seg' : 'seg active'} disabled={handoffBusy} onClick={() => switchHandoffProvider('codex')}>{cv.handoffTabCodex}</button>
               <button type="button" role="tab" aria-selected={isClaudeHandoff} className={isClaudeHandoff ? 'seg active' : 'seg'} disabled={handoffBusy} onClick={() => switchHandoffProvider('claude')}>{cv.handoffTabClaude}</button>
             </div>
-            {handoffError && <div className="handoff-error" role="alert">{handoffError}</div>}
+            {handoffError && (
+              <div className="handoff-error" role="alert">
+                <span>{handoffError}</span>
+                <span className="recovery-actions">
+                  <button type="button" className="mini-btn" onClick={() => void openHandoff(handoffProvider)}>{strings.common.retry}</button>
+                  {recoveryActionsFor(handoffError).includes('auth') && (
+                    <button type="button" className="mini-btn" title={cv.recoveryAuthTitle} onClick={props.onOpenSettings}>{cv.recoveryAuth}</button>
+                  )}
+                  {recoveryActionsFor(handoffError).includes('logs') && (
+                    <button type="button" className="mini-btn" title={cv.recoveryLogsTitle} onClick={() => { void api().openLog().then((r) => { if (!r.ok) setNotice(cv.recoveryLogsTitle); }).catch(() => setNotice(cv.recoveryLogsTitle)); }}>{cv.recoveryLogs}</button>
+                  )}
+                </span>
+              </div>
+            )}
             {hoSessions.length > 0 && <label className="handoff-search">
               <SearchIcon size={15} />
               <input
@@ -2745,6 +3210,11 @@ export default function ChatView(props: Props) {
       {notice && (
         <div className="banner">
           <span>{notice}</span>
+          {recoveryActionsFor(notice).filter((a) => a === 'auth' || a === 'logs').map((a) => a === 'auth' ? (
+            <button key="auth" type="button" className="mini-btn" title={cv.recoveryAuthTitle} onClick={props.onOpenSettings}>{cv.recoveryAuth}</button>
+          ) : (
+            <button key="logs" type="button" className="mini-btn" title={cv.recoveryLogsTitle} onClick={() => { void api().openLog().then((r) => { if (!r.ok) setNotice(cv.recoveryLogsTitle); }).catch(() => setNotice(cv.recoveryLogsTitle)); }}>{cv.recoveryLogs}</button>
+          ))}
         </div>
       )}
       {props.paneActive && props.runningSessions.length > 0 && (
@@ -2820,6 +3290,7 @@ export default function ChatView(props: Props) {
         onScroll={(e) => {
           const el = e.currentTarget;
           const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 72;
+          if (!nearBottom && followScrollRef.current) stuckBaseRef.current = session.messages.length;
           followScrollRef.current = nearBottom;
           chatScrollStateRef.current = { scrollTop: el.scrollTop, follow: nearBottom };
           setShowScrollBottom(!nearBottom);
@@ -2858,7 +3329,7 @@ export default function ChatView(props: Props) {
         {session.messages.map((m) =>
           m.role === 'user' ? (
             <div key={m.id} data-message-id={m.id} className={`msg-row right${messageMatchSet.has(m.id) ? ' msg-find-match' : ''}${messageMatches[messageFindIndex] === m.id ? ' msg-find-active' : ''}`}>
-              <div className="bubble-user">{m.text}</div>
+              <div className="bubble-user">{maskSecrets(m.text)}</div>
               {m.steered && <span className="msg-plan-tag">{cv.steerTag}</span>}
               {m.ts != null && fmtMsgTime(m.ts, lang) && (
                 <span className="msg-time" title={new Date(m.ts).toLocaleString(lang === 'en' ? 'en-US' : 'ko-KR')}>{fmtMsgTime(m.ts, lang)}</span>
@@ -2871,6 +3342,19 @@ export default function ChatView(props: Props) {
                   aria-label={cv.restoreTitle}
                 >
                   <PencilIcon size={14} />
+                </button>
+              )}
+              {!m.text.includes('[첨부:') && !run && hasBridge() && (
+                <button
+                  className="icon-btn msg-copy msg-rerun-branch"
+                  onClick={() => {
+                    restorePromptToComposer(m.text, cv.rerunBranchHint);
+                    setRerunFrom(m.id);
+                  }}
+                  title={cv.rerunBranchTitle}
+                  aria-label={cv.rerunBranchTitle}
+                >
+                  <ForkIcon size={14} />
                 </button>
               )}
               {m.id === latestUserMessageId && !m.text.includes('[첨부:') && !run && attach.length === 0 && hasBridge() && (
@@ -2895,7 +3379,7 @@ export default function ChatView(props: Props) {
               <div className="bubble-ai">
                 {m.durationMs != null && m.durationMs > 0 && <div className="work-dur">{fmtDur(m.durationMs, lang)}</div>}
                 <div className="md">
-                  <React.Suspense fallback={<div className="md-pending">{linkifyFiles(m.text)}</div>}>
+                  <React.Suspense fallback={<div className="md-pending">{linkifyFiles(maskSecrets(m.text))}</div>}>
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={{
@@ -2914,6 +3398,7 @@ export default function ChatView(props: Props) {
                               lang={codeLang}
                               code={code}
                               onInsert={cbRef.current.onInsertToEditor}
+                              onApply={(c, l) => openApply(c, l)}
                             />
                           );
                         }
@@ -2949,10 +3434,19 @@ export default function ChatView(props: Props) {
                       },
                       }}
                     >
-                      {linkifyFiles(m.text)}
+                      {linkifyFiles(maskSecrets(m.text))}
                     </ReactMarkdown>
                   </React.Suspense>
                 </div>
+                {(() => {
+                  const summary = summarizeTurn(m, { verifyOffered: verifyScripts.length > 0 });
+                  if (!summary.hasCard) return null;
+                  return (
+                    <div className="turn-summary-card">
+                      <div className="turn-summary-head">
+                        <b>{cv.turnSummaryTitle}</b>
+                        {summary.todoOpen > 0 && <span>{formatStr(cv.todosLeft, { left: summary.todoOpen })}</span>}
+                      </div>
                 {m.changedStats && m.changedStats.length > 0 && (
                   <div className="change-card">
                     <div className="change-head">
@@ -2960,6 +3454,12 @@ export default function ChatView(props: Props) {
                       <b>{formatStr(cv.editedFiles, { count: m.changedStats.length })}</b>
                       <span className="code-ok">+{m.changedStats.reduce((n, f) => n + f.added, 0)}</span>
                       <span className="code-bad">-{m.changedStats.reduce((n, f) => n + f.deleted, 0)}</span>
+                      {m.reviewedSnapshot && m.reviewedSnapshot !== changeSnapshotOf(m) && (
+                        <span className="stale-tag" title={cv.reviewedStaleTitle}>{cv.reviewedStale}</span>
+                      )}
+                      {m.verifiedSnapshot && m.verifiedSnapshot !== changeSnapshotOf(m) && (
+                        <span className="stale-tag" title={cv.verifyStaleTitle}>{cv.verifyStale}</span>
+                      )}
                       <span className="head-spacer" />
                       {m.reverted ? (
                         <span className="timeout-tag">{cv.revertedTag}</span>
@@ -2975,7 +3475,7 @@ export default function ChatView(props: Props) {
                           </button>
                           <button
                             className="mini-btn"
-                            onClick={() => cbRef.current.onOpenGitDiff(m.changedStats![0].file, m.cwd || folder)}
+                            onClick={() => openTurnDiff(m, m.changedStats![0].file)}
                             title={cv.reviewFirst}
                           >
                             {cv.reviewBtn}
@@ -2983,21 +3483,100 @@ export default function ChatView(props: Props) {
                         </>
                       )}
                     </div>
-                    {m.changedStats.map((f) => (
-                      <button
-                        key={f.file}
-                        className="change-row"
-                        title={formatStr(strings.files.diffTitle, { file: f.file })}
-                        onClick={() => cbRef.current.onOpenGitDiff(f.file, m.cwd || folder)}
-                      >
-                        <span className="change-file">{f.file}</span>
-                        <span className="code-ok">+{f.added}</span>
-                        <span className="code-bad">-{f.deleted}</span>
-                      </button>
-                    ))}
+                    {m.changedStats.map((f) => {
+                      const open = !!hunkOpen && hunkOpen.msgId === m.id && hunkOpen.file === f.file;
+                      return (
+                        <div key={f.file} className="change-file-block">
+                          <div className="change-file-top">
+                            <button
+                              className="change-row"
+                              title={formatStr(strings.files.diffTitle, { file: f.file })}
+                              onClick={() => openTurnDiff(m, f.file)}
+                            >
+                              <span className="change-file">{f.file}</span>
+                              <span className="code-ok">+{f.added}</span>
+                              <span className="code-bad">-{f.deleted}</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="mini-btn"
+                              disabled={!!run || hunkBusy}
+                              onClick={() => void toggleHunks(m, f.file)}
+                              title={cv.hunkToggleTitle}
+                            >
+                              {open ? cv.hunkHide : cv.hunkShow}
+                            </button>
+                          </div>
+                          {open && (
+                            <div className="hunk-panel">
+                              {hunksLoading ? (
+                                <span className="hunk-note">{cv.hunkLoading}</span>
+                              ) : hunks.length === 0 ? (
+                                <span className="hunk-note">{hunksStaged ? cv.hunkStagedNote : cv.hunkNone}</span>
+                              ) : (
+                                <>
+                                  {hunksStaged && <div className="hunk-note">{cv.hunkStagedNote}</div>}
+                                  {hunks.map((h) => (
+                                    <label key={h.index} className="hunk-row">
+                                      <input
+                                        type="checkbox"
+                                        checked={hunkSel.includes(h.index)}
+                                        disabled={hunkBusy}
+                                        onChange={() => toggleHunkSel(h.index)}
+                                      />
+                                      <div className="hunk-body">
+                                        <code className="hunk-head">
+                                          {h.head} <span className="code-ok">+{h.added}</span>{' '}
+                                          <span className="code-bad">-{h.removed}</span>
+                                          {h.truncated ? ` (${cv.hunkTruncated})` : ''}
+                                        </code>
+                                        <pre className="hunk-pre">
+                                          {h.lines.map((l, i) => (
+                                            <span
+                                              key={i}
+                                              className={l.startsWith('+') && !l.startsWith('+++') ? 'hl-add' : l.startsWith('-') && !l.startsWith('---') ? 'hl-del' : 'hl-ctx'}
+                                            >
+                                              {l}
+                                              {'\n'}
+                                            </span>
+                                          ))}
+                                        </pre>
+                                      </div>
+                                    </label>
+                                  ))}
+                                  <div className="hunk-actions">
+                                    <button
+                                      type="button"
+                                      className="mini-btn"
+                                      disabled={hunkBusy}
+                                      onClick={() => void discardHunks(m, f.file, 'selected')}
+                                    >
+                                      {cv.hunkDiscardSel}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="mini-btn"
+                                      disabled={hunkBusy}
+                                      onClick={() => void discardHunks(m, f.file, 'unselected')}
+                                    >
+                                      {cv.hunkKeepSel}
+                                    </button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {m.preexistingFiles && m.preexistingFiles.length > 0 && (
+                      <div className="preexisting-line" title={m.preexistingFiles.join(', ')}>
+                        {formatStr(cv.turnPreexisting, { files: m.preexistingFiles.join(', ') })}
+                      </div>
+                    )}
                   </div>
                 )}
-                {m.cwd && verifyScripts.length > 0 && (
+                {m.cwd && (verifyScripts.length > 0 || customVerifies.length > 0 || verifyEditFor === m.id) && (
                   <div className="verify-row">
                     <span className="verify-label">{cv.verifyLabel}</span>
                     {verifyScripts.map((s) => {
@@ -3016,12 +3595,91 @@ export default function ChatView(props: Props) {
                         </button>
                       );
                     })}
+                    {customVerifies.map((v) => {
+                      const r = m.verify?.find((x) => x.script === v.name);
+                      const busy = verifyRunning?.msgId === m.id && verifyRunning?.script === v.name;
+                      return (
+                        <button
+                          key={`custom:${v.name}`}
+                          className={r ? (r.ok ? 'vchip ok custom' : 'vchip bad custom') : 'vchip custom'}
+                          disabled={!!run || !!verifyRunning}
+                          onClick={() => {
+                            if (m.cwd) setCmdRunFor({ msgId: m.id, name: v.name, cmd: v.cmd, cwd: m.cwd });
+                          }}
+                          title={formatStr(cv.verifyEditRunTitle, { cmd: v.cmd })}
+                        >
+                          {busy ? '…' : r ? (r.ok ? <CheckIcon size={12} /> : <XIcon size={12} />) : null}
+                          {v.name}
+                        </button>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      className="mini-btn"
+                      onClick={() => setVerifyEditFor(verifyEditFor === m.id ? null : m.id)}
+                    >
+                      {cv.verifyCustomEdit}
+                    </button>
+                  </div>
+                )}
+                {verifyEditFor === m.id && m.cwd && (
+                  <div className="verify-custom-edit">
+                    <div className="verify-custom-title">{cv.verifyCustomTitle}</div>
+                    {customVerifies.map((v) => (
+                      <div key={v.name} className="verify-custom-row">
+                        <code>{v.name}</code>
+                        <span className="verify-custom-cmd">{v.cmd}</span>
+                        <button type="button" className="mini-btn" onClick={() => removeCustomVerify(v.name)}>
+                          {cv.verifyCustomRemove}
+                        </button>
+                      </div>
+                    ))}
+                    <div className="verify-custom-row">
+                      <input
+                        value={verifyDraftName}
+                        onChange={(e) => setVerifyDraftName(e.target.value)}
+                        placeholder={cv.verifyCustomName}
+                        maxLength={40}
+                      />
+                      <input
+                        value={verifyDraftCmd}
+                        onChange={(e) => setVerifyDraftCmd(e.target.value)}
+                        placeholder={cv.verifyCustomCmd}
+                        maxLength={500}
+                      />
+                      <button
+                        type="button"
+                        className="mini-btn"
+                        disabled={!verifyDraftName.trim() || !verifyDraftCmd.trim()}
+                        onClick={addCustomVerify}
+                      >
+                        {cv.verifyCustomAdd}
+                      </button>
+                    </div>
                   </div>
                 )}
                 {m.verify && m.verify.length > 0 && m.verify[m.verify.length - 1].tail && (
                   <details className="verify-out">
                     <summary>{cv.verifyOut}</summary>
-                    <pre>{m.verify[m.verify.length - 1].tail}</pre>
+                    {failedVerifications(m.verify).length > 0 && !run && (
+                      <button
+                        type="button"
+                        className="mini-btn"
+                        onClick={() => restorePromptToComposer(`${cv.fixRequestHead}\n\n${buildVerifyFixPrompt(failedVerifications(m.verify))}`, cv.retryRestored)}
+                      >
+                        {cv.fixRequestBtn}
+                      </button>
+                    )}
+                    <LogView text={m.verify[m.verify.length - 1].tail} labels={logLabels}
+                      renderLine={(line, i) => (
+                        <RefText
+                          key={i}
+                          text={maskSecrets(line)}
+                          cwd={m.cwd || folder}
+                          onOpen={(abs, ln) => cbRef.current.onOpenFileAtLine(abs, ln)}
+                        />
+                      )}
+                    />
                   </details>
                 )}
                 {m.todos && m.todos.length > 0 && (
@@ -3030,6 +3688,9 @@ export default function ChatView(props: Props) {
                     <TodoList items={m.todos} cv={cv} />
                   </details>
                 )}
+                    </div>
+                  );
+                })()}
                 {m.durationMs != null ||
                 (m.code !== null && m.code !== undefined) ||
                 m.stderr ||
@@ -3083,10 +3744,29 @@ export default function ChatView(props: Props) {
                                 {t.durationMs !== null && t.durationMs !== undefined && <span>{(t.durationMs / 1000).toFixed(1)}s</span>}
                               </div>
                               {t.error && <div className="code-bad">{t.error}</div>}
-                              {t.output && <pre>{t.output}</pre>}
+                              {t.output && <LogView text={t.output} labels={logLabels} />}
                             </li>
                           ))}
                         </ul>
+                      </details>
+                    )}
+                    {buildTurnTimeline(m, timelineRequests[m.id]).length > 0 && (
+                      <details className="turn-timeline">
+                        <summary>{cv.timelineTitle}</summary>
+                        <ol className="turn-timeline-list">
+                          {buildTurnTimeline(m, timelineRequests[m.id]).map((p) => (
+                            <li key={p.phase} className={`turn-timeline-row phase-${p.phase}`}>
+                              <span className="turn-timeline-phase">{p.phase === 'request' ? cv.tlRequest : p.phase === 'tools' ? cv.tlTools : p.phase === 'files' ? cv.tlFiles : p.phase === 'verify' ? cv.tlVerify : cv.tlDone}</span>
+                              <span className="turn-timeline-detail">
+                                {p.phase === 'request' ? p.detail : null}
+                                {p.phase === 'tools' ? (<>{formatStr(cv.tlCount, { count: p.count || 0 })}{(p.bad || 0) > 0 ? ` · ${formatStr(cv.tlFailed, { bad: p.bad })}` : ''}</>) : null}
+                                {p.phase === 'files' ? `${formatStr(cv.tlCount, { count: p.count || 0 })} (+${p.added || 0}/-${p.deleted || 0})` : null}
+                                {p.phase === 'verify' ? formatStr(cv.tlVerifyOk, { ok: p.ok || 0, count: p.count || 0 }) : null}
+                                {p.phase === 'done' ? (<>{p.state}{p.ms != null ? ` · ${formatStr(cv.tlSecs, { s: (p.ms / 1000).toFixed(1) })}` : ''}</>) : null}
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
                       </details>
                     )}
                     {m.compaction && (
@@ -3099,10 +3779,16 @@ export default function ChatView(props: Props) {
                     {m.stderr && (
                       <details>
                         <summary>{cv.stderrView}</summary>
-                        <pre className="stderr">{m.stderr}</pre>
+                        <LogView text={m.stderr} labels={logLabels} tone="stderr" />
                       </details>
                     )}
                     {m.timeout && <span className="timeout-tag">{cv.timedOut}</span>}
+                    {m.connTransient && <span className="timeout-tag conn-tag">{cv.connTransientTag}</span>}
+                    {m.connTransient && !run && (
+                      <button className="mini-btn" onClick={() => continueRun(m)}>
+                        {cv.connRetryBtn}
+                      </button>
+                    )}
                     {m.completion && (
                       <span
                         className={`completion-tag completion-${m.completion.state}`}
@@ -3143,6 +3829,16 @@ export default function ChatView(props: Props) {
               <button className="icon-btn msg-copy msg-fork" onClick={() => cbRef.current.onForkSession(m.id)} title={cv.forkTitle} aria-label={cv.forkLabel}>
                 <ForkIcon size={14} />
               </button>
+              {props.forkCompare && m.text.trim() && (
+                <button
+                  className="icon-btn msg-copy msg-compare"
+                  onClick={() => setCompareFor(compareFor === m.id ? null : m.id)}
+                  title={cv.compareTitle}
+                  aria-label={cv.compareTitle}
+                >
+                  <DiffIcon size={14} />
+                </button>
+              )}
             </div>
           ),
         )}
@@ -3155,14 +3851,141 @@ export default function ChatView(props: Props) {
             onCancel={() => api().mspUserInputCancel(prompt.key)}
           />
         ))}
+        {compareFor && props.forkCompare && (() => {
+          const target = session.messages.find((x) => x.id === compareFor);
+          if (!target) return null;
+          const { ops, truncated } = diffLines(props.forkCompare.originText, target.text);
+          const { added, removed } = diffStats(ops);
+          return (
+            <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCompareFor(null); }}>
+              <section className="modal compare-dialog" role="dialog" aria-modal="true" aria-labelledby="compare-title" tabIndex={-1} onKeyDown={(event) => {
+                if (event.key === 'Escape') { event.preventDefault(); setCompareFor(null); }
+              }}>
+                <div className="modal-header"><h3 id="compare-title">{cv.compareTitle}</h3></div>
+                <div className="modal-body">
+                  <div className="compare-sub">
+                    {formatStr(cv.compareCaption, { origin: props.forkCompare.originTitle, added, removed })}
+                    {truncated ? ` (${cv.compareTruncated})` : ''}
+                  </div>
+                  <pre className="compare-pre">
+                    {ops.slice(0, 300).map((op, i) => (
+                      <span key={i} className={op.type === '+' ? 'hl-add' : op.type === '-' ? 'hl-del' : 'hl-ctx'}>
+                        {op.type === ' ' ? ' ' : op.type}{op.text}
+                        {'\n'}
+                      </span>
+                    ))}
+                  </pre>
+                </div>
+                <div className="modal-footer">
+                  <button type="button" className="btn" onClick={() => setCompareFor(null)}>
+                    {strings.common.close}
+                  </button>
+                </div>
+              </section>
+            </div>
+          );
+        })()}
+        {cmdRunFor && (() => {
+          const target = session.messages.find((x) => x.id === cmdRunFor.msgId);
+          if (!target) return null;
+          return (
+            <CommandEditDialog
+              title={formatStr(cv.verifyEditRunHead, { name: cmdRunFor.name })}
+              cmdLabel={cv.verifyEditRunCmd}
+              cwdLabel={cv.verifyEditRunCwd}
+              initialCmd={cmdRunFor.cmd}
+              initialCwd={cmdRunFor.cwd}
+              confirmLabel={cv.verifyEditRunGo}
+              cancelLabel={strings.common.cancel}
+              draftKey={cmdRunFor.msgId}
+              busy={!!verifyRunning || !!run}
+              onConfirm={({ cwd, cmd }) => {
+                setCmdRunFor(null);
+                void runVerify(target, cmdRunFor.name, () => api().verifyExec(cwd, cmd));
+              }}
+              onClose={() => setCmdRunFor(null)}
+            />
+          );
+        })()}
+        {applyCode && (() => {
+          const next = applyCurrent === null ? null : (applyMode === 'overwrite'
+            ? applyCode.code
+            : `${applyCurrent}${applyCurrent === '' || applyCurrent.endsWith('\n') ? '' : '\n'}\n${applyCode.code}\n`);
+          const preview = next === null ? null : diffLines(applyCurrent || '', next);
+          return (
+            <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !applyBusy) { setApplyCode(null); setApplyCurrent(null); } }}>
+              <section className="modal apply-dialog" role="dialog" aria-modal="true" aria-labelledby="apply-title" tabIndex={-1} onKeyDown={(event) => {
+                if (event.key === 'Escape' && !applyBusy) { event.preventDefault(); setApplyCode(null); setApplyCurrent(null); }
+              }}>
+                <div className="modal-header"><h3 id="apply-title">{cv.applyTitle}</h3></div>
+                <div className="modal-body">
+                  <label className="apply-row">
+                    <span>{cv.applyFileLabel}</span>
+                    <input
+                      value={applyFile}
+                      onChange={(e) => { setApplyFile(e.target.value); setApplyCurrent(null); }}
+                      placeholder={cv.applyFilePh}
+                      spellCheck={false}
+                      disabled={applyBusy}
+                      list="apply-file-candidates"
+                    />
+                    <datalist id="apply-file-candidates">
+                      {applyCandidates.map((f) => <option key={f} value={f} />)}
+                    </datalist>
+                  </label>
+                  <div className="apply-row" role="radiogroup" aria-label={cv.applyModeLabel}>
+                    {(['append', 'overwrite'] as const).map((mode) => (
+                      <label key={mode} className="apply-mode">
+                        <input
+                          type="radio"
+                          name="apply-mode"
+                          checked={applyMode === mode}
+                          disabled={applyBusy}
+                          onChange={() => setApplyMode(mode)}
+                        />
+                        {mode === 'append' ? cv.applyModeAppend : cv.applyModeOverwrite}
+                      </label>
+                    ))}
+                    <button type="button" className="mini-btn" disabled={applyBusy || !applyFile.trim()} onClick={() => void loadApplyPreview()}>
+                      {cv.applyPreview}
+                    </button>
+                  </div>
+                  {preview && (
+                    <pre className="compare-pre apply-pre">
+                      {(preview.truncated ? [{ type: ' ', text: cv.compareTruncated } as const, ...preview.ops] : preview.ops).slice(0, 120).map((op, i) => (
+                        <span key={i} className={op.type === '+' ? 'hl-add' : op.type === '-' ? 'hl-del' : 'hl-ctx'}>
+                          {op.type === ' ' ? ' ' : op.type}{op.text}
+                          {'\n'}
+                        </span>
+                      ))}
+                    </pre>
+                  )}
+                </div>
+                <div className="modal-footer">
+                  <button type="button" className="btn" disabled={applyBusy} onClick={() => { setApplyCode(null); setApplyCurrent(null); }}>
+                    {strings.common.close}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={applyBusy || applyCurrent === null || !applyFile.trim()}
+                    onClick={() => void confirmApply()}
+                  >
+                    {cv.applyConfirm}
+                  </button>
+                </div>
+              </section>
+            </div>
+          );
+        })()}
 
         {run && (
           <div className="msg-row left">
             <div className="bubble-ai streaming">
               {streamText ? (
                 <div className="md">
-                  <React.Suspense fallback={<div className="md-pending">{linkifyFiles(streamText)}</div>}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{linkifyFiles(streamText)}</ReactMarkdown>
+                  <React.Suspense fallback={<div className="md-pending">{linkifyFiles(maskSecrets(streamText))}</div>}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{linkifyFiles(maskSecrets(streamText))}</ReactMarkdown>
                   </React.Suspense>
                 </div>
               ) : (
@@ -3272,18 +4095,41 @@ export default function ChatView(props: Props) {
             const el = scrollRef.current;
             if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
             followScrollRef.current = true;
+            stuckBaseRef.current = session.messages.length;
             setShowScrollBottom(false);
           }}
         >
-          <ChevronDownIcon size={15} /> {cv.scrollBottom}
+          <ChevronDownIcon size={15} /> {stuckCount > 0 ? formatStr(cv.newOutputs, { n: stuckCount }) : cv.scrollBottom}
         </button>
       )}
 
       {approvals.length > 0 && (
         <ApprovalPanel
           approvals={approvals}
+          cwd={session.cwd || folder}
           onDecide={(key, choiceId, feedback) => {
             api().mspDecide(key, choiceId, feedback).catch(() => {});
+            setApprovals((prev) => prev.filter((x) => x.key !== key));
+          }}
+          onRunEdited={async (key, denyChoiceId, runCwd, command): Promise<EditedRunResult> => {
+            // The CLI host owns the proposed tool call, so an edited command
+            // can never rewrite it in place: deny the proposal, then run the
+            // edited command app-side like a custom verify command.
+            editedRunKeysRef.current.add(key);
+            try {
+              await api().mspDecide(key, denyChoiceId, undefined);
+            } catch { /* The turn continues denied-or-gone either way. */ }
+            if (!hasBridge()) return { ok: false, error: cv.editRunNeedApp };
+            try {
+              const r = await api().verifyExec(runCwd, command);
+              if (!r.ok) return { ok: false, error: r.error || '' };
+              return { ok: (r.code ?? 1) === 0, code: r.code ?? null, tail: (r.tail || '').slice(-4000) };
+            } catch (e) {
+              return { ok: false, error: e instanceof Error ? e.message : String(e) };
+            }
+          }}
+          onDismiss={(key) => {
+            editedRunKeysRef.current.delete(key);
             setApprovals((prev) => prev.filter((x) => x.key !== key));
           }}
         />
@@ -3296,7 +4142,7 @@ export default function ChatView(props: Props) {
             <span className="interrupt-bar-actions">
               <button type="button" className="btn btn-primary interrupt-go" onClick={interrupt} title={cv.interruptTitle}>{cv.interruptBtn}</button>
               {run && run.engine === 'msp' && (
-                <button type="button" className="btn interrupt-steer" onClick={() => void steerTurn()} title={cv.steerTitle}>{cv.steerBtn}</button>
+                <button type="button" className="btn interrupt-steer" onClick={() => void steerTurn()} title={cv.steerTitle} disabled={isSteerSubmitting(steerPhase)}>{cv.steerBtn}</button>
               )}
               <button type="button" className="btn interrupt-cancel" onClick={cancelInterruptDraft} title={cv.interruptCancelTitle}>{strings.common.cancel}</button>
             </span>
@@ -3389,6 +4235,44 @@ export default function ChatView(props: Props) {
             </button>
           </div>
         )}
+        {selectionBundle.length > 0 && (
+          <div className="selection-bundle" role="group" aria-label={formatStr(cv.bundleTitle, { count: selectionBundle.length })}>
+            <div className="selection-bundle-head">
+              <PlusIcon size={13} />
+              <span className="selection-bundle-title">{formatStr(cv.bundleTitle, { count: selectionBundle.length })}</span>
+              <button type="button" className="mini-btn selection-bundle-send" onClick={sendSelectionBundle}>{cv.bundleSend}</button>
+              <button
+                type="button"
+                className="icon-btn selection-bundle-clear"
+                title={cv.bundleClear}
+                aria-label={cv.bundleClear}
+                onClick={() => { setSelectionBundle([]); setNotice(cv.bundleCleared); }}
+              >
+                <XIcon size={12} />
+              </button>
+            </div>
+            <ul className="selection-bundle-list">
+              {selectionBundle.map((entry, i) => {
+                const label = bundleEntryLabel(entry);
+                return (
+                  <li key={`${entry.relativePath}:${entry.startLine}-${entry.endLine}:${i}`} className="selection-bundle-row">
+                    <span className="selection-bundle-file" title={label}>{label}</span>
+                    <button
+                      type="button"
+                      className="icon-btn selection-bundle-remove"
+                      title={formatStr(cv.bundleRemoveLabel, { label })}
+                      aria-label={formatStr(cv.bundleRemoveLabel, { label })}
+                      onClick={() => { setSelectionBundle((current) => removeSelectionFromBundle(current, i)); setNotice(cv.bundleRemoved); }}
+                    >
+                      <XIcon size={11} />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+        {statusLineText ? <div className="run-status-line" role="status">{statusLineText}</div> : null}
         {memoryOpen && (
           <MemoryDialog folder={folder} onClose={() => setMemoryOpen(false)} />
         )}
@@ -3552,6 +4436,13 @@ export default function ChatView(props: Props) {
               <span className="plan-bar-text">{cv.planDoneNotice}</span>
               <button type="button" className="btn plan-execute" onClick={executePlan}>{cv.planExecute}</button>
               <button type="button" className="btn plan-dismiss" onClick={() => setPendingPlan(null)}>{cv.planDismiss}</button>
+            </div>
+          )}
+          {rerunFrom && !run && (
+            <div className="plan-bar rerun-bar" role="group" aria-label={cv.rerunBranchTitle}>
+              <ForkIcon size={14} />
+              <span className="plan-bar-text">{cv.rerunBranchHint}</span>
+              <button type="button" className="btn plan-dismiss" onClick={() => setRerunFrom(null)}>{cv.rerunBranchCancel}</button>
             </div>
           )}
           <textarea
@@ -3847,6 +4738,7 @@ export default function ChatView(props: Props) {
                   role="listbox"
                   aria-label={cv.approvalPickerTitle}
                 >
+                  <div className="modal-note">{cv.scopeGlobal}</div>
                   {APPROVAL_MODE_VALUES.map((v) => {
                     const selected = sanitizeApprovalMode(settings.approvalMode) === v;
                     return (
@@ -3938,6 +4830,7 @@ export default function ChatView(props: Props) {
                       <span>{cv.modelPickerScopeSession}</span>
                     </button>
                   </div>
+                  <div className="modal-note">{sessionOnlyModel ? cv.scopeSession : cv.scopeGlobal}</div>
 
                   <div className="model-menu-list" role="listbox">
                     <div
@@ -4034,6 +4927,7 @@ export default function ChatView(props: Props) {
                     <span className="model-menu-title">{cv.reasoningTitle}</span>
                     <span className="model-menu-tag">{sessionOnlyModel ? cv.tuneSession : cv.reasoningGlobal}</span>
                   </div>
+                  <div className="modal-note">{sessionOnlyModel ? cv.scopeSession : cv.scopeGlobal}</div>
                   <div className="model-menu-list" role="listbox" aria-label={cv.reasoningTitle}>
                     <button
                       type="button"
@@ -4083,6 +4977,87 @@ export default function ChatView(props: Props) {
                 {memoryCount}
               </span>
             )}
+            <div className="composer-action-anchor" ref={outboxRef}>
+              <button
+                type="button"
+                className={`icon-btn composer-plus-btn ${outboxOpen ? 'open' : ''}`}
+                onClick={() => setOutboxOpen((v) => !v)}
+                title={cv.ctxTitle}
+                aria-label={cv.ctxTitle}
+                aria-haspopup="dialog"
+                aria-expanded={outboxOpen}
+                disabled={!!run}
+              >
+                <ArchiveIcon size={15} />
+              </button>
+              {outboxOpen && (
+                <div className="composer-action-menu" role="dialog" aria-label={cv.ctxTitle}>
+                  <div className="composer-action-heading">
+                    <span>{cv.ctxTitle}</span>
+                  </div>
+                  {attach.map((a) => {
+                    const foreign = !a.image && isOutsideDir(a.path, session.cwd || folder);
+                    return (
+                      <div key={a.path} className={`outbox-file-row${foreign ? ' is-foreign' : ''}`}>
+                        <span className="outbox-file-name" title={a.path}>{a.name}</span>
+                        {foreign && (
+                          <span className="outbox-foreign-tag" title={formatStr(cv.attachForeignTitle, { path: a.path })}>
+                            {cv.attachForeign}
+                          </span>
+                        )}
+                        <button type="button" className="icon-btn" onClick={() => removeAttach(a.path)} title={cv.attachRemove} aria-label={formatStr(cv.attachRemoveLabel, { name: a.name })}>
+                          <XIcon size={12} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {sendContextRows({
+                    memoryCount,
+                    goalTitle: (activeLinkedGoal(props.goalStore, session.id)?.title ?? ''),
+                    excludeMemory,
+                    excludeGoal,
+                  }).map((row) => row.id === 'memory' ? (
+                    <button
+                      key="ctx-memory"
+                      type="button"
+                      className="composer-action-row"
+                      role="menuitem"
+                      onClick={() => setExcludeMemory((v) => !v)}
+                    >
+                      <span className="action-row-icon"><PinIcon size={15} /></span>
+                      <span className="action-row-main">
+                        <span className="action-row-title">{strings.files.memoryTitle} ({row.count})</span>
+                        <span className="action-row-desc">{strings.files.memoryHint}</span>
+                      </span>
+                      <span className={`action-row-badge ${row.included ? 'on' : ''}`}>{row.included ? cv.ctxInclude : cv.ctxExclude}</span>
+                    </button>
+                  ) : (
+                    <button
+                      key="ctx-goal"
+                      type="button"
+                      className="composer-action-row"
+                      role="menuitem"
+                      onClick={() => setExcludeGoal((v) => !v)}
+                    >
+                      <span className="action-row-icon"><TargetIcon size={15} /></span>
+                      <span className="action-row-main">
+                        <span className="action-row-title">{row.title}</span>
+                        <span className="action-row-desc">{cv.goalAttached}</span>
+                      </span>
+                      <span className={`action-row-badge ${row.included ? 'on' : ''}`}>{row.included ? cv.ctxInclude : cv.ctxExclude}</span>
+                    </button>
+                  ))}
+                  {attach.length === 0 && sendContextRows({
+                    memoryCount,
+                    goalTitle: (activeLinkedGoal(props.goalStore, session.id)?.title ?? ''),
+                    excludeMemory,
+                    excludeGoal,
+                  }).length === 0 && (
+                    <div className="empty-note">{cv.ctxEmpty}</div>
+                  )}
+                </div>
+              )}
+            </div>
             {run ? (
               <>
                 <button

@@ -24,7 +24,9 @@ const { needsShell, quoteArg, spawnCli } = require('./spawn-cli');
 const { appendMainLog: appendLogFile } = require('./main-log');
 const { BrowserEngine, resolveAddressInput } = require('./browser');
 const { TerminalHost } = require('./terminal');
-const { createCheckpoint, restoreCheckpoint } = require('./checkpoint');
+const { createCheckpoint, previewCheckpoint, restoreCheckpoint } = require('./checkpoint');
+const { buildHunkPatch, hunkStats, parseDiffHunks } = require('./git-hunks');
+const { isValidWtBranch, parseWorktreeList } = require('./git-worktree');
 const { buildCommitPrompt, cleanCommitMessage } = require('./commit-message');
 const { runHook, runHooks } = require('./hooks');
 const { searchFiles, searchInFiles } = require('./workspace-search');
@@ -34,7 +36,7 @@ const { isSafeBranchName, isSafeCloneSource, isSafeRepoRelativePath, redactRemot
 const { createProjectSessionCache } = require('./codex-session-cache');
 const { createProjectPathMatcher } = require('./project-path');
 const { projectClaudeSessions, readClaudeContext, claudeQueueArgs } = require('./claude-sessions');
-const { createPr, findOpenPr, getCheckRuns, getDefaultBranch, getRepoContext, listPrComments, updatePr } = require('./github');
+const { createPr, findOpenPr, getCheckRuns, getDefaultBranch, getFailedJobLogs, getRepoContext, listPrComments, updatePr } = require('./github');
 const { showWindowsToastAsync } = require('../scripts/windows-toast');
 
 let win = null;
@@ -108,10 +110,15 @@ const DEFAULT_SETTINGS = {
   browserHome: '',
   hooks: [],
   backgroundNotifications: true,
+  calmFocus: false,
   lang: 'ko',
+  uiFont: 'default',
 };
 function sanitizeTheme(value) {
   return value === 'light' ? 'light' : 'dark';
+}
+function sanitizeUiFont(value) {
+  return value === 'small' || value === 'large' ? value : 'default';
 }
 function sanitizeLang(value) {
   return value === 'en' ? 'en' : 'ko';
@@ -124,6 +131,7 @@ function loadSettings() {
     const merged = { ...DEFAULT_SETTINGS, ...JSON.parse(raw.replace(/^\uFEFF/, '')) };
     merged.theme = sanitizeTheme(merged.theme);
     merged.lang = sanitizeLang(merged.lang);
+    merged.uiFont = sanitizeUiFont(merged.uiFont);
     return merged;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -364,12 +372,109 @@ app.on('window-all-closed', () => {
 });
 
 let quitting = false;
+let quitStatusResolver = null;
+ipcMain.handle('mudex:quit-status', (_e, status) => {
+  if (quitStatusResolver) {
+    const resolve = quitStatusResolver;
+    quitStatusResolver = null;
+    resolve(status && typeof status === 'object' ? status : null);
+  }
+  return { ok: true };
+});
+function queryQuitStatus(target) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      quitStatusResolver = null;
+      resolve(value);
+    };
+    quitStatusResolver = finish;
+    try {
+      target.webContents.send('mudex:query-quit-status');
+    } catch {
+      finish(null);
+      return;
+    }
+    const timer = setTimeout(() => finish(null), 2500);
+    if (timer && timer.unref) timer.unref();
+  });
+}
+const QUIT_STRINGS = {
+  ko: {
+    title: 'Musician 종료',
+    message: '실행 중인 작업 또는 저장 안 된 파일이 있습니다. 종료할까요?',
+    running: '실행 중',
+    terminals: '실행 중인 터미널',
+    dirty: '저장 안 됨',
+    quit: '종료',
+    keep: '계속 실행',
+  },
+  en: {
+    title: 'Quit Musician',
+    message: 'There are running tasks or unsaved files. Quit anyway?',
+    running: 'Running',
+    terminals: 'Live terminals',
+    dirty: 'Unsaved',
+    quit: 'Quit',
+    keep: 'Keep running',
+  },
+};
+function shutdownAndQuit() {
+  workspaceWatcher.closeAll();
+  Promise.all([msp.shutdown().catch(() => {}), browser.shutdown().catch(() => {}), termHost.shutdown().catch(() => {})]).finally(() => app.quit());
+}
 app.on('before-quit', (e) => {
   if (quitting) return;
   e.preventDefault();
   quitting = true;
-  workspaceWatcher.closeAll();
-  Promise.all([msp.shutdown().catch(() => {}), browser.shutdown().catch(() => {}), termHost.shutdown().catch(() => {})]).finally(() => app.quit());
+  (async () => {
+    let status = null;
+    if (win && !win.isDestroyed()) {
+      try {
+        status = await queryQuitStatus(win);
+      } catch {
+        status = null;
+      }
+    }
+    const running = (status && Array.isArray(status.running) ? status.running.map(String).filter(Boolean) : []).slice(0, 8);
+    const dirty = (status && Array.isArray(status.dirty) ? status.dirty.map(String).filter(Boolean) : []).slice(0, 8);
+    const terminals = status && Number.isFinite(Number(status.terminals)) ? Number(status.terminals) : 0;
+    let lang = 'ko';
+    try {
+      lang = loadSettings().lang === 'en' ? 'en' : 'ko';
+    } catch {
+      /* default language */
+    }
+    if ((running.length > 0 || dirty.length > 0 || terminals > 0) && win && !win.isDestroyed()) {
+      const t = QUIT_STRINGS[lang];
+      const lines = [];
+      if (running.length > 0) lines.push(`${t.running}: ${running.join(', ')}`);
+      if (terminals > 0) lines.push(`${t.terminals}: ${terminals}`);
+      if (dirty.length > 0) lines.push(`${t.dirty}: ${dirty.join(', ')}`);
+      const res = await dialog.showMessageBox(win, {
+        type: 'question',
+        buttons: [t.quit, t.keep],
+        defaultId: 1,
+        cancelId: 1,
+        title: t.title,
+        message: t.message,
+        detail: lines.join('\n'),
+      });
+      if (res.response !== 0) {
+        quitting = false;
+        return;
+      }
+    }
+    shutdownAndQuit();
+  })().catch(() => {
+    try {
+      app.quit();
+    } catch {
+      /* last breath */
+    }
+  });
 });
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -598,6 +703,17 @@ ipcMain.handle('mudex:open-file-default', async (_e, { path: filePath }) => {
     return { ok: false, error: String((err && err.message) || err) };
   }
 });
+ipcMain.handle('mudex:open-log', async () => {
+  try {
+    const filePath = path.join(app.getPath('userData'), 'musician.log');
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return { ok: false, error: 'NO_LOG_FILE' };
+    const error = await shell.openPath(filePath);
+    return error ? { ok: false, error } : { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
 ipcMain.handle('mudex:open-external-link', async (_e, { url: rawUrl } = {}) => {
   const url = normalizeExternalLink(rawUrl);
   if (!url) return { ok: false, error: 'UNSUPPORTED_LINK' };
@@ -669,8 +785,7 @@ ipcMain.handle('mudex:verify-scripts', async (_e, { cwd }) => {
     return { ok: false, error: String((err && err.message) || err) };
   }
 });
-ipcMain.handle('mudex:verify-run', async (_e, { cwd, script }) => {
-  if (!cwd || !VERIFY_SCRIPTS.includes(script)) return { ok: false, error: 'BAD_ARGS' };
+function collectChildOutput(child, timeoutMs) {
   return new Promise((resolve) => {
     let out = '';
     let done = false;
@@ -680,17 +795,6 @@ ipcMain.handle('mudex:verify-run', async (_e, { cwd, script }) => {
       clearTimeout(timer);
       resolve({ ok: true, code, tail: out.slice(-8000), ...(extra || {}) });
     };
-    let child;
-    try {
-      child = spawnCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', script, '--silent'], {
-        cwd,
-        windowsHide: true,
-        env: process.env,
-      });
-    } catch (err) {
-      resolve({ ok: false, error: String((err && err.message) || err) });
-      return;
-    }
     const timer = setTimeout(() => {
       try {
         killTree(child);
@@ -698,7 +802,7 @@ ipcMain.handle('mudex:verify-run', async (_e, { cwd, script }) => {
         /* ignore */
       }
       finish(null, { error: 'TIMEOUT' });
-    }, 10 * 60 * 1000);
+    }, timeoutMs);
     if (timer.unref) timer.unref();
     child.stdout.on('data', (d) => {
       out += d.toString();
@@ -716,6 +820,133 @@ ipcMain.handle('mudex:verify-run', async (_e, { cwd, script }) => {
     });
     child.on('close', (code) => finish(code, null));
   });
+}
+ipcMain.handle('mudex:verify-run', async (_e, { cwd, script }) => {
+  if (!cwd || !VERIFY_SCRIPTS.includes(script)) return { ok: false, error: 'BAD_ARGS' };
+  let child;
+  try {
+    child = spawnCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', script, '--silent'], {
+      cwd,
+      windowsHide: true,
+      env: process.env,
+    });
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+  return collectChildOutput(child, 10 * 60 * 1000);
+});
+const VERIFY_EXEC_MAX = 500;
+ipcMain.handle('mudex:verify-exec', async (_e, { cwd, command }) => {
+  const cmd = String(command || '').trim();
+  if (!cwd || !cmd || cmd.length > VERIFY_EXEC_MAX) return { ok: false, error: 'BAD_ARGS' };
+  let child;
+  try {
+    // Route through spawnCli like verify-run: bare spawn of a shell path
+    // must still pass the .cmd/EINVAL guardrail the suite enforces.
+    child = process.platform === 'win32'
+      ? spawnCli('cmd.exe', ['/d', '/s', '/c', cmd], { cwd, windowsHide: true, env: process.env })
+      : spawnCli('/bin/sh', ['-c', cmd], { cwd, env: process.env });
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+  return collectChildOutput(child, 10 * 60 * 1000);
+});
+function isSafeGitRel(file) {
+  return typeof file === 'string' && !!file && !file.includes('..') && !path.isAbsolute(file);
+}
+async function applyHunkPatches(cwd, file, indices, gitArgs) {
+  const diff = await runGit(cwd, ['diff', '--no-color', '-U3', '--', file]);
+  if (!diff.ok) return { ok: false, error: 'GIT_FAILED' };
+  const entry = parseDiffHunks(String(diff.stdout || '')).find((e) => e.file === file);
+  if (!entry) return { ok: false, error: 'NO_DIFF' };
+  const wanted = [...new Set(indices)].filter((n) => Number.isInteger(n) && n >= 0 && n < entry.hunks.length).sort((a, b) => b - a);
+  if (wanted.length === 0) return { ok: false, error: 'BAD_ARGS' };
+  const results = [];
+  for (const idx of wanted) {
+    const patch = buildHunkPatch(entry.file, entry.header, entry.hunks[idx]);
+    if (!patch || patch.length > 512 * 1024) {
+      results.push({ index: idx, ok: false, error: 'BAD_HUNK' });
+      continue;
+    }
+    const tmp = path.join(app.getPath('temp'), `mudex-hunk-${process.pid}-${Date.now()}-${idx}.patch`);
+    try {
+      fs.writeFileSync(tmp, patch, 'utf8');
+      const r = await runGit(cwd, [...gitArgs, tmp]);
+      results.push({ index: idx, ok: !!r.ok, error: r.ok ? undefined : String(r.stderr || r.error || 'apply failed') });
+    } catch (err) {
+      results.push({ index: idx, ok: false, error: String((err && err.message) || err) });
+    } finally {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!results[results.length - 1].ok) break;
+  }
+  return { ok: true, results };
+}
+ipcMain.handle('mudex:git-hunks', async (_e, { cwd, file }) => {
+  if (!cwd || !isSafeGitRel(file)) return { ok: false, error: 'BAD_ARGS' };
+  const diff = await runGit(cwd, ['diff', '--no-color', '-U3', '--', file]);
+  if (!diff.ok) return { ok: false, error: 'GIT_FAILED' };
+  const entry = parseDiffHunks(String(diff.stdout || '')).find((e) => e.file === file);
+  if (!entry) return { ok: true, hunks: [], staged: false };
+  const stagedOut = await runGit(cwd, ['diff', '--cached', '--name-only', '--', file]);
+  const staged = !!stagedOut.ok && String(stagedOut.stdout || '').split('\n').map((s) => s.trim()).includes(file);
+  return {
+    ok: true,
+    staged,
+    hunks: entry.hunks.map((h, i) => ({ index: i, head: h.head, lines: h.lines.slice(0, 200), truncated: h.lines.length > 200, ...hunkStats(h) })),
+  };
+});
+ipcMain.handle('mudex:git-discard-hunks', async (_e, { cwd, file, hunks }) => {
+  if (!cwd || !isSafeGitRel(file) || !Array.isArray(hunks)) return { ok: false, error: 'BAD_ARGS' };
+  return applyHunkPatches(cwd, file, hunks, ['apply', '--reverse', '--unidiff-zero', '--whitespace=nowarn']);
+});
+function normalizeWtPath(p) {
+  try {
+    const r = path.resolve(String(p || ''));
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  } catch {
+    return '';
+  }
+}
+ipcMain.handle('mudex:wt-list', async (_e, { cwd }) => {
+  if (!cwd) return { ok: false, error: 'BAD_ARGS' };
+  const r = await runGit(cwd, ['worktree', 'list', '--porcelain']);
+  if (!r.ok) return { ok: false, error: String(r.stderr || r.error || 'GIT_FAILED') };
+  return { ok: true, worktrees: parseWorktreeList(String(r.stdout || '')) };
+});
+ipcMain.handle('mudex:wt-add', async (_e, { cwd, wtPath, branch }) => {
+  if (!cwd || typeof wtPath !== 'string' || !wtPath.trim()) return { ok: false, error: 'BAD_ARGS' };
+  if (!isValidWtBranch(branch)) return { ok: false, error: 'BAD_BRANCH' };
+  const abs = path.isAbsolute(wtPath) ? path.normalize(wtPath) : path.resolve(cwd, wtPath);
+  if (abs.length > 1000) return { ok: false, error: 'ARG_TOO_LONG' };
+  try {
+    fs.statSync(abs);
+    return { ok: false, error: 'TARGET_EXISTS' };
+  } catch { /* a missing target is the expected case */ }
+  const cleanBranch = String(branch || '').trim();
+  const args = cleanBranch ? ['worktree', 'add', abs, '-b', cleanBranch] : ['worktree', 'add', abs];
+  const r = await runGit(cwd, args, 120000);
+  if (!r.ok) return { ok: false, error: String(r.stderr || r.error || 'GIT_FAILED').slice(0, 300) };
+  return { ok: true, path: abs };
+});
+ipcMain.handle('mudex:wt-remove', async (_e, { cwd, wtPath, force }) => {
+  if (!cwd || typeof wtPath !== 'string' || !wtPath.trim()) return { ok: false, error: 'BAD_ARGS' };
+  const list = await runGit(cwd, ['worktree', 'list', '--porcelain']);
+  if (!list.ok) return { ok: false, error: 'GIT_FAILED' };
+  const entries = parseWorktreeList(String(list.stdout || ''));
+  if (entries.length === 0) return { ok: false, error: 'NO_WORKTREES' };
+  const want = normalizeWtPath(path.isAbsolute(wtPath) ? wtPath : path.resolve(cwd, wtPath));
+  const hit = entries.findIndex((e) => normalizeWtPath(e.path) === want);
+  if (hit < 0) return { ok: false, error: 'NOT_A_WORKTREE' };
+  if (hit === 0) return { ok: false, error: 'IS_MAIN_WORKTREE' };
+  const args = force ? ['worktree', 'remove', '--force', entries[hit].path] : ['worktree', 'remove', entries[hit].path];
+  const r = await runGit(cwd, args, 120000);
+  if (!r.ok) return { ok: false, error: String(r.stderr || r.error || 'GIT_FAILED').slice(0, 300) };
+  return { ok: true };
 });
 ipcMain.handle('mudex:revert-files', async (_e, { cwd, files }) => {
   if (!cwd || !Array.isArray(files)) return { ok: false, error: 'BAD_ARGS' };
@@ -774,6 +1005,9 @@ ipcMain.handle('mudex:checkpoint-create', async (_e, { cwd, sessionId }) => {
 });
 ipcMain.handle('mudex:checkpoint-restore', async (_e, { cwd, sessionId, id }) => {
   return restoreCheckpoint({ userData: app.getPath('userData'), cwd, sessionId, id, runGit });
+});
+ipcMain.handle('mudex:checkpoint-preview', async (_e, { cwd, sessionId, id }) => {
+  return previewCheckpoint({ userData: app.getPath('userData'), cwd, sessionId, id, runGit });
 });
 
 ipcMain.handle('mudex:list-dir', (_e, { path: dirPath }) => {
@@ -1597,6 +1831,13 @@ ipcMain.handle('mudex:gh-ci-status', async (_e, { cwd }) => {
   if (!ctx.sha) return { ok: false, error: 'NO_SHA' };
   return getCheckRuns({ fetchFn: (...args) => fetch(...args), token }, ctx);
 });
+ipcMain.handle('mudex:gh-ci-logs', async (_e, { cwd }) => {
+  const c = await ghContext(cwd);
+  if (!c.ok) return c;
+  const { ctx, token } = c;
+  if (!ctx.sha) return { ok: false, error: 'NO_SHA' };
+  return getFailedJobLogs({ fetchFn: (...args) => fetch(...args), token }, ctx);
+});
 
 ipcMain.handle('mudex:git-clone', async (_e, { url, target }) => {
   const source = String(url || '').trim();
@@ -2045,6 +2286,40 @@ ipcMain.handle('browser:tabs', async () => {
 ipcMain.handle('term:start', (_e, { tabId, shell, cwd, seq } = {}) => termHost.start({ tabId, shell, cwd, seq }));
 ipcMain.handle('term:input', (_e, { tabId, text } = {}) => termHost.input({ tabId, text }));
 ipcMain.handle('term:kill', (_e, { tabId } = {}) => termHost.kill({ tabId }));
+ipcMain.handle('term:list', () => ({ ok: true, procs: termHost.list() }));
+const { gatherDiagnose, summarizeDiagnose } = require('./diagnose');
+ipcMain.handle('mudex:diagnose', async (_e, { cwd }) => {
+  try {
+    const settings = loadSettings();
+    const root = app.isPackaged ? process.resourcesPath : app.getAppPath();
+    const facts = await gatherDiagnose({
+      spawnFn: (file, args, opts) => spawnCli(file, args, opts),
+      resolveCli,
+      settings,
+      root,
+      cwd: typeof cwd === 'string' ? cwd : '',
+      isFile: (p) => {
+        try {
+          return fs.statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      },
+      readPackageScripts: async (dir) => {
+        try {
+          const raw = fs.readFileSync(path.join(dir, 'package.json'), 'utf8');
+          const scripts = JSON.parse(raw).scripts || {};
+          return Object.keys(scripts).filter((k) => typeof scripts[k] === 'string').slice(0, 20);
+        } catch {
+          return [];
+        }
+      },
+    });
+    return { ok: true, items: summarizeDiagnose(facts) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
 function browserMcpEntry() {
   const root = app.isPackaged ? process.resourcesPath : app.getAppPath();
   return musicianBrowserEntry({

@@ -22,7 +22,8 @@ function isValidMemory(value) {
     value.cwd.length > 0 &&
     typeof value.text === 'string' &&
     Number.isFinite(value.createdAt) &&
-    Number.isFinite(value.updatedAt)
+    Number.isFinite(value.updatedAt) &&
+    (value.disabled === undefined || typeof value.disabled === 'boolean')
   );
 }
 
@@ -33,7 +34,11 @@ export function normalizeProjectMemories(value, limit = MAX_MEMORIES) {
     if (!isValidMemory(item)) continue;
     const text = cleanText(item.text);
     if (!text) continue;
-    out.push({ id: item.id, cwd: item.cwd, text, createdAt: item.createdAt, updatedAt: item.updatedAt });
+    const entry = { id: item.id, cwd: item.cwd, text, createdAt: item.createdAt, updatedAt: item.updatedAt };
+    // The disabled flag is opt-in: only stored when true so older shelves
+    // keep their exact shape.
+    if (item.disabled === true) entry.disabled = true;
+    out.push(entry);
     if (out.length >= limit) break;
   }
   return out;
@@ -86,10 +91,35 @@ export function deleteProjectMemory(memories, id) {
   return normalizeProjectMemories(memories).filter((m) => m.id !== id);
 }
 
+export function updateProjectMemory(memories, id, text, now = Date.now()) {
+  const clean = cleanText(text);
+  if (!clean) return normalizeProjectMemories(memories);
+  const stamp = Number.isFinite(now) ? now : Date.now();
+  return normalizeProjectMemories(
+    normalizeProjectMemories(memories).map((m) =>
+      m.id === id ? { ...m, text: clean, updatedAt: stamp } : m,
+    ),
+  );
+}
+
+export function setProjectMemoryEnabled(memories, id, enabled) {
+  return normalizeProjectMemories(
+    normalizeProjectMemories(memories).map((m) => {
+      if (m.id !== id) return m;
+      if (enabled) {
+        const { disabled, ...rest } = m;
+        return rest;
+      }
+      return { ...m, disabled: true };
+    }),
+  );
+}
+
 // Wire block: newest first, hard-capped so a large memory shelf cannot
-// flood the context. Returns '' when there is nothing to inject.
+// flood the context. Temporarily disabled notes stay on the shelf but
+// never ride along. Returns '' when there is nothing to inject.
 export function formatMemoryContext(memories, cwd) {
-  const mine = listProjectMemories(memories, cwd);
+  const mine = listProjectMemories(memories, cwd).filter((m) => m.disabled !== true);
   if (mine.length === 0) return '';
   const lines = [];
   let used = 0;

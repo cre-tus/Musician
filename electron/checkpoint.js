@@ -237,6 +237,58 @@ function loadMeta(userData, sessionId, id) {
   return { ok: true, meta, dir };
 }
 
+const PREVIEW_LIST_CAP = 50;
+
+// Read-only restore preview: tracked files the checkpoint would overwrite,
+// saved untracked files it would write back, and new files it would delete.
+// Mirrors restoreCheckpoint without writing anything.
+async function previewCheckpoint({ userData, cwd, sessionId, id, runGit }) {
+  try {
+    if (!cwd || !sessionId || !isSafeCheckpointId(id) || typeof runGit !== 'function') {
+      return { ok: false, error: 'BAD_ARGS' };
+    }
+    const loaded = loadMeta(userData, sessionId, id);
+    if (!loaded.ok) return loaded;
+    const { meta } = loaded;
+    const root = path.resolve(String(cwd));
+    try {
+      if (!fs.statSync(root).isDirectory()) return { ok: false, error: 'NOT_A_DIRECTORY' };
+    } catch {
+      return { ok: false, error: 'NOT_A_DIRECTORY' };
+    }
+    const cap = (list) => ({ files: list.slice(0, PREVIEW_LIST_CAP), total: list.length });
+    if (meta.mode === 'git') {
+      const diffRaw = meta.restoreHash
+        ? await gitOut(runGit, root, ['diff', '--name-only', String(meta.restoreHash)])
+        : null;
+      const overwrite = diffRaw === null && meta.restoreHash ? null : String(diffRaw || '')
+        .split('\n').map((s) => s.trim()).filter((s) => s && isSafeRelative(s)).sort();
+      const restore = (Array.isArray(meta.untrackedCopies) ? meta.untrackedCopies : [])
+        .filter(isSafeRelative).sort();
+      const beforeSet = new Set(Array.isArray(meta.before) ? meta.before : []);
+      const statusRaw = await gitOut(runGit, root, ['status', '--porcelain=v1', '-uall']);
+      const nowUntracked = [];
+      for (const line of String(statusRaw || '').split('\n')) {
+        const e = parsePorcelainLine(line);
+        if (e && e.x === '?' && e.y === '?' && isSafeRelative(e.path)) nowUntracked.push(e.path);
+      }
+      const remove = statusRaw === null ? null : diffNewFiles(beforeSet, nowUntracked).sort();
+      if (overwrite === null || remove === null) return { ok: false, error: 'GIT_FAILED' };
+      return { ok: true, mode: 'git', overwrite: cap(overwrite), restore: cap(restore), remove: cap(remove) };
+    }
+    if (meta.mode === 'copy') {
+      const want = new Set((Array.isArray(meta.before) ? meta.before : []).filter(isSafeRelative));
+      const budget = { files: MAX_COPY_FILES + 1, bytes: Number.MAX_SAFE_INTEGER };
+      const { files } = walkFiles(root, budget);
+      const remove = files.map((f) => f.rel).filter((rel) => !want.has(rel) && isSafeRelative(rel)).sort();
+      return { ok: true, mode: 'copy', overwrite: null, restore: cap([...want].sort()), remove: cap(remove) };
+    }
+    return { ok: false, error: 'BAD_MODE' };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
+
 async function restoreCheckpoint({ userData, cwd, sessionId, id, runGit }) {
   try {
     if (!cwd || !sessionId || !isSafeCheckpointId(id) || typeof runGit !== 'function') {
@@ -349,4 +401,5 @@ module.exports = {
   makeId,
   createCheckpoint,
   restoreCheckpoint,
+  previewCheckpoint,
 };

@@ -6,7 +6,7 @@ import { formatEditorSelectionPrompt } from '../lib/editor-selection-prompt.mjs'
 import { formatLineCommentPrompt } from '../lib/line-comment.mjs';
 import { adjustImageZoom, imageZoomPercent } from '../lib/image-zoom.mjs';
 import { scheduleAfterPaint } from '../lib/after-paint.mjs';
-import { CheckIcon, ChevronRightIcon, ClockIcon, CopyIcon, DiffIcon, ExternalLinkIcon, RefreshIcon, SaveIcon, SearchIcon, SendIcon, StarIcon } from './icons';
+import { CheckIcon, ChevronRightIcon, ClockIcon, CopyIcon, DiffIcon, ExternalLinkIcon, PlusIcon, RefreshIcon, SaveIcon, SearchIcon, SendIcon, StarIcon } from './icons';
 import remarkGfm from 'remark-gfm';
 import { useLang, useStrings } from '../lib/lang';
 import { formatStr } from '../lib/i18n.mjs';
@@ -141,6 +141,16 @@ export default function FileEditor(props: Props) {
       language: languageFromPath(file.path),
     }, lang);
     if (prompt) window.dispatchEvent(new CustomEvent('musician:composer-insert', { detail: { text: prompt } }));
+  };
+
+  const addSelectionToBundle = () => {
+    const selection = apiRef.current?.getSelection();
+    if (!selection) return;
+    window.dispatchEvent(new CustomEvent('musician:selection-bundle-add', { detail: {
+      ...selection,
+      relativePath: relativePathFromRoot(props.workspaceRoot, file.path),
+      language: languageFromPath(file.path),
+    } }));
   };
 
   const addLineCommentToPrompt = (ed: { getPosition?: () => { lineNumber: number } | null }) => {
@@ -339,6 +349,7 @@ export default function FileEditor(props: Props) {
           <CopyIcon size={11} />
         </button>
         {!file.preview && <button type="button" className="icon-btn editor-selection-prompt" title={s.editor.addSelectionTitle} aria-label={s.editor.addSelectionLabel} disabled={!hasSelection} onClick={addSelectionToPrompt}><SendIcon size={13} /></button>}
+        {!file.preview && <button type="button" className="icon-btn editor-selection-bundle" title={s.editor.addBundleTitle} aria-label={s.editor.addBundleLabel} disabled={!hasSelection} onClick={addSelectionToBundle}><PlusIcon size={13} /></button>}
         {!file.preview && <button type="button" className="icon-btn editor-search-selection" title={s.editor.searchSelection} aria-label={s.editor.searchSelection} disabled={!hasSelection} onClick={onSearchSelection}><SearchIcon size={13} /></button>}
         {!file.preview && <div className="editor-location-nav" role="group" aria-label={s.editor.locNavGroup} ref={navigationMenuRef}>
           <button type="button" className="icon-btn editor-location-nav-back" title={s.editor.locBackTitle} aria-label={s.editor.locBackLabel} aria-keyshortcuts="Alt+ArrowLeft" disabled={!props.canNavigateBack} onClick={props.onNavigateBack}><ChevronRightIcon size={13} /></button>
@@ -471,6 +482,14 @@ export default function FileEditor(props: Props) {
                   run: () => addSelectionToPrompt(),
                 });
                 ed.getModifiedEditor().addAction({
+                  id: 'musician.bundleSelection',
+                  label: s.editor.bundleSelectionCtx,
+                  contextMenuGroupId: 'navigation',
+                  contextMenuOrder: 1.65,
+                  precondition: 'editorHasSelection',
+                  run: () => addSelectionToBundle(),
+                });
+                ed.getModifiedEditor().addAction({
                   id: 'musician.commentLine',
                   label: s.editor.commentLine,
                   contextMenuGroupId: 'navigation',
@@ -510,6 +529,14 @@ export default function FileEditor(props: Props) {
                   contextMenuOrder: 1.6,
                   precondition: 'editorHasSelection',
                   run: () => addSelectionToPrompt(),
+                });
+                ed.addAction({
+                  id: 'musician.bundleSelection',
+                  label: s.editor.bundleSelectionCtx,
+                  contextMenuGroupId: 'navigation',
+                  contextMenuOrder: 1.65,
+                  precondition: 'editorHasSelection',
+                  run: () => addSelectionToBundle(),
                 });
                 ed.addAction({
                   id: 'musician.commentLine',

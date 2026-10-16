@@ -80,12 +80,11 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
 
   return (
     <section className="msp-user-input-card" aria-labelledby={`msp-user-input-title-${prompt.key}`}>
-      <div className="msp-user-input-heading">
-        <div>
-          <strong id={`msp-user-input-title-${prompt.key}`}>{formatStr(s.msp.confirmRequest, { tool: prompt.toolName })}</strong>
-          <span>{s.msp.answerRouted}</span>
-        </div>
+      <div className="msp-user-input-meta">
         <span className="tag tag-msp">MSP</span>
+        <span id={`msp-user-input-title-${prompt.key}`}>
+          {formatStr(s.msp.confirmRequest, { tool: prompt.toolName })} · {s.msp.answerRouted}
+        </span>
       </div>
       {submitted ? <div className="msp-user-input-submitted" role="status">{s.msp.submitted}</div> : (
         <form onSubmit={(event) => void submit(event)}>
@@ -102,7 +101,10 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
                 aria-invalid={errorQuestionId === question.id}
                 aria-describedby={errorQuestionId === question.id ? `msp-user-input-error-${prompt.key}` : undefined}
               >
-                <legend><span>{question.header || formatStr(s.msp.questionN, { n: index + 1 })}</span>{question.question}</legend>
+                <legend>
+                  <span className="msp-q-kicker">{question.header || formatStr(s.msp.questionN, { n: index + 1 })}</span>
+                  <span className="msp-q-title">{question.question}</span>
+                </legend>
                 <div className="msp-input-options">
                   {question.options.map((option) => {
                     const checked = chosen.includes(option.label);
@@ -135,11 +137,13 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
                   })}
                 </div>
                 <label className="msp-input-free-text">{s.msp.freeText}
-                  <input
-                    type="text"
+                  <textarea
+                    rows={3}
                     maxLength={500}
                     value={freeText[question.id] || ''}
                     disabled={busy}
+                    placeholder={s.msp.freeTextPh}
+                    aria-label={s.msp.freeText}
                     onChange={(event) => {
                       const value = event.target.value;
                       clearInputError(question.id);
@@ -155,7 +159,7 @@ export default function MspUserInputCard({ prompt, onAnswer, onCancel }: Props) 
           {error && <div id={`msp-user-input-error-${prompt.key}`} className="msp-input-error" role="alert">{error}</div>}
           <div className="msp-user-input-actions">
             <button className="btn" type="button" onClick={() => void skip()} disabled={busy}>{s.msp.skip}</button>
-            <button className="btn" type="submit" disabled={busy}>{busy ? s.msp.sending : s.msp.send}</button>
+            <button className="btn btn-primary" type="submit" disabled={busy}>{busy ? s.msp.sending : s.msp.send}</button>
           </div>
         </form>
       )}
